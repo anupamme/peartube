@@ -1,6 +1,6 @@
 [package]
 name = "peartube"
-version = "0.4.12"
+version = "0.4.13"
 edition = "2024"
 publish = false
 
@@ -19,8 +19,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The video player: peartube-media's engine, OxideAV codecs and the
 # platform video decoders. See [patch.crates-io] below.
-player = { git = "https://github.com/ayooooo123/peartube-media", rev = "5fb83462e8f1afbaa9850150f0402612b9c7e7e4" }
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "5fb83462e8f1afbaa9850150f0402612b9c7e7e4" }
+player = { git = "https://github.com/ayooooo123/peartube-media", rev = "a68ee3eb33ca70d99859d87eec04946436da0e63" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "a68ee3eb33ca70d99859d87eec04946436da0e63" }
 oxideav-core = "*"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -114,6 +114,10 @@ opt-level = 3
 # quick to rebuild.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Tao 0.34.8 with upstream Android lost-wake fix, without a Dioxus API upgrade.
+[patch.crates-io.tao]
+path = "third-party/tao"
 
 # BEGIN pin-oxideav
 [patch.crates-io]

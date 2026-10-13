@@ -119,6 +119,22 @@ header. Physical-device checks cover the affected episode in the actual app,
 plus native Player playback from local and HTTP sources. The 0.4.11 subtitle
 and read-ahead corrections remain included.
 
+Version 0.4.13 prevents sustained software-video lateness from leaving a frozen
+picture while audio and captions continue: playback holds the shared clock
+until video catches up, with bounded recovery. It retains the existing late
+frame cutoff rather than displaying increasingly stale pictures. Missing video
+decoders no longer stop otherwise playable audio. The temporary diagnostic
+counter row and per-frame profiling scaffolding are removed from the release.
+
+Android UI updates after background/resume use Tao 0.34.8 with the upstream
+[lost-wake correction](https://github.com/tauri-apps/tao/commit/beb8824915150aebd3938aa46895a9bbf930c212)
+backported in `mobile/third-party/tao`. The event loop drains queued user
+events after every Android poll, including lifecycle/input events that can
+consume a simultaneous wake. This prevents the elapsed-time display and
+play/pause icon from freezing while native playback continues. The pinned
+Dioxus API is unchanged; no refresh timer or WebView reconnect workaround is
+added. The source copy retains Tao's Apache-2.0 license and notices.
+
 Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10), `npm install` at the repo root, the Android SDK + NDK or Xcode, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+:
 
 ```sh
