@@ -135,6 +135,14 @@ play/pause icon from freezing while native playback continues. The pinned
 Dioxus API is unchanged; no refresh timer or WebView reconnect workaround is
 added. The source copy retains Tao's Apache-2.0 license and notices.
 
+Version 0.4.14 prepares Android software-video pixels before their presentation
+deadline and reduces VC-1 chroma interpolation overhead. Decoded pixels, audio
+sync, the 100 ms late-frame cutoff and bounded catch-up recovery are unchanged.
+Verification includes complete-frame playback comparisons, seek/pause/retry
+regressions, Android ownership tests and native Surface checks on a Pixel 5a.
+This is a prerelease for playback feedback: continuous movie smoothness has not
+yet been verified, and the changes do not promise zero dropped frames.
+
 Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10), `npm install` at the repo root, the Android SDK + NDK or Xcode, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+:
 
 ```sh
