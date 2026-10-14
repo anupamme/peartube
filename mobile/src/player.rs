@@ -68,7 +68,9 @@ pub fn VideoPlayer(url: String) -> Element {
         }));
         // Events come on change; the clock needs a steadier beat.
         let weak = Arc::downgrade(&player);
+        let host = Arc::downgrade(&host);
         spawn(async move {
+            let mut shape = None;
             loop {
                 let next = futures_util::future::select(rx.next(), Box::pin(tick())).await;
                 let event = match next {
@@ -77,7 +79,14 @@ pub fn VideoPlayer(url: String) -> Element {
                     futures_util::future::Either::Right(_) => None,
                 };
                 let Some(p) = Weak::upgrade(&weak) else { return };
-                state.set(p.state());
+                let st = p.state();
+                if st.video_size != shape {
+                    shape = st.video_size;
+                    if let (Some((width, height)), Some(host)) = (shape, host.upgrade()) {
+                        host.set_video_shape(width, height);
+                    }
+                }
+                state.set(st);
                 if matches!(event, Some(Event::Ended)) {
                     go_back();
                     return;
@@ -251,6 +260,15 @@ impl Host {
         self.apple.set_frame(rect);
         #[cfg(not(any(target_os = "android", target_os = "macos", target_os = "ios")))]
         let _ = rect;
+    }
+
+    /// The picture's size in pixels. Android fits the video view to its shape
+    /// inside the slot; Apple's display layer keeps the shape itself.
+    fn set_video_shape(&self, width: u32, height: u32) {
+        #[cfg(target_os = "android")]
+        let _ = crate::android_player::set_aspect(width, height);
+        #[cfg(not(target_os = "android"))]
+        let _ = (width, height);
     }
 }
 

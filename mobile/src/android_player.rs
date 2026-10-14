@@ -107,6 +107,15 @@ pub fn set_frame(rect: [f64; 4]) -> Result<(), String> {
     })
 }
 
+/// The picture's shape, so the video view keeps it inside the slot.
+pub fn set_aspect(width: u32, height: u32) -> Result<(), String> {
+    with_activity(|env, activity| {
+        let aspect = JValue::Float(width as f32 / height as f32);
+        env.call_method(activity, "setPlayerAspect", "(F)V", &[aspect])?;
+        Ok(())
+    })
+}
+
 /// Requests asynchronous Surface retirement. Posting this request is not a
 /// release receipt: Kotlin keeps the views until both native receipts arrive.
 pub fn request_close() -> Result<(), String> {

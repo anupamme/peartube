@@ -143,6 +143,14 @@ regressions, Android ownership tests and native Surface checks on a Pixel 5a.
 This is a prerelease for playback feedback: continuous movie smoothness has not
 yet been verified, and the changes do not promise zero dropped frames.
 
+Version 0.4.15 shows each video at its own shape. The video view used to fill
+the 16:9 player box, so a 2.4:1 movie came out 35% too tall and a 4:3 show a
+third too wide. It now keeps the picture's shape inside the box, with black
+bars, and captions stay on the picture. A seek whose data peers take longer
+than five seconds to send now waits for it instead of failing with "no
+presentable picture before the seek deadline": time spent waiting on the
+network no longer counts against the decoder's five seconds.
+
 Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10), `npm install` at the repo root, the Android SDK + NDK or Xcode, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+:
 
 ```sh
