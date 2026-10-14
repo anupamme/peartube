@@ -3,6 +3,7 @@
 -keep class dev.dioxus.main.MainActivity {
   public void openPlayer();
   public void setPlayerFrame(float, float, float, float);
+  public void setPlayerAspect(float);
   public void closePlayer();
   public void back();
   public void pickSoundFont(long, java.lang.String, long);

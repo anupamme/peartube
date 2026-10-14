@@ -56,7 +56,11 @@ Ids look like `imdb:tt0111161` for movies and `imdb:tt0944947:s01e02` for episod
 
 Replication serves any stored core a peer can name, so the Corestore holds only public data: the tracker and the blobs. Acquire jobs, with their source URLs and headers, live in `jobs.json` in the data directory and are never replicated.
 
-## Mobile app
+## Client app
+
+The Dioxus app in `mobile/` is PearTube's primary client on `main`, sharing
+its UI and Rust player across Android, iOS and macOS. The relay and its
+acquisitions page remain available separately.
 
 `mobile/` is a Dioxus app for Android, iOS and macOS that is a peer itself, not a client of one relay. It runs the same core as a relay (`src/index.js`) inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit): it joins a tracker, lists its entries grouped by title, and plays a tapped one from the worklet's own blob server on `127.0.0.1`, pulling blocks from whichever peers have them and seeding them afterwards. It only reads: it never publishes or acquires. Playback uses the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media), in a native view over the page under the title: platform video decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The mobile E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
 
@@ -142,6 +146,14 @@ Verification includes complete-frame playback comparisons, seek/pause/retry
 regressions, Android ownership tests and native Surface checks on a Pixel 5a.
 This is a prerelease for playback feedback: continuous movie smoothness has not
 yet been verified, and the changes do not promise zero dropped frames.
+
+Version 0.4.15 shows each video at its own shape. The video view used to fill
+the 16:9 player box, so a 2.4:1 movie came out 35% too tall and a 4:3 show a
+third too wide. It now keeps the picture's shape inside the box, with black
+bars, and captions stay on the picture. A seek whose data peers take longer
+than five seconds to send now waits for it instead of failing with "no
+presentable picture before the seek deadline": time spent waiting on the
+network no longer counts against the decoder's five seconds.
 
 Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10), `npm install` at the repo root, the Android SDK + NDK or Xcode, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+:
 

@@ -1,7 +1,9 @@
 // dx's MainActivity plus the surfaces the Rust player (peartube-media) draws
 // on: video, and subtitles above it. They sit over a slot in the page, in this
 // activity rather than one of its own: the worklet serving the stream suspends
-// whenever this activity pauses. The controls are in the page.
+// whenever this activity pauses. The controls are in the page. The video view
+// takes the picture's shape inside the slot (black bars around it); the
+// subtitle view covers the whole slot.
 package dev.dioxus.main
 
 import android.app.Activity
@@ -17,6 +19,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Gravity
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -43,6 +46,7 @@ class MainActivity : WryActivity() {
     private var destroying = false
     private val playerFrame = IntArray(4)
     private var hasPlayerFrame = false
+    private var playerAspect = 0f
     private var closeStarted = 0L
     private var closeReported = false
     private val retirementPoll = Runnable { advancePlayer() }
@@ -64,6 +68,7 @@ class MainActivity : WryActivity() {
     fun openPlayer() = runOnUiThread {
         if (destroying) return@runOnUiThread
         wantsPlayer = true
+        playerAspect = 0f
         beginPlayerRetirement()
         advancePlayer()
     }
@@ -81,6 +86,12 @@ class MainActivity : WryActivity() {
         playerFrame[3] = (height * scale).toInt()
         hasPlayerFrame = true
         if (player?.closing == false) player?.place(playerFrame)
+    }
+
+    /** From Rust, on any thread: the picture's width over its height. */
+    fun setPlayerAspect(aspect: Float) = runOnUiThread {
+        playerAspect = aspect
+        if (player?.closing == false) player?.fit(aspect)
     }
 
     /** Requests close without blocking the UI on native calls or owner joins. */
@@ -120,6 +131,7 @@ class MainActivity : WryActivity() {
         }
         if (player == null && wantsPlayer) {
             player = PlayerViews(this, playerHandler)
+            player?.fit(playerAspect)
             if (hasPlayerFrame) player?.place(playerFrame)
         }
     }
@@ -321,12 +333,17 @@ private class SoundFontImport(val id: Long, private val destination: String, pri
 
 private class PlayerViews(private val activity: MainActivity, handler: Handler) {
     private val root = FrameLayout(activity)
+    private val video = SurfaceView(activity)
     private val videoCallback = SurfaceCallback(activity, handler, 1)
     private val subtitleCallback = SurfaceCallback(activity, handler, 2)
+    // The slot's size, and the picture's width over its height (0: unknown,
+    // the video fills the slot).
+    private var slotWidth = 0
+    private var slotHeight = 0
+    private var aspect = 0f
     var closing = false
         private set
     init {
-        val video = SurfaceView(activity)
         video.holder.addCallback(videoCallback)
         val subtitles = SurfaceView(activity)
         subtitles.setZOrderMediaOverlay(true)
@@ -334,8 +351,8 @@ private class PlayerViews(private val activity: MainActivity, handler: Handler) 
         subtitles.holder.addCallback(subtitleCallback)
         val fill = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
         root.setBackgroundColor(Color.BLACK)
-        root.addView(video, fill)
-        root.addView(subtitles, FrameLayout.LayoutParams(fill))
+        root.addView(video, FrameLayout.LayoutParams(fill))
+        root.addView(subtitles, fill)
         root.keepScreenOn = true
         // Invisible views get no surface: none exists until the page reports
         // where its slot is.
@@ -349,7 +366,29 @@ private class PlayerViews(private val activity: MainActivity, handler: Handler) 
             leftMargin = rect[0]
             topMargin = rect[1]
         }
+        slotWidth = rect[2]
+        slotHeight = rect[3]
+        layoutVideo()
         root.visibility = View.VISIBLE
+    }
+
+    /** The picture's width over its height; 0 lets the video fill the slot. */
+    fun fit(aspect: Float) {
+        if (closing) return
+        this.aspect = aspect
+        layoutVideo()
+    }
+
+    // The largest rect of the picture's shape inside the slot, centred.
+    // Resizing the view keeps its surface; only surfaceChanged follows.
+    private fun layoutVideo() {
+        val (w, h) = slotWidth to slotHeight
+        video.layoutParams = when {
+            aspect <= 0f || w <= 0 || h <= 0 ->
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            w > h * aspect -> FrameLayout.LayoutParams(Math.round(h * aspect), h, Gravity.CENTER)
+            else -> FrameLayout.LayoutParams(w, Math.round(w / aspect), Gravity.CENTER)
+        }
     }
 
     fun beginRetirement() {
