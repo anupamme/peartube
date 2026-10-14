@@ -1,6 +1,6 @@
 [package]
 name = "peartube"
-version = "0.4.15"
+version = "0.4.16"
 edition = "2024"
 publish = false
 
@@ -19,8 +19,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The video player: peartube-media's engine, OxideAV codecs and the
 # platform video decoders. See [patch.crates-io] below.
-player = { git = "https://github.com/ayooooo123/peartube-media", rev = "34097c9340d79fbde4f7b6b86e1b21a505bf098b" }
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "34097c9340d79fbde4f7b6b86e1b21a505bf098b" }
+player = { git = "https://github.com/ayooooo123/peartube-media", rev = "a9b4e2452a92f8617cf89cdaac6a634e722c1977" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "a9b4e2452a92f8617cf89cdaac6a634e722c1977" }
 oxideav-core = "*"
 
 [target.'cfg(target_os = "android")'.dependencies]

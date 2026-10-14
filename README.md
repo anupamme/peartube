@@ -155,6 +155,14 @@ than five seconds to send now waits for it instead of failing with "no
 presentable picture before the seek deadline": time spent waiting on the
 network no longer counts against the decoder's five seconds.
 
+Version 0.4.16 plays every frame of videos stamped in decode order. Some MP4
+files with B-frames have no `ctts` box, so each frame carries its decode time
+instead of its display time. Those times run backwards once the decoder puts the
+frames in display order, and the player dropped about half of them as late: 12
+of 24 frames a second on a Pixel 5a. The player now works out each frame's
+display time from the H.264 or HEVC picture order and shows every frame. Files
+with normal timestamps play as before.
+
 Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10), `npm install` at the repo root, the Android SDK + NDK or Xcode, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+:
 
 ```sh
