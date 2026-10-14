@@ -26,7 +26,7 @@
     "start": "node bin/relay.js",
     "test": "node --test test/*.test.js",
     "test:mobile": "node --test test/mobile.e2e.js",
-    "app": "cargo run --manifest-path mobile/Cargo.toml --no-default-features --features desktop"
+    "app": "cd mobile && dx serve --desktop --release --no-default-features --features desktop"
   },
   "engines": {
     "node": ">=22"

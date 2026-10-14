@@ -148,12 +148,16 @@ Build needs Rust, [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/
 ```sh
 sh mobile/setup.sh     # once: build bare-kit on QuickJS (cached) for Android if the NDK is found and macOS on a Mac, plus bare-kit's iOS prebuild on a Mac
 sh mobile/setup.sh darwin   # the same with Xcode alone, no Android SDK
-npm run app            # macOS: build and run the desktop app from source
+npm run app            # macOS: Dioxus builds the optimized app, bundles assets and launches it
 cd mobile && dx build --android --target aarch64-linux-android   # APK under target/dx/PearTube/debug/android
 sh mobile/release.sh   # signed arm64 release APK in mobile/target/release-apk
 sh mobile/ios.sh       # iOS simulator build, installed and launched on the booted simulator
 npm run test:mobile    # E2E on macOS: the worklet finds a relay over a testnet DHT, then over LAN discovery alone; streams exact bytes and sees later publishes and removals live
 ```
+
+The desktop command uses `dx serve`, not a raw `cargo run`: macOS loads the
+shared mobile stylesheet from the `.app` bundle's `Contents/Resources` directory.
+Running the unbundled binary omits those assets and leaves the UI unstyled.
 
 For Android, set `ANDROID_NDK_HOME` to the installed NDK and use JDK 17 for
 Gradle. On macOS, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)` selects it;
