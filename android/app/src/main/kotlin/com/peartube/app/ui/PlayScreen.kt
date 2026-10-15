@@ -488,10 +488,14 @@ private data class Option(val label: String, val stream: Int, val selected: Bool
 @Composable
 private fun TrackPicker(options: List<Option>, onSelect: (Int) -> Unit, onOpen: (Boolean) -> Unit, anchor: @Composable (open: () -> Unit) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    val notify by rememberUpdatedState(onOpen)
     val set = { value: Boolean ->
         open = value
-        onOpen(value)
+        notify(value)
     }
+    // Turning the phone swaps the chips below the picture for the fullscreen top bar; a picker
+    // that leaves with its menu up must not keep the controls from hiding.
+    DisposableEffect(Unit) { onDispose { if (open) notify(false) } }
     Box {
         anchor { set(true) }
         DropdownMenu(expanded = open, onDismissRequest = { set(false) }) {
