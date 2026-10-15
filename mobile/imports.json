@@ -1,6 +1,6 @@
 {
   "buffer": "bare-buffer",
-  "crypto": "bare-crypto",
+  "crypto": "peartube-crypto",
   "dgram": "bare-dgram",
   "events": "bare-events",
   "net": "bare-net",

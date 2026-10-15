@@ -40,7 +40,7 @@ val worklet = tasks.register<WorkletTask>("worklet") {
     repo.set(checkout)
     sources.from(
         File(checkout, "android/worklet.mjs"),
-        File(mobile, "worker.js"), File(mobile, "pack.cjs"), File(mobile, "imports.json"),
+        File(mobile, "worker.js"), File(mobile, "pack.cjs"), File(mobile, "imports.json"), fileTree(File(mobile, "crypto")),
         fileTree(File(mobile, "vendor/bare-kit/android/arm64-v8a")),
         fileTree(File(checkout, "src")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
     )
@@ -79,8 +79,10 @@ abstract class CargoTask @Inject constructor(private val exec: ExecOperations) :
             environment("CC_aarch64_linux_android", clang)
             environment("CXX_aarch64_linux_android", "$clang++")
             environment("AR_aarch64_linux_android", bin.resolve("llvm-ar").path)
-            // Android 15+ devices with 16 KiB pages need aligned ELF load segments.
-            environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", "-C link-arg=-Wl,-z,max-page-size=16384")
+            // Android 15+ devices with 16 KiB pages need aligned ELF load segments. The remap
+            // keeps this machine's home directory out of the panic messages in the library.
+            val home = System.getProperty("user.home")
+            environment("CARGO_ENCODED_RUSTFLAGS", listOf("-Clink-arg=-Wl,-z,max-page-size=16384", "--remap-path-prefix=$home=~").joinToString("\u001f"))
         }
         val built = crate.get().asFile.resolve("target/aarch64-linux-android/${if (profile.get() == "dev") "debug" else "release"}/libpeartube.so")
         val out = libsDir.get().asFile.resolve("arm64-v8a").apply { deleteRecursively(); mkdirs() }
@@ -132,6 +134,13 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release")
+            // -Ppeartube.dev: the same build as com.peartube.app.dev with the debug key, to try
+            // its size and speed in place of a debug build, beside the release app.
+            if (providers.gradleProperty("peartube.dev").isPresent) {
+                applicationIdSuffix = ".dev"
+                versionNameSuffix = "-dev"
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -145,9 +154,9 @@ android {
     }
 
     packaging {
-        // Stored compressed and extracted at install, like the Dioxus app's APK:
-        // bare-kit opens the worklet's addons by file name.
-        jniLibs.useLegacyPackaging = true
+        // Native libraries stay uncompressed in the APK and load from it, so the phone keeps
+        // one copy of them, not a compressed one in the APK plus an extracted one.
+        jniLibs.useLegacyPackaging = false
     }
 }
 

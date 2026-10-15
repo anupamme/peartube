@@ -1,0 +1,8 @@
+{
+  "name": "peartube-crypto",
+  "version": "1.0.0",
+  "description": "createHash('sha256') on sodium-native, as `crypto` for PearTube's Bare worklet",
+  "license": "MIT",
+  "private": true,
+  "main": "index.js"
+}

@@ -21,7 +21,7 @@ fn main() {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let simulator = env::var("TARGET").unwrap().ends_with("-sim") || (os == "ios" && arch == "x86_64");
 
-    for path in ["worker.js", "pack.cjs", "imports.json", "vendor/bare-kit", "../src", "../package.json", "../package-lock.json"] {
+    for path in ["worker.js", "pack.cjs", "imports.json", "crypto", "vendor/bare-kit", "../src", "../package.json", "../package-lock.json"] {
         println!("cargo:rerun-if-changed={}", manifest.join(path).display());
     }
 

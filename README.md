@@ -167,8 +167,9 @@ Build needs Rust, `npm install` at the repo root, and for `mobile/setup.sh` cmak
 sh mobile/setup.sh     # once: build bare-kit on QuickJS (cached) for Android if the NDK is found and macOS on a Mac, plus bare-kit's iOS prebuild on a Mac
 sh mobile/setup.sh darwin   # the same with Xcode alone, no Android SDK
 cd android && ./gradlew :app:assembleDebug   # debug APK (com.peartube.app.dev, installs beside the release app)
+cd android && ./gradlew -Ppeartube.dev :app:assembleRelease   # the release build as com.peartube.app.dev, to try its real size and speed
 sh android/release.sh  # signed arm64 release APK in android/build/release-apk
-node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan]   # E2E on a connected phone; writes android/build/e2e
+node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path]   # E2E on a connected phone; writes android/build/e2e
 npm run app            # macOS: Dioxus builds the optimized app, bundles assets and launches it
 npm run test:mobile    # E2E on macOS: the worklet finds a relay over a testnet DHT, then over LAN discovery alone; streams exact bytes and sees later publishes and removals live
 ```
@@ -181,10 +182,21 @@ Gradle needs JDK 17. On macOS, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 selects it (`android/release.sh` does this); the Android Gradle plugin's `jlink`
 stage fails with JDK 27.
 
-The Android app's Gradle build runs `android/worklet.mjs`, which packs `mobile/worker.js` with bare-pack and links the native addons it needs (sodium, udx, rocksdb, …) with bare-link, and runs cargo for `android/native`, the player library. On the Mac, `mobile/build.rs` does the same packing; `mobile/ios.sh` embeds BareKit and the addon frameworks, which dx leaves out, and re-signs the app.
+The Android app's Gradle build runs `android/worklet.mjs`, which packs `mobile/worker.js` with bare-pack and links the native addons it needs (sodium, udx, rocksdb, …) with bare-link, and runs cargo for `android/native`, the player library. On the Mac, `mobile/build.rs` does the same packing; `mobile/ios.sh` embeds BareKit and the addon frameworks, which dx leaves out, and re-signs the app. In the worklet, `crypto` is `mobile/crypto`: SHA-256 on sodium-native, all the core and LAN discovery use, so neither app ships bare-crypto's 0.8 MB library.
 
 The player library links with 16 KiB ELF load alignment, for Android devices
-with 16 KiB pages.
+with 16 KiB pages, and with the build machine's home directory written as `~`
+in its panic messages.
+
+The release APK is 29.8 MB, and it takes about that much on a phone: its
+native libraries are stored uncompressed and load straight from the APK. The
+Dioxus app's APK was 18.7 MB, but Android unpacked a second copy of its
+libraries at install, 61 MB in all. Android also compiles the app's Kotlin code
+to machine code: a stock phone does it in the background, about 5 MB for this
+app, and a phone set to compile every app at install adds 7.4 MB right away. A
+debug build is twice the size and slower, so try size and speed with
+`-Ppeartube.dev`, which builds the release as `com.peartube.app.dev`, signed
+with the debug key.
 
 On Android and macOS the worklet runs on QuickJS, not V8: `mobile/bare-kit.sh` builds bare-kit with [libqjs](https://github.com/holepunchto/libqjs), Holepunch's QuickJS backend for the same engine ABI, so bare and the addons are unchanged. That makes `libbare-kit.so` 3.9 MB instead of 65.5 MB, and the APK 16.7 MB smaller. iOS still uses bare-kit's V8 prebuild.
 

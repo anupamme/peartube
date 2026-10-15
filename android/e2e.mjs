@@ -1,13 +1,15 @@
 // End-to-end check of the Android app on a connected phone, against a live relay:
 // a fresh install joins the relay's tracker through the Settings screen, lists its
 // entries, plays the first one through the Rust player, and comes back to the list.
-// Writes result.json and screenshots, and exits non-zero when a check fails.
+// With --lan it also turns on LAN discovery and checks that it runs. Writes
+// result.json and screenshots, and exits non-zero when a check fails.
 //
 //   node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path] [--out dir]
 //
 // Taps go through uiautomator's view of the Compose UI (texts and edit fields), so they do
-// not depend on the screen's size. The app is the debug build, com.peartube.app.dev; its
-// data is cleared first.
+// not depend on the screen's size. The app is com.peartube.app.dev: the debug build by
+// default, or a release build made with -Ppeartube.dev, given with --apk. Its data is
+// cleared first.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
@@ -95,6 +97,11 @@ try {
   const listed = nodes()
   checks.listed = listed.some(n => /^\d+ peers · /.test(n.text)) && listed.filter(n => rowPattern.test(n.text)).length > 0
   result.facts = listed.find(n => /^\d+ peers · /.test(n.text))?.text
+  if (opts.lan) {
+    // "LAN on <address>" once discovery runs; "LAN failed on …" if it threw.
+    result.lan = (await waitFor('the LAN line', ns => ns.find(n => n.text.startsWith('LAN ')), 30_000)).text
+    checks.lan = result.lan.startsWith('LAN on ')
+  }
   shot('list.png')
 
   tap(firstRow)
@@ -126,7 +133,7 @@ try {
   result.error = String(err?.stack || err)
 }
 
-result.passed = !result.error && Object.values(checks).length === 5 && Object.values(checks).every(Boolean)
+result.passed = !result.error && Object.values(checks).length === (opts.lan ? 6 : 5) && Object.values(checks).every(Boolean)
 result.finished = new Date().toISOString()
 fs.writeFileSync(path.join(opts.out, 'result.json'), JSON.stringify(result, null, 2) + '\n')
 console.log(JSON.stringify(result, null, 2))
