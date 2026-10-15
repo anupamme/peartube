@@ -16,15 +16,19 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 |`src/ui.js`|The acquisitions page, one HTML string|
 |`src/lan.js`|Optional LAN discovery: `@p2plabs/hyperdht-mdns` with an adapter that dials each peer's advertised address, not the mDNS reflector, and starts its mDNS browse over every 10 s, so an answer missed on Wi-Fi is asked for again instead of waiting for another host's query. `bin/relay.js` passes it to `createNode` as a factory. For the app, `lanAddress` picks the device's Wi-Fi or Ethernet IPv4 and `interfaceAdapter` keeps mDNS on that interface|
 |`bin/relay.js`|Relay process, configured by env|
-|`mobile/`|Dioxus app for Android, iOS and macOS (not part of the core line budget). It runs the core itself as a peer, in a Bare worklet (bare-kit), and plays stream URLs with the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media): OxideAV, ported software decoders and platform video decoders. Full VLC-format compatibility remains in development; require per-format playback evidence before claiming support|
-|`mobile/worker.js`|The worklet: newline-delimited JSON over `BareKit.IPC` to `createNode`. LAN discovery follows the device's address: checked on start, on resume and every 10 s, and stopped in the background. Its state goes out as `lan` in `start` and `status`, and the list shows it under the peer count. `mobile/build.rs` packs it with bare-pack (`mobile/imports.json` maps Node builtins to `bare-*`) and links its native addons with bare-link|
-|`mobile/src/player.rs`|The play screen's `VideoPlayer`: opens peartube-media's `Player` on the stream URL, keeps its native picture over a slot in the page, and draws the controls (play/pause, seek, audio and subtitle tracks) in the page. Suspends and resumes with the app|
-|`mobile/src/apple_view.rs`|macOS and iOS: a native view inside the webview, kept over the slot, that peartube-media's `AppleBackend` draws into (AVSampleBufferDisplayLayer + audio renderer)|
-|`mobile/src/android_player.rs`, `mobile/android/MainActivity.kt`|Android: MainActivity keeps two SurfaceViews (video, subtitles above it) over the slot and hands their surfaces to `AndroidBackend` through JNI (MediaCodec onto the surface, AAudio). The video view takes the picture's shape inside the slot, from the player's `video_size`, with black bars around it; the subtitle view covers the whole slot. They stay in the one activity because the worklet suspends whenever that activity pauses. MainActivity also holds the Wi-Fi multicast lock LAN discovery needs while the app is in front (permission in `Dioxus.toml` `[android.raw]`)|
-|`mobile/sync-player.py`|Pins the app to a peartube-media commit: the `player`/`codecs` git rev and a copy of its `[patch.crates-io]` OxideAV pins (Cargo applies patches only from the top-level manifest)|
-|`mobile/release.sh`|Builds the signed arm64 release APK with the release key named in `~/.gradle/gradle.properties`|
+|`android/`|Android app (not part of the core line budget): Kotlin and Jetpack Compose. It runs the core itself as a peer, in a Bare worklet through bare-kit's own Java `Worklet`/`IPC` (`app/src/main/java/to/holepunch/bare/kit`, from bare-kit 78230eb; their JNI is in the QuickJS `libbare-kit.so`), speaking `mobile/worker.js`'s JSON lines (`Worker.kt`). It keeps the Dioxus app's data paths (`files/settings.json`, `no_backup/trackers/<key>`, `files/soundfont.sf2`), so a release build signed with the same key updates it in place. The worklet suspends while the app is in the background (`PearTubeApp.kt`), which also holds the Wi-Fi multicast lock LAN discovery needs while the app is in front. Debug builds install beside the release app as `com.peartube.app.dev`|
+|`android/native/`|`libpeartube.so`: the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media) (OxideAV, ported software decoders, MediaCodec and AAudio) behind JNI for `player/NativePlayer.kt`. Full VLC-format compatibility remains in development; require per-format playback evidence before claiming support|
+|`android/app/src/main/kotlin/com/peartube/app/player/PlayerViews.kt`|Two SurfaceViews (video, subtitles above it) over the play screen's slot, in the activity's content view; their surfaces go to `AndroidBackend` through JNI. Old views stay attached until the native side proves it has let go of their surfaces. The video view takes the picture's shape inside the slot, with black bars around it; the subtitle view covers the whole slot|
+|`android/worklet.mjs`|Packs `mobile/worker.js` for android-arm64 with bare-pack, links its native addons with bare-link, and gathers them with bare-kit's libraries; the app's Gradle build runs it, and runs cargo for `android/native`|
+|`android/release.sh`|Builds the signed arm64 release APK into `android/build/release-apk`; Gradle signs it with the key named in `~/.gradle/gradle.properties`|
+|`android/e2e.mjs`|On a connected phone, against a live relay: a fresh debug install joins the relay's tracker through Settings, lists it, plays the first entry (video frames from SurfaceFlinger, the clock moving, AAudio started) and goes back. Writes `android/build/e2e/result.json` and screenshots|
+|`mobile/`|Dioxus app for macOS (not part of the core line budget; its iOS target is dropped for now). The same worklet and player as Android, in a webview UI|
+|`mobile/worker.js`|The worklet: newline-delimited JSON over `BareKit.IPC` to `createNode`. LAN discovery follows the device's address: checked on start, on resume and every 10 s, and stopped in the background. Its state goes out as `lan` in `start` and `status`, and the list shows it under the peer count. `mobile/build.rs` (Mac) and `android/worklet.mjs` (Android) pack it with bare-pack (`mobile/imports.json` maps Node builtins to `bare-*`) and link its native addons with bare-link|
+|`mobile/src/player.rs`|The Mac play screen's `VideoPlayer`: opens peartube-media's `Player` on the stream URL, keeps its native picture over a slot in the page, and draws the controls (play/pause, seek, audio and subtitle tracks) in the page. Suspends and resumes with the app|
+|`mobile/src/apple_view.rs`|macOS: a native view inside the webview, kept over the slot, that peartube-media's `AppleBackend` draws into (AVSampleBufferDisplayLayer + audio renderer)|
+|`mobile/sync-player.py`|Pins both apps to a peartube-media commit: the `player`/`codecs` git rev and a copy of its `[patch.crates-io]` OxideAV pins in `mobile/Cargo.toml` and `android/native/Cargo.toml` (Cargo applies patches only from the top-level manifest)|
 |`mobile/bare-kit.sh`|Builds bare-kit with QuickJS (libqjs) instead of V8 for Android and macOS, from pinned sources plus `mobile/patches/`, into `mobile/vendor`, cached by its inputs: libbare-kit.so is 3.9 MB instead of 65.5 MB. `mobile/setup.sh` runs it and adds bare-kit's V8 prebuild for iOS|
-|`.github/workflows/android-app.yml`|CI: builds the Dioxus app's arm64 debug APK on pushes that touch `mobile/` or the core, and keeps it as the run's artifact|
+|`.github/workflows/android-app.yml`|CI: builds the Android app's arm64 debug APK on pushes that touch `android/`, the worklet or the core, and keeps it as the run's artifact|
 |`test/network.test.js`|Relays on a local HyperDHT testnet, including adversarial peers|
 |`test/lan.test.js`|LAN adapter in isolation: the advertised address wins, a lost mDNS answer is asked for again, and discovery errors are reported, not fatal|
 |`test/mobile.e2e.js`|The app's worklet, driven from Rust, joins a relay on a testnet, streams exact bytes, plays the entry through the app's player (every frame and audio sample equal to FFmpeg's decode), sees a later publish and removal without reopening, and still lists the tracker when a peer announces a malformed title. A second run finds the relay over LAN discovery alone, with no DHT reachable. Needs ffmpeg. Writes `mobile/target/e2e/result.json` and `lan-result.json`|
@@ -44,7 +48,7 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 - `src/index.js` also runs under Bare, in the mobile worklet: no Node-only imports there. Map `node:` builtins to `bare-*` in `package.json` `imports`.
 - The Android and macOS worklet runs on QuickJS: no `Intl`, and guard V8-only APIs such as `Error.captureStackTrace`. Keep `mobile/patches/libqjs-function-source.patch` until libqjs ends its CommonJS wrapper on a new line; without it the worklet dies loading bonjour-service, which `test/mobile.e2e.js` catches.
 - Keep `mobile/patches/libqjs-deferred-release.patch`. QuickJS frees an object as soon as its last reference goes, but addons built for V8 release a reference and then touch memory that object owned (jstl's `js_persistent_t::reset()`). Without the patch, udx-native's DNS lookup crashes the worklet whenever HyperDHT resolves a bootstrap host by name. `test/mobile.e2e.js` names its bootstrap nodes `localhost:<port>` to catch it.
-- Keep `Dioxus.toml` `[application] android_min_sdk_version` at `[android] min_sdk`: dx links the native code at the former, and the QuickJS bare-kit calls `timespec_get`, new in API 29.
+- Keep the Android app's `minSdk` at 29: the QuickJS bare-kit calls `timespec_get`, new in API 29, and the player calls NDK media functions added in 29. The app's version is `mobile/Cargo.toml`'s; releases bump it there.
 
 ## Testing
 
@@ -59,15 +63,16 @@ npm install
 npm test
 npm start
 
-# Mobile app (cargo, dx 0.7.10, Android SDK + NDK or Xcode)
+# Apps (cargo; Android SDK + NDK 29.0.14206865 and JDK 17 for Android; dx 0.7.10 and Xcode for the Mac)
 sh mobile/setup.sh          # once: bare-kit on QuickJS into mobile/vendor (cmake 4+, ninja, node 22.21+/24.9+), for Android if the NDK is found and macOS on a Mac
 sh mobile/setup.sh darwin   # the same with Xcode alone, no Android SDK
 npm run app                 # macOS desktop app from source
 npm run test:mobile         # E2E through the worklet on macOS
-cd mobile && dx build --android --target aarch64-linux-android
-sh mobile/release.sh        # signed arm64 release APK in mobile/target/release-apk (needs JDK 17: Android lint fails on 25)
-python3 mobile/sync-player.py  # after pushing peartube-media: pin the app to its HEAD
-sh mobile/ios.sh            # simulator build, installed on the booted simulator
+cd android && ./gradlew :app:assembleDebug   # debug APK (com.peartube.app.dev) in android/app/build/outputs/apk/debug
+sh android/release.sh       # signed arm64 release APK in android/build/release-apk
+node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan]   # E2E on a connected phone
+python3 mobile/sync-player.py  # after pushing peartube-media: pin both apps to its HEAD
+sh mobile/ios.sh            # simulator build of the Dioxus app (iOS is dropped for now)
 ```
 
 ## Troubleshooting

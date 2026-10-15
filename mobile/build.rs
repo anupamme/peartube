@@ -1,22 +1,17 @@
 //! Packs mobile/worker.js for the target and links bare-kit, which runs it.
 //! Needs `npm ci` at the repo root and `sh mobile/setup.sh` once. bare-kit
-//! is built on QuickJS for Android and macOS (mobile/bare-kit.sh); iOS links
-//! bare-kit's V8 prebuild.
+//! is built on QuickJS for macOS (mobile/bare-kit.sh); iOS links bare-kit's
+//! V8 prebuild. The Android app (android/) packs the same worker with
+//! android/worklet.mjs.
 //!
 //! bare-kit only loads linked addons, so the worker's native addons are
 //! linked with bare-link into target/bare-addons/<host>, and the bundle loads
 //! them by name:
-//! - Android: dx copies every .so on the link line into the APK's jniLibs, so
-//!   bare-kit, its libc++ and the addons are all passed as link args.
-//!   --as-needed keeps the unreferenced ones out of DT_NEEDED.
 //! - iOS: dx does not embed frameworks; mobile/ios.sh embeds them with BareKit.
 //! - macOS (development only): the binary's rpath points at them in place.
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-/// `min_sdk` in Dioxus.toml.
-const MIN_SDK: u32 = 29;
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -30,17 +25,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", manifest.join(path).display());
     }
 
-    let (host, abi) = match (os.as_str(), arch.as_str()) {
-        ("android", "aarch64") => ("android-arm64", "arm64-v8a"),
-        ("android", "x86_64") => ("android-x64", "x86_64"),
-        ("android", "arm") => ("android-arm", "armeabi-v7a"),
-        ("android", "x86") => ("android-ia32", "x86"),
-        ("ios", "aarch64") if simulator => ("ios-arm64-simulator", ""),
-        ("ios", "aarch64") => ("ios-arm64", ""),
-        ("ios", "x86_64") => ("ios-x64-simulator", ""),
-        ("macos", "aarch64") => ("darwin-arm64", ""),
-        ("macos", "x86_64") => ("darwin-x64", ""),
-        target => panic!("PearTube mobile does not build for {target:?}"),
+    let host = match (os.as_str(), arch.as_str()) {
+        ("ios", "aarch64") if simulator => "ios-arm64-simulator",
+        ("ios", "aarch64") => "ios-arm64",
+        ("ios", "x86_64") => "ios-x64-simulator",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        target => panic!("PearTube's Dioxus app does not build for {target:?}"),
     };
     // imports.json maps the Node builtins that LAN discovery's mDNS dependencies
     // require (dgram, os, ...) to their bare-* modules. Bare starts from its
@@ -64,26 +55,6 @@ fn main() {
         panic!("bare-kit is missing: run `sh mobile/setup.sh`");
     }
     match os.as_str() {
-        "android" => {
-            let lib = kit.join("android").join(abi);
-            if !lib.join("libbare-kit.so").exists() {
-                panic!("bare-kit is not built for {abi}: run `sh mobile/bare-kit.sh {abi}`");
-            }
-            link_arg(&lib.join("libbare-kit.so"));
-            link_arg(&lib.join("libc++_shared.so"));
-            for so in std::fs::read_dir(addons.join(abi)).unwrap() {
-                link_arg(&so.unwrap().path());
-            }
-            // dx links through its API 28 clang wrapper, but the app needs
-            // min_sdk 29 and the player calls NDK media functions added in
-            // 29. clang takes the last --target, so this one picks the API 29
-            // stub libraries.
-            let clang_arch = if arch == "arm" { "armv7a-linux-androideabi".to_string() } else { format!("{arch}-linux-android") };
-            println!("cargo:rustc-link-arg=--target={clang_arch}{MIN_SDK}");
-            // NDK r27 defaults to 4 KiB; Android 16 KiB devices need aligned
-            // ELF load segments as well as the APK's zip alignment.
-            println!("cargo:rustc-link-arg=-Wl,-z,max-page-size=16384");
-        }
         "ios" => {
             let slice = if simulator { "ios-arm64_x86_64-simulator" } else { "ios-arm64" };
             link_framework(&kit.join("ios/BareKit.xcframework").join(slice));
@@ -122,10 +93,6 @@ fn link_addons(root: &Path, bundle: &Path, host: &str, out: &Path) {
 fn link_framework(dir: &Path) {
     println!("cargo:rustc-link-search=framework={}", dir.display());
     println!("cargo:rustc-link-lib=framework=BareKit");
-}
-
-fn link_arg(path: &Path) {
-    println!("cargo:rustc-link-arg={}", path.display());
 }
 
 fn run(command: &mut Command) {

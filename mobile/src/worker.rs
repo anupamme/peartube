@@ -124,8 +124,6 @@ impl Worker {
         std::fs::create_dir_all(assets).map_err(|err| format!("Cannot create {}: {err}", assets.display()))?;
         let assets = CString::new(assets.to_string_lossy().as_bytes()).map_err(|err| err.to_string())?;
         let source = UvBuf { base: BUNDLE.as_ptr().cast(), len: BUNDLE.len() };
-        #[cfg(target_os = "android")]
-        android::publish_jvm()?;
         let (incoming, outgoing, worklet) = unsafe {
             // A write to a worklet that has exited must fail with EPIPE, not kill the app.
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
@@ -302,67 +300,20 @@ pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     if let Some(dir) = std::env::var_os("PEARTUBE_STORAGE") {
         return dir.into();
     }
-    #[cfg(target_os = "android")]
-    return android::dir("getFilesDir").expect("Android files dir");
-    #[cfg(not(target_os = "android"))]
     home_dir("Library/Application Support/PearTube", ".local/share/peartube")
 });
 
 /// Where each tracker's Corestore lives. The app only reads, so its stores hold
 /// nothing peers cannot serve again, and they can be large: keep them out of
-/// backups. iCloud skips Library/Caches; Android Auto Backup skips the
-/// no-backup files dir.
+/// backups (iCloud skips Library/Caches).
 static STORE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
     if let Some(dir) = std::env::var_os("PEARTUBE_STORAGE") {
         return dir.into();
     }
-    #[cfg(target_os = "android")]
-    return android::dir("getNoBackupFilesDir").expect("Android no-backup files dir");
-    #[cfg(not(target_os = "android"))]
     home_dir("Library/Caches/PearTube", ".cache/peartube")
 });
 
-#[cfg(not(target_os = "android"))]
 fn home_dir(apple: &str, other: &str) -> PathBuf {
     let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
     home.join(if cfg!(target_vendor = "apple") { apple } else { other })
-}
-
-#[cfg(target_os = "android")]
-mod android {
-    use std::path::PathBuf;
-
-    use jni::JavaVM;
-    use jni::objects::{JObject, JString};
-
-    /// bare-kit reads the JavaVM that its JNI_OnLoad stores. The library is
-    /// loaded as our dependency rather than by System.loadLibrary, so nothing
-    /// has called JNI_OnLoad yet: call it ourselves.
-    pub fn publish_jvm() -> Result<(), String> {
-        unsafe {
-            let lib = libc::dlopen(c"libbare-kit.so".as_ptr(), libc::RTLD_NOW | libc::RTLD_NOLOAD);
-            if lib.is_null() {
-                return Err("libbare-kit.so is not loaded".into());
-            }
-            let on_load = libc::dlsym(lib, c"JNI_OnLoad".as_ptr());
-            if on_load.is_null() {
-                return Err("libbare-kit.so has no JNI_OnLoad".into());
-            }
-            let on_load: extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void) -> i32 = std::mem::transmute(on_load);
-            on_load(ndk_context::android_context().vm(), std::ptr::null_mut());
-        }
-        Ok(())
-    }
-
-    /// A directory of the app's Context, by getter name.
-    pub fn dir(getter: &str) -> Result<PathBuf, String> {
-        let ctx = ndk_context::android_context();
-        let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|err| err.to_string())?;
-        let mut env = vm.attach_current_thread().map_err(|err| err.to_string())?;
-        let context = unsafe { JObject::from_raw(ctx.context().cast()) };
-        let dir = env.call_method(&context, getter, "()Ljava/io/File;", &[]).and_then(|v| v.l()).map_err(|err| err.to_string())?;
-        let path = env.call_method(&dir, "getAbsolutePath", "()Ljava/lang/String;", &[]).and_then(|v| v.l()).map_err(|err| err.to_string())?;
-        let path: String = env.get_string(&JString::from(path)).map_err(|err| err.to_string())?.into();
-        Ok(PathBuf::from(path))
-    }
 }

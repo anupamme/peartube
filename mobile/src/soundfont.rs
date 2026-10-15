@@ -2,8 +2,6 @@
 use std::{fs, path::PathBuf};
 use crate::worker::DATA_DIR;
 
-#[cfg(target_os = "android")]
-mod android;
 #[cfg(target_os = "ios")]
 mod ios;
 mod storage;
@@ -32,8 +30,6 @@ impl Drop for Temporary {
 pub async fn choose() -> Result<bool, String> {
     fs::create_dir_all(&*DATA_DIR).map_err(|e| e.to_string())?;
     let temporary = Temporary(DATA_DIR.join(".soundfont-import.tmp"));
-    #[cfg(target_os = "android")]
-    let selected = android::pick(temporary.0.clone(), MAX_BYTES).await?;
     #[cfg(target_os = "ios")]
     let selected = ios::pick(temporary.0.clone(), MAX_BYTES).await?;
     #[cfg(target_os = "macos")]
@@ -41,7 +37,7 @@ pub async fn choose() -> Result<bool, String> {
         stage_file(file.path().to_owned(), temporary.0.clone(), MAX_BYTES).await?;
         true
     } else { false };
-    #[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
     let selected: bool = Err("SoundFont selection is unavailable on this platform".to_string())?;
     if selected {
         storage::commit(&temporary.0, &DATA_DIR.join("soundfont.sf2")).map_err(|e| e.to_string())?;

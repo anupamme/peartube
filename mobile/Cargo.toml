@@ -23,11 +23,6 @@ player = { git = "https://github.com/ayooooo123/peartube-media", rev = "adb9434e
 codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "adb9434ee5ba5c1165561130021ac39e5b6ab55a" }
 oxideav-core = "*"
 
-[target.'cfg(target_os = "android")'.dependencies]
-jni = "0.21"
-ndk = { version = "0.9", features = ["nativewindow"] }
-ndk-context = "0.1"
-
 # The player's picture: a native view inside the webview.
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = "0.6"
@@ -114,10 +109,6 @@ opt-level = 3
 # quick to rebuild.
 [profile.dev.package."*"]
 opt-level = 3
-
-# Tao 0.34.8 with upstream Android lost-wake fix, without a Dioxus API upgrade.
-[patch.crates-io.tao]
-path = "third-party/tao"
 
 # BEGIN pin-oxideav
 [patch.crates-io]
