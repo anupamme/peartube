@@ -8,6 +8,7 @@ on:
       - mobile/worker.js
       - mobile/pack.cjs
       - mobile/imports.json
+      - mobile/crypto/**
       - mobile/bare-kit.sh
       - mobile/setup.sh
       - mobile/patches/**

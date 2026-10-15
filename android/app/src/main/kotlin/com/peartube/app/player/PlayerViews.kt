@@ -16,12 +16,13 @@ import android.widget.FrameLayout
 import android.widget.Toast
 
 /**
- * The surfaces the player draws on: video, and subtitles above it. They sit over the play
- * screen's slot, in the activity's content view rather than inside Compose: old views stay
+ * The surfaces the player draws on: video, and subtitles above it. They sit behind the
+ * Compose UI, in the activity's content view rather than inside Compose, under the play
+ * screen's slot, which the screen leaves clear and draws its controls over. Old views stay
  * attached until the native side proves it has let go of their surfaces, which can outlast
- * the screen. The video view takes the picture's shape inside the slot (black bars around
- * it); the subtitle view covers the whole slot. Ported from the Dioxus app's MainActivity.
- * UI thread only.
+ * the screen; other screens cover them. The video view takes the picture's shape inside the
+ * slot (black bars around it); the subtitle view covers the whole slot. Ported from the
+ * Dioxus app's MainActivity. UI thread only.
  */
 class PlayerHost(private val activity: Activity) {
     private val handler = Handler(Looper.getMainLooper())
@@ -148,7 +149,7 @@ private class PlayerViews(activity: Activity, host: PlayerHost, handler: Handler
         root.keepScreenOn = true
         // Invisible views get no surface: none exists until the screen reports its slot.
         root.visibility = View.INVISIBLE
-        activity.addContentView(root, FrameLayout.LayoutParams(0, 0))
+        activity.findViewById<ViewGroup>(android.R.id.content).addView(root, 0, FrameLayout.LayoutParams(0, 0))
     }
 
     fun place(rect: IntArray) {

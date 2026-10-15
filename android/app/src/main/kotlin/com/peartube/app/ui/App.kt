@@ -31,7 +31,8 @@ fun App(model: AppModel, player: PlayerHost) {
         model.screen.value = Screen.List
     }
 
-    Column(Modifier.fillMaxSize().background(Bg)) {
+    // The play screen paints its own background: the player's views are behind its slot.
+    Column(Modifier.fillMaxSize().then(if (screen is Screen.Play) Modifier else Modifier.background(Bg))) {
         error?.let { message ->
             Row(
                 Modifier.fillMaxWidth().background(Color(0xFF3A1D24)).padding(start = 16.dp),

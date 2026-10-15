@@ -38,14 +38,16 @@ fs.rmSync(opts.out, { recursive: true, force: true })
 fs.mkdirSync(opts.out, { recursive: true })
 const shot = name => fs.writeFileSync(path.join(opts.out, name), execFileSync('adb', ['-s', opts.serial, 'exec-out', 'screencap', '-p'], { maxBuffer: 64 << 20 }))
 
-/** The screen's nodes: text, class, and the centre of their bounds. */
+/** The screen's nodes (text, content description, class, centre and size), and its rotation. */
 function nodes () {
   const xml = adb('exec-out', 'uiautomator', 'dump', '/dev/tty')
-  return [...xml.matchAll(/<node [^>]*>/g)].map(([tag]) => {
-    const attr = name => (tag.match(new RegExp(` ${name}="([^"]*)"`)) || [])[1] ?? ''
+  const list = [...xml.matchAll(/<node [^>]*>/g)].map(([tag]) => {
+    const attr = name => (tag.match(new RegExp(` ${name}="([^"]*)"`)) || [])[1]?.replace(/&amp;/g, '&') ?? ''
     const [l, t, r, b] = attr('bounds').match(/\d+/g).map(Number)
-    return { text: attr('text').replace(/&amp;/g, '&'), cls: attr('class'), x: (l + r) >> 1, y: (t + b) >> 1 }
+    return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), x: (l + r) >> 1, y: (t + b) >> 1, w: r - l, h: b - t }
   })
+  list.rotation = Number(xml.match(/<hierarchy rotation="(\d)"/)?.[1] ?? 0)
+  return list
 }
 
 async function waitFor (what, find, timeout = 120_000) {
@@ -105,10 +107,15 @@ try {
   shot('list.png')
 
   tap(firstRow)
-  const clockPattern = /^(\d+:)?\d+:\d\d \/ (\d+:)?\d+:\d\d$/
-  const seconds = text => text.split(' / ')[0].split(':').reduce((s, part) => s * 60 + Number(part), 0)
-  const clock1 = await waitFor('the player clock', ns => ns.find(n => clockPattern.test(n.text)), 60_000)
-  result.title = nodes().find(n => / \((S\d\dE\d\d\d?|Movie)\)$/.test(n.text))?.text
+  // The picture's node carries the clock ("Video, 0:13 / 2:26:15"): the controls hide 3 s
+  // after the last touch, and a UI dump takes about as long.
+  const clockPattern = /^Video, ((\d+:)?\d+:\d\d) \/ (\d+:)?\d+:\d\d$/
+  const clockOf = ns => ns.find(n => clockPattern.test(n.desc))
+  const seconds = node => node.desc.match(clockPattern)[1].split(':').reduce((s, part) => s * 60 + Number(part), 0)
+  const clock1 = await waitFor('the player clock', clockOf, 60_000)
+  const playing = nodes()
+  const meta = playing.findIndex(n => /^(S\d\dE\d\d\d?|Movie) · /.test(n.text))
+  if (meta > 0) result.title = `${playing[meta - 1].text} (${playing[meta].text.split(' · ')[0]})`
 
   // Frames on the video SurfaceView over 5 s, from SurfaceFlinger.
   shell('dumpsys SurfaceFlinger --timestats -enable -clear')
@@ -119,13 +126,45 @@ try {
   result.videoFramesIn5s = Number(layer?.match(/totalFrames = (\d+)/)?.[1] ?? 0)
   checks.video = result.videoFramesIn5s >= 50 // at least 10 fps
 
-  const clock2 = nodes().find(n => clockPattern.test(n.text))
-  result.clock = [clock1.text, clock2?.text]
-  checks.clockAdvances = clock2 != null && seconds(clock2.text) > seconds(clock1.text)
+  const clock2 = clockOf(nodes())
+  result.clock = [clock1.desc.slice(7), clock2?.desc.slice(7)]
+  checks.clockAdvances = clock2 != null && seconds(clock2) > seconds(clock1)
 
   const uid = shell(`dumpsys package ${pkg}`).match(/appId=(\d+)/)[1]
   checks.audio = shell('dumpsys audio').split('\n').some(l => l.includes(`u/pid:${uid}/`) && l.includes('state:started'))
   shot('play.png')
+
+  // Fullscreen: its button turns a wide picture sideways and fills the screen, and back
+  // comes out. The controls hide 3 s after the last touch while playing, so each step
+  // starts from hidden controls: a tap on the picture shows them, and a UI dump right away
+  // finds the button; later, a first tap at its place shows them and a second presses.
+  const video = clockOf(nodes())
+  let button
+  for (let i = 0; i < 5 && !button; i++) {
+    await sleep(3600)
+    tap(video)
+    button = nodes().find(n => n.desc === 'Fullscreen')
+  }
+  if (!button) throw new Error('No Fullscreen button')
+  await sleep(3600)
+  tap(button)
+  await sleep(500)
+  tap(button)
+  await waitFor('fullscreen', ns => ns.rotation % 2 === 1, 15_000)
+  // Android shows a notice ("Viewing full screen … Got it") the first time an app goes
+  // fullscreen. It is a system window and the user's to answer: send it nothing.
+  await sleep(3000)
+  const sideways = nodes()
+  if (!sideways.some(n => n.pkg === pkg)) {
+    result.fullscreen = 'Android\'s "Viewing full screen" notice is in front: tap Got it on the phone, then run this again'
+    throw new Error(result.fullscreen)
+  }
+  shot('fullscreen.png')
+  const full = clockOf(sideways)
+  result.fullscreen = { video: [full.w, full.h], window: [sideways[0].w, sideways[0].h] }
+  shell('input keyevent KEYCODE_BACK')
+  const upright = await waitFor('portrait', ns => ns.rotation === 0, 10_000)
+  checks.fullscreen = Boolean(upright) && full.w >= sideways[0].w * 0.95 && full.h >= sideways[0].h * 0.95
 
   shell('input keyevent KEYCODE_BACK')
   checks.backToList = Boolean(await waitFor('the list again', ns => ns.find(n => n.text === 'PearTube'), 15_000))
@@ -133,7 +172,8 @@ try {
   result.error = String(err?.stack || err)
 }
 
-result.passed = !result.error && Object.values(checks).length === (opts.lan ? 6 : 5) && Object.values(checks).every(Boolean)
+const expected = ['listed', ...(opts.lan ? ['lan'] : []), 'video', 'clockAdvances', 'audio', 'fullscreen', 'backToList']
+result.passed = !result.error && expected.every(name => checks[name] === true)
 result.finished = new Date().toISOString()
 fs.writeFileSync(path.join(opts.out, 'result.json'), JSON.stringify(result, null, 2) + '\n')
 console.log(JSON.stringify(result, null, 2))
