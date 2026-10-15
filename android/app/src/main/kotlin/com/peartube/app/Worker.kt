@@ -47,8 +47,6 @@ class Worker(context: Context) {
     private var ipc: IPC? = null
     private val outgoing = ArrayDeque<ByteBuffer>()
     private val incoming = ByteArrayOutputStream()
-
-    @Volatile
     private var failure: String? = null
 
     init {
@@ -96,12 +94,20 @@ class Worker(context: Context) {
     fun resume() = handler.post { worklet?.resume() }
 
     private suspend fun call(method: String, params: JSONObject = JSONObject()): Any? {
-        failure?.let { throw WorkerException(it) }
         val id = nextId.getAndIncrement()
         val reply = CompletableDeferred<Any?>()
-        pending[id] = reply
         val line = JSONObject().put("id", id).put("method", method).put("params", params).toString() + "\n"
-        handler.post { send(line.toByteArray()) }
+        // On the worklet thread, where fail() runs: a failure can't land between the check and
+        // the registration and leave the reply unanswered.
+        handler.post {
+            val failed = failure
+            if (failed != null) {
+                reply.completeExceptionally(WorkerException(failed))
+            } else {
+                pending[id] = reply
+                send(line.toByteArray())
+            }
+        }
         try {
             return reply.await()
         } finally {
