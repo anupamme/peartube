@@ -1,0 +1,185 @@
+import javax.inject.Inject
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// The peartube checkout: the worklet (mobile/worker.js) runs the relay's own core (src/).
+val checkout: File = rootDir.parentFile
+val mobile = File(checkout, "mobile")
+// Releases bump the version in mobile/Cargo.toml; the Android app ships the same one.
+val appVersion = Regex("""(?m)^version = "([^"]+)"""").find(File(mobile, "Cargo.toml").readText())!!.groupValues[1]
+
+/** Packs the P2P worklet and gathers the native libraries it loads (android/worklet.mjs). */
+abstract class WorkletTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sources: ConfigurableFileCollection
+
+    @get:Internal
+    abstract val repo: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val assetsDir: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val libsDir: DirectoryProperty
+
+    @TaskAction
+    fun run() {
+        exec.exec {
+            workingDir = repo.get().asFile
+            commandLine("node", "android/worklet.mjs", assetsDir.get().asFile.path, libsDir.get().asFile.path, temporaryDir.path)
+        }
+    }
+}
+
+val worklet = tasks.register<WorkletTask>("worklet") {
+    repo.set(checkout)
+    sources.from(
+        File(checkout, "android/worklet.mjs"),
+        File(mobile, "worker.js"), File(mobile, "pack.cjs"), File(mobile, "imports.json"),
+        fileTree(File(mobile, "vendor/bare-kit/android/arm64-v8a")),
+        fileTree(File(checkout, "src")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
+    )
+    assetsDir.set(layout.buildDirectory.dir("worklet/assets"))
+    libsDir.set(layout.buildDirectory.dir("worklet/jniLibs"))
+}
+
+/** Builds libpeartube.so (android/native: the player) for arm64 with the NDK's clang. */
+abstract class CargoTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sources: ConfigurableFileCollection
+
+    /** Cargo's profile: "dev" or "release". */
+    @get:Input
+    abstract val profile: Property<String>
+
+    @get:Internal
+    abstract val crate: DirectoryProperty
+
+    @get:Internal
+    abstract val ndk: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val libsDir: DirectoryProperty
+
+    @TaskAction
+    fun run() {
+        val bin = ndk.get().asFile.resolve("toolchains/llvm/prebuilt").listFiles()!!.single().resolve("bin")
+        val clang = bin.resolve("aarch64-linux-android29-clang").path
+        val cargo = File(System.getProperty("user.home"), ".cargo/bin/cargo").takeIf { it.exists() }?.path ?: "cargo"
+        val manifest = crate.get().asFile.resolve("Cargo.toml")
+        exec.exec {
+            commandLine(cargo, "build", "--manifest-path", manifest.path, "--target", "aarch64-linux-android", "--profile", profile.get())
+            environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER", clang)
+            environment("CC_aarch64_linux_android", clang)
+            environment("CXX_aarch64_linux_android", "$clang++")
+            environment("AR_aarch64_linux_android", bin.resolve("llvm-ar").path)
+            // Android 15+ devices with 16 KiB pages need aligned ELF load segments.
+            environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", "-C link-arg=-Wl,-z,max-page-size=16384")
+        }
+        val built = crate.get().asFile.resolve("target/aarch64-linux-android/${if (profile.get() == "dev") "debug" else "release"}/libpeartube.so")
+        val out = libsDir.get().asFile.resolve("arm64-v8a").apply { deleteRecursively(); mkdirs() }
+        built.copyTo(out.resolve("libpeartube.so"))
+    }
+}
+
+val nativeCrate = File(checkout, "android/native")
+
+// Release signing from ~/.gradle/gradle.properties (peartube.keystore, .keystorePassword, .keyAlias, .keyPassword).
+val signing = listOf("keystore", "keystorePassword", "keyAlias", "keyPassword")
+    .associateWith { providers.gradleProperty("peartube.$it").orNull }
+
+android {
+    namespace = "com.peartube.app"
+    compileSdk = 36
+
+    defaultConfig {
+        applicationId = "com.peartube.app"
+        minSdk = 29
+        targetSdk = 34
+        val (major, minor, patch) = appVersion.split(".").map { it.toInt() }
+        versionCode = major * 10_000 + minor * 100 + patch
+        versionName = appVersion
+        ndk { abiFilters += "arm64-v8a" }
+    }
+    // The version CI installs; mobile/bare-kit.sh builds against the newest one.
+    ndkVersion = "29.0.14206865"
+
+    signingConfigs {
+        if (signing.values.all { it != null }) {
+            create("release") {
+                storeFile = file(signing.getValue("keystore")!!)
+                storePassword = signing.getValue("keystorePassword")
+                keyAlias = signing.getValue("keyAlias")
+                keyPassword = signing.getValue("keyPassword")
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Installs beside the release app.
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+        }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.findByName("release")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    packaging {
+        // Stored compressed and extracted at install, like the Dioxus app's APK:
+        // bare-kit opens the worklet's addons by file name.
+        jniLibs.useLegacyPackaging = true
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(worklet, WorkletTask::assetsDir)
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(worklet, WorkletTask::libsDir)
+        val cargo = tasks.register<CargoTask>("cargo${variant.name.replaceFirstChar { it.uppercase() }}") {
+            crate.set(nativeCrate)
+            sources.from(fileTree(nativeCrate.resolve("src")), nativeCrate.resolve("Cargo.toml"), nativeCrate.resolve("Cargo.lock"))
+            profile.set(if (variant.buildType == "release") "release" else "dev")
+            ndk.set(androidComponents.sdkComponents.ndkDirectory)
+            libsDir.set(layout.buildDirectory.dir("cargo/${variant.name}"))
+        }
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(cargo, CargoTask::libsDir)
+    }
+}
+
+dependencies {
+    val compose = platform("androidx.compose:compose-bom:2025.08.01")
+    implementation(compose)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.lifecycle:lifecycle-process:2.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.3")
+}

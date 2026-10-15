@@ -102,3 +102,9 @@ peartube-data/
 # Mobile app (Dioxus): cargo/dx output and bare-kit fetched by mobile/setup.sh
 mobile/target/
 mobile/vendor/
+
+# Android app (Kotlin): Gradle state
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/native/target/
