@@ -194,6 +194,18 @@ The Mac app is now a GPUI app (`desktop/`), replacing the Dioxus webview app.
 It keeps that app's settings and stores. The Dioxus code is gone from the
 repository, iOS included.
 
+Version 0.4.20 brings the player fixes made since 0.4.19 and two P2P changes.
+A seek in a Vorbis track, in Matroska or Ogg, lands where it should; before,
+playback stood still or went silent. 24-bit PCM sound in Matroska plays instead
+of noise, and MP3 sound inside MP4 plays (it was taken for AAC and stayed
+silent). A seek onto an open-GOP HEVC picture (a CRA) with the software decoder
+plays on instead of stopping with "reference picture is missing". LAN discovery
+no longer depends on which of two peers has the smaller key: when that peer
+cannot reach the other, the other one now connects after 3 s. The Holepunch
+libraries are on their latest versions (hypercore 11.39, corestore 7.15,
+hyperdht 6.34.1, protomux 3.13); none of the updates changes how NATs are
+crossed.
+
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
 ```sh
