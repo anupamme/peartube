@@ -180,7 +180,11 @@ took 23 ms a frame on a Pixel 5a with Android's allocator and 11 ms with mimallo
 The player's other software decoders use mimalloc too; their speed was not
 measured. The MPEG-4 Part 2 decoder also rebuilds each frame's pixels on two
 threads, which made it 13% faster again. In the app, the first minute of that
-episode took a quarter less CPU than with 0.4.17.
+episode used a quarter less CPU outside the P2P worker than with 0.4.17.
+
+Version 0.4.19 is the same app as 0.4.18, built from `main`, which now carries
+the Kotlin Android app. It is the first full release since 0.4.6; 0.4.7 to
+0.4.18 were prereleases.
 
 Build needs Rust, `npm install` at the repo root, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10) and Xcode:
 
