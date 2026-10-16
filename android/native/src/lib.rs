@@ -19,6 +19,12 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+/// The player's allocator. The software decoders allocate and free a lot each
+/// frame: on a Pixel 5a, 720p XviD took 23 ms a frame with Android's own
+/// allocator and 11 ms with mimalloc.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Every container and decoder the player can use, built once.
 static CODECS: LazyLock<Arc<RuntimeContext>> = LazyLock::new(|| Arc::new(codecs::context()));
 

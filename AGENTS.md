@@ -52,6 +52,7 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 - Keep `mobile/patches/libqjs-deferred-release.patch`. QuickJS frees an object as soon as its last reference goes, but addons built for V8 release a reference and then touch memory that object owned (jstl's `js_persistent_t::reset()`). Without the patch, udx-native's DNS lookup crashes the worklet whenever HyperDHT resolves a bootstrap host by name. `test/mobile.e2e.js` names its bootstrap nodes `localhost:<port>` to catch it.
 - Keep the Android app's `minSdk` at 29: the QuickJS bare-kit calls `timespec_get`, new in API 29, and the player calls NDK media functions added in 29. The app's version is `mobile/Cargo.toml`'s; releases bump it there.
 - Keep the Android app's native libraries uncompressed in the APK (`jniLibs.useLegacyPackaging = false`). Android then loads them from the APK; compressed, it unpacks a second copy at install, which made the Dioxus app take 61 MB on the phone for an 18.7 MB APK. bare-kit loads the worklet's addons by file name, which works from the APK.
+- Keep mimalloc as `libpeartube.so`'s global allocator (`android/native/src/lib.rs`). The software decoders allocate and free a lot each frame: on a Pixel 5a, 720p XviD took 23 ms a frame with Android's own allocator and 11 ms with mimalloc, and the MPEG-4 Part 2 decoder's second rebuild thread made decoding slower with Android's allocator. It uses local-dynamic TLS because the app loads the library with dlopen.
 
 ## Testing
 

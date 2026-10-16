@@ -173,6 +173,15 @@ decoder played a video no longer leaves a black picture and "platform video
 output recovery timed out" on return. With subtitles on, going Home no longer
 stalls for a second.
 
+Version 0.4.18 roughly halves the time MPEG-4 Part 2 (XviD, DivX) decoding takes
+on Android. The player library now uses mimalloc instead of Android's own
+allocator. The decoder allocates and frees a lot each frame: a 720p XviD episode
+took 23 ms a frame on a Pixel 5a with Android's allocator and 11 ms with mimalloc.
+The player's other software decoders use mimalloc too; their speed was not
+measured. The MPEG-4 Part 2 decoder also rebuilds each frame's pixels on two
+threads, which made it 13% faster again. In the app, the first minute of that
+episode took a quarter less CPU than with 0.4.17.
+
 Build needs Rust, `npm install` at the repo root, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10) and Xcode:
 
 ```sh
