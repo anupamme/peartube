@@ -1,5 +1,6 @@
 import HyperDHTmDNS from '@p2plabs/hyperdht-mdns'
 import { Bonjour } from 'bonjour-service'
+import b4a from 'b4a'
 import { isIPv4 } from 'node:net'
 
 const PRIVATE = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/
@@ -76,9 +77,29 @@ export function interfaceAdapter (host) {
 // LAN discovery without the internet or a port forward: an isolated,
 // bootstrap-free HyperDHT that finds peers over mDNS. Discovery errors are
 // reported, never thrown: an unhandled 'error' would kill the whole relay.
-export function createLan ({ host, port = 49799, keyPair, adapter = selfAddressAdapter(host) }) {
+//
+// hyperdht-mdns dials only from the peer with the smaller key. When that peer
+// cannot reach this one (macOS's firewall drops unsolicited UDP to an app it
+// has not allowed), the two never connect. So a peer that shares a topic, has
+// answered our ping and still has no connection after `dialAfter` ms is
+// joined from this side with hyperdht-mdns's own joinPeer, and left again once
+// connected, which keeps the connection.
+export function createLan ({ host, port = 49799, keyPair, adapter = selfAddressAdapter(host), dialAfter = 3000 }) {
   const lan = new HyperDHTmDNS({ host, port, keyPair, adapter })
   lan.on('error', err => console.error(JSON.stringify({ msg: 'lan discovery error', error: err?.message || String(err) })))
   lan.on('warning', () => {})
+  const waiting = new Set()
+  lan.on('peer-reachable', peer => {
+    const id = b4a.toString(peer.publicKey, 'hex')
+    if (!peer.topics.length || waiting.has(id) || b4a.compare(lan.keyPair.publicKey, peer.publicKey) < 0) return
+    waiting.add(id)
+    setTimeout(() => {
+      waiting.delete(id)
+      if (lan.destroyed || lan.suspended) return
+      if ([...lan.connections].some(c => !c.destroyed && b4a.equals(c.remotePublicKey, peer.publicKey))) return
+      lan.joinPeer(peer.publicKey)
+    }, dialAfter).unref?.()
+  })
+  lan.on('connection', (socket, info) => lan.leavePeer(info.publicKey))
   return lan
 }

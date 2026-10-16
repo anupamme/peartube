@@ -1,6 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import HyperDHT from 'hyperdht'
+import b4a from 'b4a'
 import { selfAddressAdapter, createLan } from '../src/lan.js'
+import { mdnsBus } from './mdns.js'
 
 // Behind an mDNS reflector the packet's sender is the router. The peer must be
 // dialed at the address it advertised for its own DHT, not at the reflector.
@@ -97,4 +100,83 @@ test('an mDNS discovery error is reported, not fatal', async () => {
     console.error = original
     await lan.destroy()
   }
+})
+
+// The core hands each LAN connection to replication, which handles its errors.
+// Here nothing else would: a peer closing first resets the other side.
+const quiet = (...lans) => { for (const lan of lans) lan.on('connection', socket => socket.on('error', () => {})) }
+
+// hyperdht-mdns dials only from the peer with the smaller key. When that peer
+// cannot reach the other (macOS's firewall drops unsolicited UDP to an app it
+// has not allowed), nobody dials and the two never connect. Ways a fix could
+// fail: the larger-key side never dials; it dials a peer it already has a
+// connection to; a failed dial throws; it dials after destroy.
+test('a peer that cannot reach us is dialed from our side', async () => {
+  const [low, high] = [HyperDHT.keyPair(), HyperDHT.keyPair()].sort((x, y) => b4a.compare(x.publicKey, y.publicKey))
+  const bus = mdnsBus()
+  const topic = b4a.alloc(32, 7)
+  // low sees high at a port where nothing answers, as if high's firewall
+  // dropped everything low sends. high sees low as it is.
+  const unreachable = service => ({ ...service, port: 9 })
+  const a = createLan({ host: '127.0.0.1', port: 49812, keyPair: low, adapter: bus(unreachable), dialAfter: 200 })
+  const b = createLan({ host: '127.0.0.1', port: 49813, keyPair: high, adapter: bus(service => service), dialAfter: 200 })
+  quiet(a, b)
+  try {
+    const opened = [a, b].map(lan => new Promise(resolve => lan.once('connection', resolve)))
+    await Promise.all([a.ready(), b.ready()])
+    a.join(topic)
+    b.join(topic)
+    const [fromA, fromB] = await Promise.race([
+      Promise.all(opened),
+      new Promise((resolve, reject) => setTimeout(reject, 10_000, new Error('the two never connected')))
+    ])
+    const said = new Promise(resolve => fromB.once('data', resolve))
+    fromA.write(b4a.from('hello'))
+    assert.equal(b4a.toString(await said), 'hello')
+
+    // Once connected, nobody dials again.
+    await new Promise(resolve => setTimeout(resolve, 800))
+    assert.equal(a.connections.size, 1)
+    assert.equal(b.connections.size, 1)
+  } finally {
+    await a.destroy()
+    await b.destroy()
+  }
+})
+
+// Two LAN peers dial each other at most once, and only for a shared topic.
+async function pair ({ ports, topics, dialAfter = 1000, wait = 2500 }) {
+  const bus = mdnsBus()
+  const lans = ports.map(port => createLan({ host: '127.0.0.1', port, keyPair: HyperDHT.keyPair(), adapter: bus(s => s), dialAfter }))
+  quiet(...lans)
+  const dials = []
+  for (const lan of lans) {
+    const connect = lan.dht.connect.bind(lan.dht)
+    lan.dht.connect = (...args) => { dials.push(lan); return connect(...args) }
+  }
+  try {
+    await Promise.all(lans.map(lan => lan.ready()))
+    lans.forEach((lan, i) => lan.join(topics[i]))
+    await new Promise(resolve => setTimeout(resolve, wait))
+    return { connections: lans.map(lan => lan.connections.size), dials: dials.length }
+  } finally {
+    for (const lan of lans) await lan.destroy()
+  }
+}
+
+// When both sides can reach each other, the smaller key dials and the other
+// side must not add a second connection.
+test('two peers that reach each other keep one connection', async () => {
+  const topic = b4a.alloc(32, 8)
+  const { connections, dials } = await pair({ ports: [49814, 49815], topics: [topic, topic] })
+  assert.deepEqual(connections, [1, 1])
+  assert.equal(dials, 1, 'only the smaller key dialed')
+})
+
+// Two relays of different trackers on one network see each other over mDNS.
+// Neither may dial: the other side would only drop the connection again.
+test('peers with no topic in common never dial', async () => {
+  const { connections, dials } = await pair({ ports: [49818, 49819], topics: [b4a.alloc(32, 9), b4a.alloc(32, 10)], dialAfter: 200 })
+  assert.deepEqual(connections, [0, 0])
+  assert.equal(dials, 0)
 })

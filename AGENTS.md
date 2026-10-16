@@ -14,7 +14,7 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 |`src/acquire.js`|Private job queue: fetch a source, `put` it, save the announce, `append` it durably. Stored in `jobs.json`, never in the Corestore|
 |`src/http.js`|One port: the UI at `/` and the `/v1` API (no auth for now)|
 |`src/ui.js`|The acquisitions page, one HTML string|
-|`src/lan.js`|Optional LAN discovery: `@p2plabs/hyperdht-mdns` with an adapter that dials each peer's advertised address, not the mDNS reflector, and starts its mDNS browse over every 10 s, so an answer missed on Wi-Fi is asked for again instead of waiting for another host's query. `bin/relay.js` passes it to `createNode` as a factory. For the app, `lanAddress` picks the device's Wi-Fi or Ethernet IPv4 and `interfaceAdapter` keeps mDNS on that interface|
+|`src/lan.js`|Optional LAN discovery: `@p2plabs/hyperdht-mdns` with an adapter that dials each peer's advertised address, not the mDNS reflector, and starts its mDNS browse over every 10 s, so an answer missed on Wi-Fi is asked for again instead of waiting for another host's query. hyperdht-mdns dials only from the smaller key; when that side cannot reach us (macOS's firewall), `createLan` joins the peer from our side after 3 s with hyperdht-mdns's `joinPeer`. `bin/relay.js` passes it to `createNode` as a factory. For the app, `lanAddress` picks the device's Wi-Fi or Ethernet IPv4 and `interfaceAdapter` keeps mDNS on that interface|
 |`bin/relay.js`|Relay process, configured by env|
 |`android/`|Android app, the one GitHub releases ship (not part of the core line budget): Kotlin and Jetpack Compose. It runs the core itself as a peer, in a Bare worklet through bare-kit's own Java `Worklet`/`IPC` (`app/src/main/java/to/holepunch/bare/kit`, from bare-kit 78230eb; their JNI is in the QuickJS `libbare-kit.so`), speaking `worklet/worker.js`'s JSON lines (`Worker.kt`). It keeps the data paths of the Dioxus app it replaced (`files/settings.json`, `no_backup/trackers/<key>`, `files/soundfont.sf2`), so a release build signed with the same key updates it in place. The worklet suspends while the app is in the background (`PearTubeApp.kt`), which also holds the Wi-Fi multicast lock LAN discovery needs while the app is in front. Debug builds install beside the release app as `com.peartube.app.dev`, and so does a release build made with `-Ppeartube.dev` (signed with the debug key)|
 |`android/native/`|`libpeartube.so`: the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media) (OxideAV, ported software decoders, MediaCodec and AAudio) behind JNI for `player/NativePlayer.kt`. Full VLC-format compatibility remains in development; require per-format playback evidence before claiming support|
@@ -33,7 +33,7 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 |`sync-player.py`|Pins both apps to a peartube-media commit: the `player`/`codecs` git rev and a copy of its `[patch.crates-io]` OxideAV pins in `desktop/Cargo.toml` and `android/native/Cargo.toml` (Cargo applies patches only from the top-level manifest)|
 |`.github/workflows/android-app.yml`|CI: builds the Android app's arm64 debug APK on pushes that touch `android/`, the worklet or the core, and keeps it as the run's artifact|
 |`test/network.test.js`|Relays on a local HyperDHT testnet, including adversarial peers|
-|`test/lan.test.js`|LAN adapter in isolation: the advertised address wins, a lost mDNS answer is asked for again, and discovery errors are reported, not fatal|
+|`test/lan.test.js`|LAN adapter in isolation: the advertised address wins, a lost mDNS answer is asked for again, discovery errors are reported, not fatal, and a peer that cannot reach us is joined from our side, with one connection either way and no dial without a shared topic. `test/mdns.js` is an in-memory mDNS for these|
 |`test/desktop.e2e.js`|The Mac app's worklet, driven from Rust (`desktop/examples/smoke.rs`), joins a relay on a testnet, streams exact bytes, plays the entry through the app's player (every frame and audio sample equal to FFmpeg's decode), sees a later publish and removal without reopening, and still lists the tracker when a peer announces a malformed title. A second run finds the relay over LAN discovery alone, with no DHT reachable. Needs ffmpeg. Writes `desktop/target/e2e/result.json` and `lan-result.json`|
 
 ## Rules
@@ -45,6 +45,7 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 - Connect peers with `tracker.replicate(conn)`, not `store.replicate(conn)`; only the former attaches Autobee's wakeup protocol.
 - Give Autobee a namespaced store, and have a new tracker's founder append once before relying on others' optimistic writes.
 - Pin `autobee` exactly; it is experimental.
+- Use the P2P libraries (Hyperswarm, HyperDHT, hyperdht-mdns) through their public API only, unmodified from npm: no monkeypatching, private methods or patched copies. No router rules (OPNsense) either. Blind relays (`relayThrough`) are optional; nothing may depend on one.
 - Autobee emits `'update'` only on an interrupt. To hear about view changes, pass `onchange` to `createNode`, which runs from Autobee's `update` handler.
 - Don't add a machine API field without updating every client in the same change. MediaStorm is the proof client.
 - Prefer deleting code to adding it. Old platform code is at tag `archive/v0.3.0-platform`.
@@ -86,6 +87,6 @@ python3 sync-player.py      # after pushing peartube-media: pin both apps to its
 
 ## Troubleshooting
 
-No peers: check both NATs. HyperDHT aborts with `HOLEPUNCH_DOUBLE_RANDOMIZED_NATS` when both sides are randomized; forward a UDP port (`PEARTUBE_DHT_PORT`) or use `PEARTUBE_RELAY_THROUGH`.
+No peers: check both NATs. HyperDHT aborts with `HOLEPUNCH_DOUBLE_RANDOMIZED_NATS` (reported as `HOLEPUNCH_ABORTED`) when both sides are randomized; forward a UDP port (`PEARTUBE_DHT_PORT`) or use `PEARTUBE_RELAY_THROUGH`.
 
 Slow first connection on a local testnet: every peer is on 127.0.0.1, which HyperDHT will not holepunch, so two peers connect only once one of them passes dht-rpc's NAT check and reports itself open. That check can take minutes after a failed first try; a fresh testnet usually connects in about 25 seconds, which is why the E2E tests wait up to 60–120 seconds.
