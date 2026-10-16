@@ -1,4 +1,4 @@
-//! The P2P worker: a Bare worklet (bare-kit) running `mobile/worker.js`, which
+//! The P2P worker: a Bare worklet (bare-kit) running `worklet/worker.js`, which
 //! is the relay's own core. We talk to it in newline-delimited JSON over
 //! bare-kit's IPC pipes; worker.js documents the messages.
 
@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::settings::Settings;
 
-// mobile/worker.js packed by build.rs with bare-pack.
+// worklet/worker.js packed by build.rs with bare-pack.
 static BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/worker.bundle"));
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -294,26 +294,19 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|err| format!("Unexpected reply from the P2P worker: {err}"))
 }
 
-/// Where the app keeps its settings and bare-kit's unpacked assets.
-/// PEARTUBE_STORAGE overrides this and STORE_DIR.
-pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    if let Some(dir) = std::env::var_os("PEARTUBE_STORAGE") {
-        return dir.into();
-    }
-    home_dir("Library/Application Support/PearTube", ".local/share/peartube")
-});
+/// Where the app keeps its settings and bare-kit's unpacked assets: the same
+/// place the Dioxus app used, so an upgrade keeps them. PEARTUBE_STORAGE
+/// overrides this and STORE_DIR.
+pub static DATA_DIR: LazyLock<PathBuf> = LazyLock::new(|| app_dir("Library/Application Support/PearTube"));
 
 /// Where each tracker's Corestore lives. The app only reads, so its stores hold
 /// nothing peers cannot serve again, and they can be large: keep them out of
-/// backups (iCloud skips Library/Caches).
-static STORE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
+/// backups (Time Machine skips Library/Caches).
+static STORE_DIR: LazyLock<PathBuf> = LazyLock::new(|| app_dir("Library/Caches/PearTube"));
+
+fn app_dir(in_home: &str) -> PathBuf {
     if let Some(dir) = std::env::var_os("PEARTUBE_STORAGE") {
         return dir.into();
     }
-    home_dir("Library/Caches/PearTube", ".cache/peartube")
-});
-
-fn home_dir(apple: &str, other: &str) -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    home.join(if cfg!(target_vendor = "apple") { apple } else { other })
+    PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(in_home)
 }

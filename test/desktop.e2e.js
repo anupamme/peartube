@@ -1,5 +1,5 @@
-// End to end through the mobile app's P2P stack: a relay publishes a file; the
-// app's Bare worklet, driven from Rust by mobile/examples/smoke.rs exactly as
+// End to end through the Mac app's P2P stack: a relay publishes a file; the
+// app's Bare worklet, driven from Rust by desktop/examples/smoke.rs exactly as
 // the UI drives it, joins the tracker, finds the entry and streams it back.
 // Once connected, the relay publishes a second entry under the same id and then
 // removes it; the app must see both changes through update events alone, as
@@ -7,7 +7,7 @@
 // the entry through the app's player (peartube-media), over the worklet's
 // stream: every frame and every audio sample must equal FFmpeg's decode of the
 // file. The second test meets over LAN discovery alone. Needs cargo, ffmpeg
-// and `sh mobile/setup.sh`. Leaves its evidence in mobile/target/e2e/.
+// and `sh worklet/bare-kit.sh darwin`. Leaves its evidence in desktop/target/e2e/.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
@@ -24,7 +24,7 @@ import { createLan, lanAddress } from '../src/lan.js'
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const tmp = name => mkdtempSync(join(tmpdir(), `peartube-${name}-`))
 
-test('the mobile worklet streams a relay entry and follows the tracker live', async t => {
+test('the app worklet streams a relay entry and follows the tracker live', async t => {
   const testnet = await createTestnet(3)
   const relay = await createNode({ storage: tmp('relay'), bootstrap: testnet.bootstrap })
   t.after(async () => { await relay.close(); await testnet.destroy() })
@@ -34,7 +34,7 @@ test('the mobile worklet streams a relay entry and follows the tracker live', as
   const hostile = await relay.put({ id: 'imdb:tt0000666' }, Readable.from([randomBytes(10)]))
   await relay.append({ ...hostile, title: 'Hostile \ud83d' })
   const bytes = media(tmp('media'))
-  const published = await relay.publish({ id: 'imdb:tt0111161', title: 'Mobile E2E' }, Readable.from([bytes]))
+  const published = await relay.publish({ id: 'imdb:tt0111161', title: 'Desktop E2E' }, Readable.from([bytes]))
 
   // By name, so the worklet resolves each bootstrap node through udx-native's
   // DNS lookup, as it does for the public DHT whenever the nodes' listed IPs
@@ -43,8 +43,8 @@ test('the mobile worklet streams a relay entry and follows the tracker live', as
   const { stages, secondKey } = await drive(t, relay, published, { bootstrap }, { PEARTUBE_PLAY: '1' })
   verify(stages, relay, published, bytes, secondKey)
   verifyPlayed(stages.streamed.played, bytes)
-  assert.deepEqual(stages.streamed.titles.toSorted(), ['Hostile \ufffd', 'Mobile E2E'], 'the whole tracker lists, the bad title repaired')
-  save('result.json', { test: 'mobile worklet streams a relay entry and follows the tracker live', published, relay, stages })
+  assert.deepEqual(stages.streamed.titles.toSorted(), ['Desktop E2E', 'Hostile \ufffd'], 'the whole tracker lists, the bad title repaired')
+  save('result.json', { test: 'app worklet streams a relay entry and follows the tracker live', published, relay, stages })
 })
 
 // Where the public DHT cannot connect two peers (two randomized NATs, as on a
@@ -54,7 +54,7 @@ test('the mobile worklet streams a relay entry and follows the tracker live', as
 // Ethernet address itself; the relay listens on the same address, as
 // PEARTUBE_LAN_HOST would make it. The LAN ports must be free: 49799 for the
 // relay, 49798 for the app, so quit the desktop app and any local relay first.
-test('the mobile worklet finds a relay on the LAN and streams from it', async t => {
+test('the app worklet finds a relay on the LAN and streams from it', async t => {
   const host = lanAddress(networkInterfaces())
   if (!host) return t.skip('no Wi-Fi or Ethernet IPv4 on this machine')
   const dead = '127.0.0.1:9'
@@ -72,7 +72,7 @@ test('the mobile worklet finds a relay on the LAN and streams from it', async t 
   assert.equal(stages.streamed.relay.peers, 0, 'no DHT connection')
   assert.ok(stages.streamed.relay.lanPeers >= 1, 'the app reached the relay over LAN discovery')
   assert.equal(stages.streamed.lan, `on ${host}`, 'the status line names the address LAN discovery uses')
-  save('lan-result.json', { test: 'mobile worklet finds a relay on the LAN and streams from it', host, published, relay, stages })
+  save('lan-result.json', { test: 'app worklet finds a relay on the LAN and streams from it', host, published, relay, stages })
 })
 
 // Runs the app's P2P stack against relay with these settings. When the app has
@@ -81,7 +81,7 @@ test('the mobile worklet finds a relay on the LAN and streams from it', async t 
 async function drive (t, relay, published, settings, env = {}) {
   const storage = tmp('app')
   writeFileSync(join(storage, 'settings.json'), JSON.stringify({ tracker: relay.status().tracker, ...settings }))
-  const cargo = ['run', '--quiet', '--manifest-path', 'mobile/Cargo.toml', '--no-default-features', '--features', 'desktop', '--example', 'smoke', '--', published.id]
+  const cargo = ['run', '--quiet', '--manifest-path', 'desktop/Cargo.toml', '--example', 'smoke', '--', published.id]
   const smoke = spawn('cargo', cargo, { env: { ...process.env, ...env, PEARTUBE_STORAGE: storage }, stdio: ['ignore', 'pipe', 'inherit'] })
   t.after(() => smoke.kill())
 
@@ -145,7 +145,7 @@ function verifyPlayed (played, bytes) {
 }
 
 function save (file, { test, host, published, relay, stages }) {
-  const dir = join('mobile', 'target', 'e2e')
+  const dir = join('desktop', 'target', 'e2e')
   mkdirSync(dir, { recursive: true })
   const result = { test, at: new Date().toISOString(), host, published: { id: published.id, size: published.size, sha256: published.sha256 }, relay: relay.status(), stages }
   writeFileSync(join(dir, file), JSON.stringify(result, null, 2) + '\n')

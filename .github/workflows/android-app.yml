@@ -5,13 +5,7 @@ on:
   push:
     paths:
       - android/**
-      - mobile/worker.js
-      - mobile/pack.cjs
-      - mobile/imports.json
-      - mobile/crypto/**
-      - mobile/bare-kit.sh
-      - mobile/setup.sh
-      - mobile/patches/**
+      - worklet/**
       - src/**
       - package.json
       - package-lock.json
@@ -52,13 +46,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: android/native
-      # bare-kit built on QuickJS (mobile/bare-kit.sh), cached by its inputs.
+      # bare-kit built on QuickJS (worklet/bare-kit.sh), cached by its inputs.
       - run: npm install --global cmake-runtime@4.3.1 ninja-runtime@1.13.2
       - uses: actions/cache@v4
         with:
           path: ~/.cache/peartube
-          key: bare-kit-qjs-${{ hashFiles('mobile/bare-kit.sh', 'mobile/patches/*') }}
-      - run: sh mobile/setup.sh arm64-v8a
+          key: bare-kit-qjs-${{ hashFiles('worklet/bare-kit.sh', 'worklet/patches/*') }}
+      - run: sh worklet/bare-kit.sh arm64-v8a
       - uses: actions/cache@v4
         with:
           path: |

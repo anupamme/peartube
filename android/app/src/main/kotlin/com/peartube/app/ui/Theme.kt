@@ -5,7 +5,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// The Dioxus app's main.css palette.
+// PearTube's palette, shared with the Mac app (desktop/src/theme.rs).
 val Bg = Color(0xFF0F1115)
 val CardBg = Color(0xFF171A21)
 val Line = Color(0xFF262B36)

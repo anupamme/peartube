@@ -1,7 +1,7 @@
-// Builds the Android app's P2P worklet, as mobile/build.rs does for the Dioxus
-// app: packs mobile/worker.js with bare-pack for android-arm64, links every
+// Builds the Android app's P2P worklet, as desktop/build.rs does for the Mac
+// app: packs worklet/worker.js with bare-pack for android-arm64, links every
 // native addon the bundle loads with bare-link, and puts them next to
-// bare-kit's own libraries (built by mobile/bare-kit.sh) for the APK.
+// bare-kit's own libraries (built by worklet/bare-kit.sh) for the APK.
 //
 //   node android/worklet.mjs <assets dir> <jniLibs dir> <scratch dir>
 import { execFileSync } from 'node:child_process'
@@ -10,14 +10,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const mobile = path.join(root, 'mobile')
+const worklet = path.join(root, 'worklet')
 const [assets, jniLibs, scratch] = process.argv.slice(2).map(dir => path.resolve(dir))
 const host = 'android-arm64'
 const abi = 'arm64-v8a'
 
-const kit = path.join(mobile, 'vendor/bare-kit/android', abi)
+const kit = path.join(worklet, 'vendor/bare-kit/android', abi)
 if (!fs.existsSync(path.join(kit, 'libbare-kit.so'))) {
-  throw new Error(`bare-kit is not built for ${abi}: run sh mobile/bare-kit.sh ${abi}`)
+  throw new Error(`bare-kit is not built for ${abi}: run sh worklet/bare-kit.sh ${abi}`)
 }
 
 for (const dir of [assets, jniLibs, scratch]) fs.rmSync(dir, { recursive: true, force: true })
@@ -25,12 +25,12 @@ const libs = path.join(jniLibs, abi)
 fs.mkdirSync(assets, { recursive: true })
 fs.mkdirSync(libs, { recursive: true })
 
-// bare-pack runs under Bare (mobile/pack.cjs); its lexer addon crashes under Node 22.
+// bare-pack runs under Bare (worklet/pack.cjs); its lexer addon crashes under Node 22.
 const run = (...args) => execFileSync(process.execPath, args, { cwd: root, stdio: 'inherit' })
 const bundle = path.join(assets, 'worker.bundle')
-run(path.join(root, 'node_modules/bare/bin/bare'), path.join(mobile, 'pack.cjs'),
-  '--linked', '--host', host, '--imports', path.join(mobile, 'imports.json'),
-  '--out', bundle, path.join(mobile, 'worker.js'))
+run(path.join(root, 'node_modules/bare/bin/bare'), path.join(worklet, 'pack.cjs'),
+  '--linked', '--host', host, '--imports', path.join(worklet, 'imports.json'),
+  '--out', bundle, path.join(worklet, 'worker.js'))
 
 // The bundle starts with "<len>\n<json>\n", len counting both newlines. Its
 // resolutions map each addon's binding.js, at the package root, to a

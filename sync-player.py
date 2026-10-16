@@ -2,20 +2,20 @@
 """Pins the apps' player to a peartube-media commit.
 
 Sets the `rev` of the `player` and `codecs` git dependencies in
-mobile/Cargo.toml (the Dioxus Mac app) and android/native/Cargo.toml (the
-Android app's player library), and copies peartube-media's
-[patch.crates-io] block into both, which pins every OxideAV crate (Cargo
-applies patches only from the top-level manifest, so each needs its own copy).
+desktop/Cargo.toml (the Mac app) and android/native/Cargo.toml (the Android
+app's player library), and copies peartube-media's [patch.crates-io] block
+into both, which pins every OxideAV crate (Cargo applies patches only from
+the top-level manifest, so each needs its own copy).
 
-    python3 mobile/sync-player.py [path to a peartube-media checkout]
+    python3 sync-player.py [path to a peartube-media checkout]
 
 The default checkout is ~/projects/peartube-media; its HEAD must be pushed.
 """
 import pathlib, re, subprocess, sys
 
 media = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "~/projects/peartube-media").expanduser()
-root = pathlib.Path(__file__).resolve().parent.parent
-manifests = [root / "mobile" / "Cargo.toml", root / "android" / "native" / "Cargo.toml"]
+root = pathlib.Path(__file__).resolve().parent
+manifests = [root / "desktop" / "Cargo.toml", root / "android" / "native" / "Cargo.toml"]
 
 rev = subprocess.check_output(["git", "-C", media, "rev-parse", "HEAD"], text=True).strip()
 pushed = subprocess.run(["git", "-C", media, "branch", "-r", "--contains", rev], capture_output=True, text=True).stdout

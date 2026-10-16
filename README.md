@@ -58,14 +58,18 @@ Replication serves any stored core a peer can name, so the Corestore holds only 
 
 ## Client app
 
-PearTube's clients are a Kotlin app for Android in `android/` and a Dioxus app
-for macOS in `mobile/`. Both run the same worklet and Rust player; iOS is
-dropped for now. The relay and its acquisitions page remain available
-separately.
+PearTube's clients are a Kotlin app for Android in `android/`, which is what
+the GitHub releases ship, and a GPUI app for macOS in `desktop/`. Both run the
+same worklet and Rust player; iOS is dropped for now. The relay and its
+acquisitions page remain available separately.
 
-Each app is a peer itself, not a client of one relay. It runs the same core as a relay (`src/index.js`) inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit): it joins a tracker, lists its entries grouped by title, and plays a tapped one from the worklet's own blob server on `127.0.0.1`, pulling blocks from whichever peers have them and seeding them afterwards. It only reads: it never publishes or acquires. Playback uses the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media), in a native view with the controls drawn over it and a fullscreen mode: platform video decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The mobile E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
+Each app is a peer itself, not a client of one relay. It runs the same core as a relay (`src/index.js`) inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit): it joins a tracker, lists its entries grouped by title, and plays a tapped one from the worklet's own blob server on `127.0.0.1`, pulling blocks from whichever peers have them and seeding them afterwards. It only reads: it never publishes or acquires. Playback uses the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media), in a native view with the controls drawn over it and a fullscreen mode: platform video decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The desktop E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
 
-On first launch it asks for a tracker key (a relay's `GET /v1/status` shows it), and optionally blind relay keys, a DHT bootstrap list for a private network, and whether to find relays on this network. With that on, the app finds relays on the local network that run with `PEARTUBE_LAN_HOST` over mDNS, which works where the public DHT cannot connect two randomized NATs. It uses the device's Wi-Fi or Ethernet address and follows it from network to network. A line under the peer count shows what it is doing: the address it uses, or why it has none. Android drops Wi-Fi multicast unless an app holds a multicast lock, so the app holds one while it is open. macOS asks once whether the app may accept incoming connections; allow it, or LAN peers cannot connect. On iOS, mDNS sockets need Apple's multicast networking entitlement, which the app does not have yet, so it finds nothing there. Settings live in the app's data directory. Each tracker's Corestore holds only what peers can serve again, so it lives outside backups: `Library/Caches` on iOS and macOS, the no-backup files directory on Android.
+On first launch it asks for a tracker key (a relay's `GET /v1/status` shows it), and optionally blind relay keys, a DHT bootstrap list for a private network, and whether to find relays on this network. With that on, the app finds relays on the local network that run with `PEARTUBE_LAN_HOST` over mDNS, which works where the public DHT cannot connect two randomized NATs. It uses the device's Wi-Fi or Ethernet address and follows it from network to network. A line under the peer count shows what it is doing: the address it uses, or why it has none. Android drops Wi-Fi multicast unless an app holds a multicast lock, so the app holds one while it is open. macOS asks once whether the app may accept incoming connections; allow it, or LAN peers cannot connect. Settings live in the app's data directory. Each tracker's Corestore holds only what peers can serve again, so it lives outside backups: `~/Library/Caches/PearTube` on the Mac, the no-backup files directory on Android.
+
+On the Mac, the space bar plays and pauses, ← and → skip 10 seconds, F toggles
+fullscreen and Esc leaves fullscreen, then the video. A click on the picture
+plays or pauses it, and a double click toggles fullscreen.
 
 MIDI playback needs your own SoundFont 2 (`.sf2`, up to 256 MiB). In Settings,
 choose a bank with the system document picker. The app copies it into private
@@ -186,28 +190,33 @@ Version 0.4.19 is the same app as 0.4.18, built from `main`, which now carries
 the Kotlin Android app. It is the first full release since 0.4.6; 0.4.7 to
 0.4.18 were prereleases.
 
-Build needs Rust, `npm install` at the repo root, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10) and Xcode:
+The Mac app is now a GPUI app (`desktop/`), replacing the Dioxus webview app.
+It keeps that app's settings and stores. The Dioxus code is gone from the
+repository, iOS included.
+
+Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
 ```sh
-sh mobile/setup.sh     # once: build bare-kit on QuickJS (cached) for Android if the NDK is found and macOS on a Mac, plus bare-kit's iOS prebuild on a Mac
-sh mobile/setup.sh darwin   # the same with Xcode alone, no Android SDK
+sh worklet/bare-kit.sh   # once: build bare-kit on QuickJS (cached) for Android if the NDK is found and macOS on a Mac
+sh worklet/bare-kit.sh darwin   # the Mac only, with Xcode alone
 cd android && ./gradlew :app:assembleDebug   # debug APK (com.peartube.app.dev, installs beside the release app)
 cd android && ./gradlew -Ppeartube.dev :app:assembleRelease   # the release build as com.peartube.app.dev, to try its real size and speed
 sh android/release.sh  # signed arm64 release APK in android/build/release-apk
 node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path]   # E2E on a connected phone; writes android/build/e2e
-npm run app            # macOS: Dioxus builds the optimized app, bundles assets and launches it
-npm run test:mobile    # E2E on macOS: the worklet finds a relay over a testnet DHT, then over LAN discovery alone; streams exact bytes and sees later publishes and removals live
+npm run app            # macOS: builds desktop/target/release/PearTube.app and opens it
+cargo run --manifest-path desktop/Cargo.toml   # macOS: a debug build, run in place
+npm run test:desktop   # E2E on macOS: the worklet finds a relay over a testnet DHT, then over LAN discovery alone; streams exact bytes and sees later publishes and removals live
 ```
 
-The desktop command uses `dx serve`, not a raw `cargo run`: macOS loads the
-shared mobile stylesheet from the `.app` bundle's `Contents/Resources` directory.
-Running the unbundled binary omits those assets and leaves the UI unstyled.
+`desktop/bundle.sh`, which `npm run app` runs, puts BareKit and the worklet's
+native addons in the app's `Contents/Frameworks` and signs it ad hoc. A
+`cargo run` binary finds them where the build left them instead.
 
 Gradle needs JDK 17. On macOS, `export JAVA_HOME=$(/usr/libexec/java_home -v 17)`
 selects it (`android/release.sh` does this); the Android Gradle plugin's `jlink`
 stage fails with JDK 27.
 
-The Android app's Gradle build runs `android/worklet.mjs`, which packs `mobile/worker.js` with bare-pack and links the native addons it needs (sodium, udx, rocksdb, …) with bare-link, and runs cargo for `android/native`, the player library. On the Mac, `mobile/build.rs` does the same packing; `mobile/ios.sh` embeds BareKit and the addon frameworks, which dx leaves out, and re-signs the app. In the worklet, `crypto` is `mobile/crypto`: SHA-256 on sodium-native, all the core and LAN discovery use, so neither app ships bare-crypto's 0.8 MB library.
+The Android app's Gradle build runs `android/worklet.mjs`, which packs `worklet/worker.js` with bare-pack and links the native addons it needs (sodium, udx, rocksdb, …) with bare-link, and runs cargo for `android/native`, the player library. On the Mac, `desktop/build.rs` does the same packing. In the worklet, `crypto` is `worklet/crypto`: SHA-256 on sodium-native, all the core and LAN discovery use, so neither app ships bare-crypto's 0.8 MB library.
 
 The player library links with 16 KiB ELF load alignment, for Android devices
 with 16 KiB pages, and with the build machine's home directory written as `~`
@@ -223,7 +232,7 @@ debug build is twice the size and slower, so try size and speed with
 `-Ppeartube.dev`, which builds the release as `com.peartube.app.dev`, signed
 with the debug key.
 
-On Android and macOS the worklet runs on QuickJS, not V8: `mobile/bare-kit.sh` builds bare-kit with [libqjs](https://github.com/holepunchto/libqjs), Holepunch's QuickJS backend for the same engine ABI, so bare and the addons are unchanged. That makes `libbare-kit.so` 3.9 MB instead of 65.5 MB, and the APK 16.7 MB smaller. iOS still uses bare-kit's V8 prebuild.
+On Android and macOS the worklet runs on QuickJS, not V8: `worklet/bare-kit.sh` builds bare-kit with [libqjs](https://github.com/holepunchto/libqjs), Holepunch's QuickJS backend for the same engine ABI, so bare and the addons are unchanged. That makes `libbare-kit.so` 3.9 MB instead of 65.5 MB, and the APK 16.7 MB smaller.
 
 CI (`.github/workflows/android-app.yml`) builds the arm64 debug APK on every push that touches the Android app, the worklet or the core. Download it from the run's `PearTube-debug-arm64` artifact. Releases carry the signed APK from `android/release.sh`; Gradle signs it with `peartube.keystore`, `peartube.keystorePassword`, `peartube.keyAlias` and `peartube.keyPassword` from `~/.gradle/gradle.properties`. It keeps the Dioxus app's `com.peartube.app` package, signing key and data paths, so it can update that app in place and keep its settings and stores. Debug builds are `com.peartube.app.dev`, beside it.
 

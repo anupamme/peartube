@@ -1,5 +1,5 @@
 // From holepunchto/bare-kit 78230eb, android/src/main/java/to/holepunch/bare/kit/IPC.java
-// (Apache-2.0). Its JNI is part of libbare-kit.so, built by mobile/bare-kit.sh.
+// (Apache-2.0). Its JNI is part of libbare-kit.so, built by worklet/bare-kit.sh.
 package to.holepunch.bare.kit;
 
 import java.io.Closeable;

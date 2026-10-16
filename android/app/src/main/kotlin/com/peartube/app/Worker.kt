@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicLong
 class WorkerException(message: String) : Exception(message)
 
 /**
- * The P2P worker: a Bare worklet running mobile/worker.js, the relay's own core. We talk
+ * The P2P worker: a Bare worklet running worklet/worker.js, the relay's own core. We talk
  * to it in newline-delimited JSON over bare-kit's IPC; worker.js documents the messages.
  * Every bare-kit call runs on one thread, whose looper also delivers IPC readiness.
  */

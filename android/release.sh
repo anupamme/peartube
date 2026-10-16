@@ -14,7 +14,7 @@ if [ -x /usr/libexec/java_home ]; then JAVA_HOME=$(/usr/libexec/java_home -v 17)
 : "${ANDROID_HOME:=$HOME/Library/Android/sdk}"
 export ANDROID_HOME
 tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../mobile/Cargo.toml | head -n 1)
+version=$(node -p 'require("../package.json").version')
 
 ./gradlew --console=plain :app:assembleRelease
 mkdir -p build/release-apk

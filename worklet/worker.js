@@ -161,10 +161,10 @@ const fatal = err => send({ event: 'fatal', error: String(err?.message || err) }
 Bare.on('uncaughtException', fatal).on('unhandledRejection', fatal)
 
 // The app suspends the worklet in the background, and the OS grants `linger` ms
-// before Bare stops. iOS also reports every brief loss of focus (notification
-// shade, app switcher) as a suspend, so peers are dropped only if it lasts.
-// LAN discovery stops with them; back in front it binds to whatever network
-// the device is on by then.
+// before Bare stops. A short trip out of the app (the app switcher, a system
+// sheet) suspends it too, so peers are dropped only if it lasts. LAN discovery
+// stops with them; back in front it binds to whatever network the device is
+// on by then.
 let suspending = null
 Bare.on('suspend', linger => {
   // A second suspend before the resume must not leave the first timer behind.

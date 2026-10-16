@@ -6,11 +6,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-// The peartube checkout: the worklet (mobile/worker.js) runs the relay's own core (src/).
+// The peartube checkout: the worklet (worklet/worker.js) runs the relay's own core (src/).
 val checkout: File = rootDir.parentFile
-val mobile = File(checkout, "mobile")
-// Releases bump the version in mobile/Cargo.toml; the Android app ships the same one.
-val appVersion = Regex("""(?m)^version = "([^"]+)"""").find(File(mobile, "Cargo.toml").readText())!!.groupValues[1]
+val worklet = File(checkout, "worklet")
+// Releases bump the version in package.json; both apps ship it.
+val appVersion = (groovy.json.JsonSlurper().parseText(File(checkout, "package.json").readText()) as Map<*, *>)["version"] as String
 
 /** Packs the P2P worklet and gathers the native libraries it loads (android/worklet.mjs). */
 abstract class WorkletTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
@@ -36,12 +36,12 @@ abstract class WorkletTask @Inject constructor(private val exec: ExecOperations)
     }
 }
 
-val worklet = tasks.register<WorkletTask>("worklet") {
+val workletTask = tasks.register<WorkletTask>("worklet") {
     repo.set(checkout)
     sources.from(
         File(checkout, "android/worklet.mjs"),
-        File(mobile, "worker.js"), File(mobile, "pack.cjs"), File(mobile, "imports.json"), fileTree(File(mobile, "crypto")),
-        fileTree(File(mobile, "vendor/bare-kit/android/arm64-v8a")),
+        File(worklet, "worker.js"), File(worklet, "pack.cjs"), File(worklet, "imports.json"), fileTree(File(worklet, "crypto")),
+        fileTree(File(worklet, "vendor/bare-kit/android/arm64-v8a")),
         fileTree(File(checkout, "src")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
     )
     assetsDir.set(layout.buildDirectory.dir("worklet/assets"))
@@ -109,7 +109,7 @@ android {
         versionName = appVersion
         ndk { abiFilters += "arm64-v8a" }
     }
-    // The version CI installs; mobile/bare-kit.sh builds against the newest one.
+    // The version CI installs; worklet/bare-kit.sh builds against the newest one.
     ndkVersion = "29.0.14206865"
 
     signingConfigs {
@@ -168,8 +168,8 @@ kotlin {
 
 androidComponents {
     onVariants { variant ->
-        variant.sources.assets?.addGeneratedSourceDirectory(worklet, WorkletTask::assetsDir)
-        variant.sources.jniLibs?.addGeneratedSourceDirectory(worklet, WorkletTask::libsDir)
+        variant.sources.assets?.addGeneratedSourceDirectory(workletTask, WorkletTask::assetsDir)
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(workletTask, WorkletTask::libsDir)
         val cargo = tasks.register<CargoTask>("cargo${variant.name.replaceFirstChar { it.uppercase() }}") {
             crate.set(nativeCrate)
             sources.from(fileTree(nativeCrate.resolve("src")), nativeCrate.resolve("Cargo.toml"), nativeCrate.resolve("Cargo.lock"))

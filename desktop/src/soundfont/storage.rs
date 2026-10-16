@@ -5,7 +5,6 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::Path;
 
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
 pub(super) fn stage(reader: impl Read, destination: &Path, max_bytes: u64) -> io::Result<()> {
     let result = (|| {
         let mut output = File::create(destination)?;

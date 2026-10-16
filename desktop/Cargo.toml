@@ -1,16 +1,19 @@
+# The Mac app: a GPUI window over the Bare worklet and the Rust player. The
+# version is package.json's; this crate has none of its own.
 [package]
 name = "peartube"
-version = "0.4.19"
 edition = "2024"
 publish = false
 
-# dx takes the app's display name from the binary name.
 [[bin]]
 name = "PearTube"
 path = "src/main.rs"
 
 [dependencies]
-dioxus = { version = "=0.7.10", features = [] }
+# GPUI (Zed's UI framework, the gpui-pre snapshot), its macOS platform, and
+# gpui-component's widgets: text inputs, slider, menus. Pinned exactly: GPUI
+# changes its API between snapshots.
+gpui-kit = "=0.7.3"
 futures-channel = "0.3"
 futures-util = "0.3"
 libc = "0.2"
@@ -22,21 +25,11 @@ serde_json = "1"
 player = { git = "https://github.com/ayooooo123/peartube-media", rev = "d906430fc71c7bb839017ffd27c2be8dae0c713b" }
 codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "d906430fc71c7bb839017ffd27c2be8dae0c713b" }
 oxideav-core = "*"
-
-# The player's picture: a native view inside the webview.
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# The player's picture: a native view under the window's GPUI view.
 objc2 = "0.6"
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-rfd = "=0.17.2"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSResponder", "NSView"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSGraphics", "NSResponder", "NSView"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSGeometry"] }
-
-[target.'cfg(target_os = "ios")'.dependencies]
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "UIResponder", "UIView", "block2", "UIDocumentPickerViewController", "UIViewController", "UIPresentationController", "UIWindow", "objc2-uniform-type-identifiers"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSObject", "NSURL"] }
-objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 futures-executor = "0.3"
@@ -46,64 +39,10 @@ ureq = { version = "3", default-features = false }
 [build-dependencies]
 serde_json = "1"
 
-[features]
-default = ["mobile"]
-desktop = ["dioxus/desktop"]
-mobile = ["dioxus/mobile"]
-
-# Stripped, fat LTO, one codegen unit. LTO drops code nothing references;
-# peartube-media's `codecs` turns on oxideav-core's `decode-only` feature so
-# OxideAV's encoders and muxers are unreferenced too. Unwinding stays on: the
-# player catches decoder panics.
+# Optimised for speed, not size: everything at opt-level 3. Unwinding stays
+# on: the player catches decoder panics.
 [profile.release]
 strip = true
-lto = "fat"
-codegen-units = 1
-
-# Dependencies build for size; the code that must keep its speed builds at 3:
-# the decoders that play HD video or sit near PerfAudit's real-time floors,
-# oxideav-core's bit readers, the RGBA conversion of software frames and the
-# engine. This crate stays at 3 too: fat LTO optimises the whole program at
-# the final crate's level, and at "s" rustc turns off loop and SLP
-# vectorization for all of it. peartube-media's root Cargo.toml carries the
-# same lists; keep the two in step.
-[profile.release.package."*"]
-opt-level = "s"
-[profile.release.package.oxideav-core]
-opt-level = 3
-[profile.release.package.oxideav-pixfmt]
-opt-level = 3
-[profile.release.package.player]
-opt-level = 3
-[profile.release.package.oxideav-h264]
-opt-level = 3
-[profile.release.package.oxideav-h265]
-opt-level = 3
-[profile.release.package.oxideav-av1]
-opt-level = 3
-[profile.release.package.oxideav-vp8]
-opt-level = 3
-[profile.release.package.oxideav-vp9]
-opt-level = 3
-[profile.release.package.oxideav-mpeg12video]
-opt-level = 3
-[profile.release.package.oxideav-mpeg4video]
-opt-level = 3
-[profile.release.package.codec-wmv]
-opt-level = 3
-[profile.release.package.oxideav-aac]
-opt-level = 3
-[profile.release.package.oxideav-mp3]
-opt-level = 3
-[profile.release.package.codec-dca]
-opt-level = 3
-# DV at "s" decodes DVCPRO HD 1080 at the 2x HD floor; at 3 it has margin.
-# The Opus and AC-3 ports stay "s": 50x real time or more there.
-[profile.release.package.codec-dv]
-opt-level = 3
-# The Ogg demuxer runs per packet; at "s" it slows Opus in Ogg.
-[profile.release.package.oxideav-ogg]
-opt-level = 3
 
 # Video decoding unoptimized is too slow to watch; keep the app's own code
 # quick to rebuild.

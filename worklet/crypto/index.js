@@ -2,7 +2,7 @@
 // (src/index.js) and LAN discovery (@p2plabs/hyperdht-mdns) use. It runs on
 // sodium-native, which the worklet loads anyway, so the app does not ship
 // bare-crypto's 0.8 MB native library. package.json's `imports` and
-// mobile/imports.json map `node:crypto` and `crypto` here for Bare.
+// worklet/imports.json map `node:crypto` and `crypto` here for Bare.
 const b4a = require('b4a')
 const sodium = require('sodium-native')
 

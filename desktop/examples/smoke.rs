@@ -1,4 +1,4 @@
-//! The app's P2P stack without the UI, for test/mobile.e2e.js. Starts the real
+//! The app's P2P stack without the UI, for test/desktop.e2e.js. Starts the real
 //! worklet, joins the tracker in PEARTUBE_STORAGE/settings.json, and prints one
 //! JSON line per stage:
 //!   streamed  an entry for <id> appeared, and its stream URL read back; with

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Build bare-kit with QuickJS instead of V8 into mobile/vendor/bare-kit:
+# Build bare-kit with QuickJS instead of V8 into worklet/vendor/bare-kit:
 #
-#   sh mobile/bare-kit.sh [target ...]
+#   sh worklet/bare-kit.sh [target ...]
 #
 # A target is an Android ABI (arm64-v8a, armeabi-v7a, x86_64, x86), giving
 # android/<abi>/libbare-kit.so, or darwin, giving darwin/BareKit.framework
@@ -12,8 +12,7 @@
 # bare, bare-kit and their built-in addons; the rest is V8, its ICU data, and
 # the symbol table for V8's 66,000 exported symbols. libqjs is Holepunch's
 # libjs ABI on QuickJS, so bare, bare-kit and the worker's addons are
-# unchanged, and libbare-kit.so is 3.9 MB. iOS keeps the V8 prebuilds
-# (mobile/setup.sh).
+# unchanged, and libbare-kit.so is 3.9 MB.
 #
 # Builds are cached by the hash of this script and the patches. Needs git,
 # npm, node 22.21+ or 24.9+, cmake 4+ and ninja; Xcode for darwin; and for
@@ -21,14 +20,14 @@
 # (default ~/Library/Android/sdk on a Mac, ~/Android/Sdk elsewhere).
 set -eu
 
-# bare-kit v2.5.5, the version of setup.sh's iOS prebuilds; libqjs main; and
-# the libjs headers and QuickJS master that libqjs main was made against. It
-# fetches those two unpinned, so they are given to CMake from here.
+# bare-kit v2.5.5, libqjs main, and the libjs headers and QuickJS master that
+# libqjs main was made against. libqjs fetches those two unpinned, so they are
+# given to CMake from here.
 BARE_KIT=78230eb57194cdfb67184220c46b29ad23d8f825
 LIBQJS=177194ba544c50d4ebd780bcdf7570043c8cea2c
 LIBJS=19f0f5c73f24a7d8f3b95d7dd7609d5743f4adac
 QUICKJS=535a7c250ff4a577ec36c3e103daab6dadeea650
-# bare-kit's minSdk, and the app's (Dioxus.toml).
+# bare-kit's minSdk, and the Android app's (android/app/build.gradle.kts).
 API=29
 
 cd "$(dirname "$0")"
@@ -152,4 +151,4 @@ for target in "$@"; do
 done
 # Only the outputs are kept; sources and build trees are ~1 GB per target.
 rm -rf "$work"
-echo "bare-kit on QuickJS in mobile/vendor/bare-kit: $*"
+echo "bare-kit on QuickJS in worklet/vendor/bare-kit: $*"
