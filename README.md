@@ -161,6 +161,18 @@ of 24 frames a second on a Pixel 5a. The player now works out each frame's
 display time from the H.264 or HEVC picture order and shows every frame. Files
 with normal timestamps play as before.
 
+Version 0.4.17 is the first release of the native Android app (Kotlin and
+Jetpack Compose). It replaces the Dioxus app on Android with the same package,
+signing key and data, so it updates 0.4.16 in place. The player controls sit over
+the picture, there is a fullscreen mode, and the app takes about 37 MB on a Pixel
+5a instead of about 65 MB. MPEG-4 video such as XviD decodes 1.43x faster: 35 to
+50 frames a second for a 720p XviD episode on a Pixel 5a. A hot phone slows its
+CPU, and at 1.4 GHz the old decoder fell below the 25 frames a second that
+episode needs, so playback kept pausing. Going Home while the phone's hardware
+decoder played a video no longer leaves a black picture and "platform video
+output recovery timed out" on return. With subtitles on, going Home no longer
+stalls for a second.
+
 Build needs Rust, `npm install` at the repo root, and for `mobile/setup.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs [dx 0.7.10](https://github.com/DioxusLabs/dioxus/releases/tag/v0.7.10) and Xcode:
 
 ```sh
