@@ -15,6 +15,9 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
 
+/** The longest surfaceDestroyed waits for the native side to let go of its Surface. */
+private const val RELEASE_WAIT_MS = 1_000L
+
 /**
  * The surfaces the player draws on: video, and subtitles above it. They sit behind the
  * Compose UI, in the activity's content view rather than inside Compose, under the play
@@ -297,11 +300,22 @@ private class SurfaceCallback(
         }
         admissionDeadline = 0L
         retiring = true
-        val status = try {
+        var status = try {
             NativePlayer.retireSurface(bindingId, !abandonReceipt)
         } catch (error: Exception) {
             host.failure("Cannot retire player Surface: ${error.message}")
             2
+        }
+        // The framework tears the Surface down as soon as surfaceDestroyed returns. A
+        // platform decoder still stopping on it then fails, its cleanup can never be
+        // proved, and every later Surface is held. The native owner lets go within a few
+        // milliseconds, so give it a bounded moment while the Surface still exists.
+        if (forced && !abandonReceipt) {
+            val until = SystemClock.uptimeMillis() + RELEASE_WAIT_MS
+            while (status == 0 && SystemClock.uptimeMillis() < until) {
+                Thread.sleep(2)
+                status = retirementStatus()
+            }
         }
         if (status == 1 || abandonReceipt) {
             bindingId = 0L
