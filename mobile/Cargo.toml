@@ -19,8 +19,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The video player: peartube-media's engine, OxideAV codecs and the
 # platform video decoders. See [patch.crates-io] below.
-player = { git = "https://github.com/ayooooo123/peartube-media", rev = "c0a9ca2bd14667795d50343ddf3d2a3f7a36cb1f" }
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "c0a9ca2bd14667795d50343ddf3d2a3f7a36cb1f" }
+player = { git = "https://github.com/ayooooo123/peartube-media", rev = "d906430fc71c7bb839017ffd27c2be8dae0c713b" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "d906430fc71c7bb839017ffd27c2be8dae0c713b" }
 oxideav-core = "*"
 
 # The player's picture: a native view inside the webview.
