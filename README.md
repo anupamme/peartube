@@ -206,6 +206,10 @@ libraries are on their latest versions (hypercore 11.39, corestore 7.15,
 hyperdht 6.34.1, protomux 3.13); none of the updates changes how NATs are
 crossed.
 
+Version 0.4.21 fixes the Android player's back button after fullscreen. Leaving
+fullscreen from a sideways picture moved the back button down by about the
+status bar's height; it now stays where it was.
+
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
 ```sh
