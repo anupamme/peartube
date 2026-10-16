@@ -275,8 +275,12 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         ) {
             AnimatedVisibility(controls || !state.playing, enter = fadeIn(), exit = fadeOut()) {
                 Box(Modifier.fillMaxSize().background(Scrim)) {
+                    // Only fullscreen lays out past the cutout. Out of it, the window fits the
+                    // system bars, and a cutout inset left over from fullscreen pushed this row
+                    // down by about the status bar's height.
                     Row(
-                        Modifier.align(Alignment.TopStart).fillMaxWidth().windowInsetsPadding(WindowInsets.displayCutout)
+                        Modifier.align(Alignment.TopStart).fillMaxWidth()
+                            .then(if (fullscreen) Modifier.windowInsetsPadding(WindowInsets.displayCutout) else Modifier)
                             .padding(horizontal = if (fullscreen) 16.dp else 4.dp, vertical = if (fullscreen) 8.dp else 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {

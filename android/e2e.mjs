@@ -140,12 +140,15 @@ try {
   // finds the button; later, a first tap at its place shows them and a second presses.
   const video = clockOf(nodes())
   let button
+  let back
   for (let i = 0; i < 5 && !button; i++) {
     await sleep(3600)
     tap(video)
-    button = nodes().find(n => n.desc === 'Fullscreen')
+    const shown = nodes()
+    button = shown.find(n => n.desc === 'Fullscreen')
+    back = shown.find(n => n.desc === 'Back')
   }
-  if (!button) throw new Error('No Fullscreen button')
+  if (!button || !back) throw new Error('No Fullscreen or Back button')
   await sleep(3600)
   tap(button)
   await sleep(500)
@@ -166,13 +169,25 @@ try {
   const upright = await waitFor('portrait', ns => ns.rotation === 0, 10_000)
   checks.fullscreen = Boolean(upright) && full.w >= sideways[0].w * 0.95 && full.h >= sideways[0].h * 0.95
 
+  // Out of fullscreen, the controls sit where they did before it: a cutout inset left over
+  // from fullscreen once pushed the top row down.
+  await sleep(1500)
+  let backAgain
+  for (let i = 0; i < 5 && !backAgain; i++) {
+    backAgain = nodes().find(n => n.desc === 'Back')
+    if (!backAgain) tap(video)
+  }
+  shot('after-fullscreen.png')
+  result.back = { before: [back.x, back.y], after: backAgain && [backAgain.x, backAgain.y] }
+  checks.backInPlace = Boolean(backAgain) && Math.abs(backAgain.x - back.x) <= 2 && Math.abs(backAgain.y - back.y) <= 2
+
   shell('input keyevent KEYCODE_BACK')
   checks.backToList = Boolean(await waitFor('the list again', ns => ns.find(n => n.text === 'PearTube'), 15_000))
 } catch (err) {
   result.error = String(err?.stack || err)
 }
 
-const expected = ['listed', ...(opts.lan ? ['lan'] : []), 'video', 'clockAdvances', 'audio', 'fullscreen', 'backToList']
+const expected = ['listed', ...(opts.lan ? ['lan'] : []), 'video', 'clockAdvances', 'audio', 'fullscreen', 'backInPlace', 'backToList']
 result.passed = !result.error && expected.every(name => checks[name] === true)
 result.finished = new Date().toISOString()
 fs.writeFileSync(path.join(opts.out, 'result.json'), JSON.stringify(result, null, 2) + '\n')
