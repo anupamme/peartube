@@ -219,6 +219,16 @@ Version 0.4.21 fixes the Android player's back button after fullscreen. Leaving
 fullscreen from a sideways picture moved the back button down by about the
 status bar's height; it now stays where it was.
 
+Version 0.4.22 moves both apps to the latest player. On the Mac, Dolby Vision
+(profiles 5, 7 and 8) plays through Apple's player, E-AC-3 Atmos is passed
+on, 10-bit HDR plays on the software route, and closed captions show on the
+Apple route too. On both apps: a seek into the last second of a Theora+Vorbis
+video keeps its sound, Ogg Vorbis no longer plays its end padding, an HEVC
+picture without a timestamp no longer takes another's, AMR sound in MP4 plays,
+and a damaged video packet costs only its own picture instead of stopping the
+video. The Android app's native libraries no longer
+carry the build machine's temp-folder path.
+
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
 ```sh
