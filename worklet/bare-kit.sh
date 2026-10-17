@@ -55,7 +55,10 @@ for target in "$@"; do
 done
 key=$(cat bare-kit.sh patches/*.patch | shasum -a 256 | cut -c1-16)
 out="$cache/bare-kit-qjs-$key"
-work="${TMPDIR:-/tmp}/peartube-bare-kit-$key"
+# Not $TMPDIR: the build path ends up in the libraries (C __FILE__ strings,
+# and the module paths of bare's embedded JS bundle), and on a Mac $TMPDIR is
+# a per-user folder under /var/folders. /tmp names no machine or user.
+work="/tmp/peartube-bare-kit-$key"
 
 fetch() {
   mkdir -p "$3"
