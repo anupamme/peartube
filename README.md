@@ -58,10 +58,19 @@ Replication serves any stored core a peer can name, so the Corestore holds only 
 
 ## Client app
 
-PearTube's clients are a Kotlin app for Android in `android/`, which is what
-the GitHub releases ship, and a GPUI app for macOS in `desktop/`. Both run the
-same worklet and Rust player; iOS is dropped for now. The relay and its
-acquisitions page remain available separately.
+PearTube's clients are a Kotlin app for Android in `android/` and a GPUI app
+for macOS in `desktop/`; GitHub releases ship both. Both run the same worklet
+and Rust player; iOS is dropped for now. The relay and its acquisitions page
+remain available separately.
+
+The Mac release is `PearTube-<version>-macos-arm64.zip`, for Apple Silicon Macs
+on macOS 13 or later. It is signed ad hoc, not notarized, so macOS refuses to
+open the downloaded app. Unzip it, move `PearTube.app` to Applications, and
+clear the download mark once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/PearTube.app
+```
 
 Each app is a peer itself, not a client of one relay. It runs the same core as a relay (`src/index.js`) inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit): it joins a tracker, lists its entries grouped by title, and plays a tapped one from the worklet's own blob server on `127.0.0.1`, pulling blocks from whichever peers have them and seeding them afterwards. It only reads: it never publishes or acquires. Playback uses the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media), in a native view with the controls drawn over it and a fullscreen mode: platform video decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The desktop E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
 
@@ -220,6 +229,7 @@ cd android && ./gradlew -Ppeartube.dev :app:assembleRelease   # the release buil
 sh android/release.sh  # signed arm64 release APK in android/build/release-apk
 node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path]   # E2E on a connected phone; writes android/build/e2e
 npm run app            # macOS: builds desktop/target/release/PearTube.app and opens it
+sh desktop/bundle.sh --zip   # macOS: the same, zipped for a release as desktop/target/release/PearTube-<version>-macos-arm64.zip
 cargo run --manifest-path desktop/Cargo.toml   # macOS: a debug build, run in place
 npm run test:desktop   # E2E on macOS: the worklet finds a relay over a testnet DHT, then over LAN discovery alone; streams exact bytes and sees later publishes and removals live
 ```
@@ -250,7 +260,7 @@ with the debug key.
 
 On Android and macOS the worklet runs on QuickJS, not V8: `worklet/bare-kit.sh` builds bare-kit with [libqjs](https://github.com/holepunchto/libqjs), Holepunch's QuickJS backend for the same engine ABI, so bare and the addons are unchanged. That makes `libbare-kit.so` 3.9 MB instead of 65.5 MB, and the APK 16.7 MB smaller.
 
-CI (`.github/workflows/android-app.yml`) builds the arm64 debug APK on every push that touches the Android app, the worklet or the core. Download it from the run's `PearTube-debug-arm64` artifact. Releases carry the signed APK from `android/release.sh`; Gradle signs it with `peartube.keystore`, `peartube.keystorePassword`, `peartube.keyAlias` and `peartube.keyPassword` from `~/.gradle/gradle.properties`. It keeps the Dioxus app's `com.peartube.app` package, signing key and data paths, so it can update that app in place and keep its settings and stores. Debug builds are `com.peartube.app.dev`, beside it.
+CI (`.github/workflows/android-app.yml`) builds the arm64 debug APK on every push that touches the Android app, the worklet or the core. Download it from the run's `PearTube-debug-arm64` artifact. Releases carry the signed APK from `android/release.sh` and the Mac zip from `desktop/bundle.sh --zip`. Gradle signs the APK with `peartube.keystore`, `peartube.keystorePassword`, `peartube.keyAlias` and `peartube.keyPassword` from `~/.gradle/gradle.properties`. It keeps the Dioxus app's `com.peartube.app` package, signing key and data paths, so it can update that app in place and keep its settings and stores. Debug builds are `com.peartube.app.dev`, beside it.
 
 ## History
 
