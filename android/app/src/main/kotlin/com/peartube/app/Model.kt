@@ -17,6 +17,7 @@ data class Settings(
     val relayThrough: List<String> = emptyList(),
     val bootstrap: List<String> = emptyList(),
     val lanDiscovery: Boolean = false,
+    val privateRouting: Boolean = false,
 ) {
     fun save(dir: File) {
         dir.mkdirs()
@@ -25,6 +26,7 @@ data class Settings(
             .put("relayThrough", JSONArray(relayThrough))
             .put("bootstrap", JSONArray(bootstrap))
             .put("lanDiscovery", lanDiscovery)
+            .put("privateRouting", privateRouting)
         val tmp = File(dir, "settings.json.tmp")
         tmp.writeText(json.toString(2))
         if (!tmp.renameTo(File(dir, "settings.json"))) throw IOException("Cannot save settings.json")
@@ -38,20 +40,21 @@ data class Settings(
                 relayThrough = json.optJSONArray("relayThrough").strings(),
                 bootstrap = json.optJSONArray("bootstrap").strings(),
                 lanDiscovery = json.optBoolean("lanDiscovery"),
+                privateRouting = json.optBoolean("privateRouting"),
             )
         } catch (_: Exception) {
             Settings()
         }
 
         /** Settings from the form's fields. Lists split on commas or whitespace. */
-        fun parse(tracker: String, relayThrough: String, bootstrap: String, lan: Boolean): Settings {
+        fun parse(tracker: String, relayThrough: String, bootstrap: String, lan: Boolean, privateRouting: Boolean = false): Settings {
             val key = tracker.trim().lowercase()
             require(isKey(key)) { "The tracker key is 64 hex characters." }
             val relays = split(relayThrough).map { it.lowercase() }
             relays.firstOrNull { !isKey(it) }?.let { throw IllegalArgumentException("Relay key $it is not 64 hex characters.") }
             val nodes = split(bootstrap)
             nodes.firstOrNull { !isHostPort(it) }?.let { throw IllegalArgumentException("Bootstrap node $it is not host:port.") }
-            return Settings(key, relays, nodes, lan)
+            return Settings(key, relays, nodes, lan, privateRouting)
         }
 
         private fun split(list: String) = list.split(',', ' ', '\t', '\n', '\r').filter { it.isNotEmpty() }

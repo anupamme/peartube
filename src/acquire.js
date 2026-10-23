@@ -1,14 +1,19 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { Readable } from 'node:stream'
+import { request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 
 // Jobs hold source URLs and auth headers, so they live in a private file and
 // never in the Corestore: replication serves any stored core a peer can name.
-export function createAcquirer (node, file) {
+export function createAcquirer (node, file, { concurrency = Number(process.env.PEARTUBE_ACQUIRE_CONCURRENCY || 4), retryDelay = 15_000 } = {}) {
   let jobs = []
   try { jobs = JSON.parse(readFileSync(file, 'utf8')) } catch {}
-  for (const job of jobs) if (job.status === 'running') job.status = job.announce ? 'announcing' : 'queued'
-  let running = null
+  for (const job of jobs) {
+    if (job.status === 'running' || (job.status === 'failed' && job.source)) {
+      job.status = job.announce ? 'announcing' : 'queued'
+    }
+  }
+  const running = new Map()
 
   function save () {
     writeFileSync(file + '.tmp', JSON.stringify(jobs), { mode: 0o600 })
@@ -18,21 +23,45 @@ export function createAcquirer (node, file) {
   // Public view of a job: never the source.
   const view = ({ source, announce, ...job }) => job
 
+  function openSource (url, headers, controller, redirects = 0) {
+    return new Promise((resolve, reject) => {
+      if (controller.aborted) return reject(new Error('Cancelled'))
+      const parsed = new URL(url)
+      const fn = parsed.protocol === 'https:' ? httpsRequest : httpRequest
+      const req = fn(parsed, { headers }, res => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 5) {
+          res.resume?.()
+          resolve(openSource(new URL(res.headers.location, parsed).href, headers, controller, redirects + 1))
+          return
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume?.()
+          reject(new Error(`Source answered ${res.statusCode}`))
+          return
+        }
+        resolve(res)
+      })
+      controller.onabort = () => req.destroy(new Error('Cancelled'))
+      req.once('close', () => { controller.onabort = null })
+      req.once('error', reject)
+      req.end()
+    })
+  }
+
   // A job is done only once its announce is durable. The stored blob's
   // announce is saved first, so a restart re-announces instead of re-fetching.
   async function run (job) {
     job.status = job.announce ? 'announcing' : 'running'
     job.error = null
     save()
-    const controller = new AbortController()
-    running = { job, controller }
+    const controller = { aborted: false, onabort: null, abort () { this.aborted = true; this.onabort?.() } }
+    running.set(job, controller)
     try {
       if (!job.announce) {
-        const res = await fetch(job.source.url, { headers: job.source.headers || {}, signal: controller.signal })
-        if (!res.ok || !res.body) throw new Error(`Source answered ${res.status}`)
-        job.total = Number(res.headers.get('content-length')) || null
+        const res = await openSource(job.source.url, job.source.headers || {}, controller)
+        job.total = Number(res.headers['content-length']) || null
         job.bytes = 0
-        const op = await node.put({ id: job.id, title: job.title }, Readable.fromWeb(res.body), bytes => { job.bytes = bytes })
+        const op = await node.put({ id: job.id, title: job.title }, res, bytes => { job.bytes = bytes })
         if (job.status === 'cancelled') throw new Error('Cancelled')
         Object.assign(job, { status: 'announcing', announce: op, source: null })
         save()
@@ -42,18 +71,28 @@ export function createAcquirer (node, file) {
     } catch (err) {
       if (job.status !== 'cancelled') job.status = job.announce ? 'announcing' : 'failed'
       job.error = err.message
+      if (job.status === 'failed' && job.source && retryDelay > 0) {
+        setTimeout(() => {
+          if (job.status === 'failed' && !node.closing) {
+            job.status = 'queued'
+            save()
+            next()
+          }
+        }, retryDelay).unref?.()
+      }
     }
-    running = null
+    running.delete(job)
     save()
     if (!node.closing) next()
   }
 
   function next () {
-    if (running) return
-    const job = jobs.find(j => j.status === 'announcing') || jobs.find(j => j.status === 'queued')
-    if (job) run(job)
+    while (running.size < concurrency) {
+      const job = jobs.find(j => !running.has(j) && j.status === 'announcing') || jobs.find(j => !running.has(j) && j.status === 'queued')
+      if (!job) break
+      run(job)
+    }
   }
-
   function add ({ id, title, source }) {
     if (typeof source?.url !== 'string' || !/^https?:\/\//.test(source.url)) throw new Error('source.url must be http(s)')
     const job = { jobId: randomUUID(), id, title, status: 'queued', created: Date.now(), source: { url: source.url, headers: source.headers || {} } }
@@ -69,7 +108,7 @@ export function createAcquirer (node, file) {
     if (job.status === 'queued' || job.status === 'running') {
       job.status = 'cancelled'
       job.source = null
-      if (running?.job === job) running.controller.abort()
+      running.get(job)?.abort()
       save()
     }
     return view(job)

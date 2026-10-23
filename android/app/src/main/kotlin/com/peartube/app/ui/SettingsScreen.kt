@@ -47,6 +47,7 @@ fun SettingsScreen(model: AppModel) {
     var relays by rememberSaveable { mutableStateOf(settings.relayThrough.joinToString(", ")) }
     var bootstrap by rememberSaveable { mutableStateOf(settings.bootstrap.joinToString(", ")) }
     var lan by rememberSaveable { mutableStateOf(settings.lanDiscovery) }
+    var privateRouting by rememberSaveable { mutableStateOf(settings.privateRouting) }
     var problem by remember { mutableStateOf<String?>(null) }
     val bankSelected by model.soundFontSelected.collectAsState()
     val bankBusy by model.soundFontBusy.collectAsState()
@@ -88,6 +89,16 @@ fun SettingsScreen(model: AppModel) {
                 }
                 Hint("Over mDNS, on this device's Wi-Fi or Ethernet, for relays that run with PEARTUBE_LAN_HOST. Turn it on where peers on one network cannot reach each other through the internet.")
             }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().toggleable(value = privateRouting, role = Role.Switch, onValueChange = { privateRouting = it }),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Private DHT routing", color = Ink, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                    Switch(checked = privateRouting, onCheckedChange = null, colors = SwitchDefaults.colors(checkedTrackColor = Brand))
+                }
+                Hint("Route peer connections over 4-hop encrypted relay circuits. Every peer you connect to must also run with private routing.")
+            }
             Field("MIDI SoundFont", "Choose your own SoundFont 2 (.sf2), up to 256 MiB. No bank is bundled. Changes are saved immediately, only on this device.") {
                 bankError?.let { Text(it, color = Danger) }
                 Hint(if (bankSelected) "A SoundFont is selected." else "No SoundFont selected. MIDI needs one to play.")
@@ -103,7 +114,7 @@ fun SettingsScreen(model: AppModel) {
             Button(
                 onClick = {
                     problem = try {
-                        model.save(Settings.parse(tracker, relays, bootstrap, lan))
+                        model.save(Settings.parse(tracker, relays, bootstrap, lan, privateRouting))
                         null
                     } catch (e: Exception) {
                         e.message

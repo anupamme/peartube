@@ -18,6 +18,8 @@ pub struct Settings {
     /// Find relays on the local network over mDNS (relays run it with
     /// PEARTUBE_LAN_HOST), on this device's Wi-Fi or Ethernet address.
     pub lan_discovery: bool,
+    /// Route peer connections over 4-hop encrypted relay circuits.
+    pub private_routing: bool,
 }
 
 impl Settings {
@@ -37,7 +39,7 @@ impl Settings {
     }
 
     /// Settings from the form's fields. Lists split on commas or whitespace.
-    pub fn parse(tracker: &str, relay_through: &str, bootstrap: &str, lan_discovery: bool) -> Result<Settings, String> {
+    pub fn parse(tracker: &str, relay_through: &str, bootstrap: &str, lan_discovery: bool, private_routing: bool) -> Result<Settings, String> {
         let tracker = tracker.trim().to_lowercase();
         if !is_key(&tracker) {
             return Err("The tracker key is 64 hex characters.".into());
@@ -50,7 +52,7 @@ impl Settings {
         if let Some(bad) = bootstrap.iter().find(|node| !is_host_port(node)) {
             return Err(format!("Bootstrap node {bad} is not host:port."));
         }
-        Ok(Settings { tracker, relay_through, bootstrap, lan_discovery })
+        Ok(Settings { tracker, relay_through, bootstrap, lan_discovery, private_routing })
     }
 }
 

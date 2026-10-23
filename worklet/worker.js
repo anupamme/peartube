@@ -115,13 +115,14 @@ function hostPort (address) {
 
 const methods = {
   // lan: whether to find relays on this device's network over mDNS.
-  start: ({ storage, tracker, relayThrough = null, bootstrap = null, lan = false }) => serial(async () => {
+  start: ({ storage, tracker, relayThrough = null, bootstrap = null, lan = false, privateRouting = false }) => serial(async () => {
     await close()
     node = await createNode({
       storage,
       tracker,
       relayThrough,
       bootstrap: bootstrap ? bootstrap.map(hostPort) : undefined,
+      privateRouting,
       onchange: update
     })
     node.swarm.on('update', update)

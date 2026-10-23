@@ -130,6 +130,7 @@ private fun Row(entry: Entry, onClick: () -> Unit) {
 private fun groups(entries: List<Entry>, q: String): List<Pair<String, List<Entry>>> {
     val rows = entries
         .filter { q.isEmpty() || it.title.lowercase().contains(q) || it.id.lowercase().contains(q) }
+        .distinctBy { it.id }
         .sortedWith(compareBy<Entry>({ it.title.lowercase() }, { it.title }, { it.id }))
     val out = mutableListOf<Pair<String, MutableList<Entry>>>()
     for (entry in rows) {

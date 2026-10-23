@@ -77,6 +77,7 @@ class Worker(context: Context) {
             .put("relayThrough", if (settings.relayThrough.isEmpty()) JSONObject.NULL else JSONArray(settings.relayThrough))
             .put("bootstrap", if (settings.bootstrap.isEmpty()) JSONObject.NULL else JSONArray(settings.bootstrap))
             .put("lan", settings.lanDiscovery)
+            .put("privateRouting", settings.privateRouting)
         return Status.from(call("start", params) as JSONObject)
     }
 

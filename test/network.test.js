@@ -221,3 +221,35 @@ test('a peer far ahead with a forging apply cannot hand its view to a new relay'
   await until(async () => (await c.search('imdb:tt5000040')).length, 120000)
   assert.equal(await forgedOn(c), 0)
 })
+
+test('ten relays with private DHT routing sync the tracker and stream exact bytes over 4-hop circuits', async t => {
+  const testnet = await createTestnet(4)
+  const founder = await createNode({ storage: tmp(), bootstrap: testnet.bootstrap, privateRouting: true, privateRelay: true })
+  const tracker = founder.status().tracker
+  const rest = await Promise.all(Array.from({ length: 9 }, () =>
+    createNode({ storage: tmp(), bootstrap: testnet.bootstrap, tracker, privateRouting: true, privateRelay: true })
+  ))
+  const nodes = [founder, ...rest]
+  t.after(async () => { await Promise.all(nodes.map(n => n.close())); await testnet.destroy() })
+
+  const bytes = randomBytes(2 * 1024 * 1024 + 13)
+  const expectedSha = createHash('sha256').update(bytes).digest('hex')
+  const chunks = Array.from({ length: Math.ceil(bytes.length / 8192) }, (_, i) => bytes.subarray(i * 8192, (i + 1) * 8192))
+  const published = await nodes[9].publish({ id: 'imdb:tt0133093', title: 'Private Matrix' }, Readable.from(chunks))
+  assert.equal(published.blob.blockLength, 5, 'small source chunks are coalesced into 512 KiB Hypercore blocks')
+
+  const [hit] = await until(async () => (await nodes[0].search('imdb:tt0133093')).length && nodes[0].search('imdb:tt0133093'))
+  assert.equal(hit.local, false)
+  assert.equal(hit.sha256, expectedSha)
+
+  const range = await fetch(hit.streamUrl, { headers: { Range: 'bytes=500000-1048575' } })
+  assert.equal(range.status, 206)
+  assert.deepEqual(Buffer.from(await range.arrayBuffer()), bytes.subarray(500000, 1048576))
+
+  const full = Buffer.from(await (await fetch(hit.streamUrl)).arrayBuffer())
+  assert.equal(createHash('sha256').update(full).digest('hex'), expectedSha)
+  for (const n of nodes) {
+    assert.equal(n.swarm.dht.privateRouting.exposureReport().directDestinationSends, 0)
+    assert.equal(n.swarm.status(n.tracker.discoveryKey), null, 'private routing uses a blinded rotating topic, never tracker.discoveryKey')
+  }
+})

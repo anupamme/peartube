@@ -1,6 +1,7 @@
 import Autobee from 'autobee'
 import Corestore from 'corestore'
 import Hyperswarm from 'hyperswarm'
+import HyperDHT from 'hyperdht'
 import Hyperblobs from 'hyperblobs'
 import BlobServer from 'hypercore-blob-server'
 import b4a from 'b4a'
@@ -11,6 +12,7 @@ import { join } from 'node:path'
 const ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
 const HEX64 = /^[0-9a-f]{64}$/
 const MAX_TITLE = 300
+const BLOB_BLOCK_SIZE = 512 * 1024
 
 // A tracker entry is public and replicated to every relay. apply is the only
 // gate: it keeps well-formed announces and files each under its writer's key,
@@ -60,11 +62,14 @@ export async function createNode ({
   streamPort = 0,
   bootstrap,
   dhtPort,
+  privateRouting = false,
+  privateRelay = false,
   relayThrough = null,
   lan: createLan = null,
   onchange = null
 }) {
   const store = new Corestore(join(storage, 'corestore'))
+  store.watch(core => core.replicator.setInflightRange(64, 512))
   // Autobee reports view changes only through its update handler (its 'update'
   // event fires on interrupts). The handler runs inside the update loop, where
   // a throw would close the tracker, so onchange is queued instead of called.
@@ -81,15 +86,76 @@ export async function createNode ({
     await tracker.updated()
   }
 
-  const blobsCore = store.get({ name: 'blobs' })
-  await blobsCore.ready()
-  const blobs = new Hyperblobs(blobsCore)
-  const blobsKey = b4a.toString(blobsCore.key, 'hex')
+  const blobSlots = []
+  async function openSlot (i) {
+    const core = store.get({ name: i === 0 ? 'blobs' : `blobs-${i}` })
+    await core.ready()
+    const slot = { core, blobs: new Hyperblobs(core, { blockSize: BLOB_BLOCK_SIZE }), key: b4a.toString(core.key, 'hex'), busy: false }
+    blobSlots.push(slot)
+    return slot
+  }
+  for (let i = 0; i < 4; i++) await openSlot(i)
+  const blobsKey = blobSlots[0].key
 
+  // Optional alpha private routing: 4-hop relay circuits (2 destination, 2 source)
+  // with period-blinded descriptors stored on a 3-node DHT quorum. A relay node
+  // (privateRelay) contributes hop + descriptor-storage capacity on dhtPort; an
+  // endpoint (privateRouting) routes swarm listen/connect over private circuits.
+  const host = Array.isArray(bootstrap) && bootstrap.some(b => String(b?.host || b).startsWith('127.')) ? '127.0.0.1' : undefined
+  const privateOpts = relay => ({ release: 'alpha', acknowledgeAlpha: true, mode: 'optional', profile: 'spliced', relay })
+  const dhtRelay = privateRelay ? new HyperDHT({ host, bootstrap, seed: tracker.local.key, port: typeof privateRelay === 'number' ? privateRelay : dhtPort, ephemeral: false, firewalled: false, privateRouting: privateOpts(true) }) : null
+  const dht = privateRouting ? new HyperDHT({ host, bootstrap, port: dhtRelay ? 0 : dhtPort, privateRouting: typeof privateRouting === 'object' ? privateRouting : privateOpts(false) }) : null
+  if (host) {
+    if (dhtRelay) await dhtRelay.privateRouting.ready()
+    if (dht) await dht.privateRouting.ready()
+  } else {
+    if (dhtRelay) { dhtRelay.validateLocalAddresses = async () => []; dhtRelay.privateRouting.ready().catch(() => {}) }
+    if (dht) { dht.validateLocalAddresses = async () => []; dht.privateRouting.ready().catch(() => {}) }
+  }
+  if (dht) {
+    const descriptors = dht.plugins.get('private-route')?.storage?.service
+    const resetCache = () => { if (descriptors) { descriptors.directoryExpiresAt = 0; descriptors.storage.bootstrapExpiresAt = 0 } }
+    const retryListen = async fn => {
+      for (;;) {
+        try { return await fn() } catch (err) {
+          if (closing || err?.code !== 'ERR_PRIVACY_UNAVAILABLE') throw err
+          resetCache()
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+      }
+    }
+    const dhtResume = dht.resume.bind(dht)
+    dht.resume = async opts => {
+      resetCache()
+      try { await dhtResume(opts) } catch (err) {
+        if (err?.code !== 'ERR_PRIVACY_UNAVAILABLE') throw err
+      }
+    }
+    dht.createServer = (opts, onconnection) => {
+      const s = dht.privateRouting.createServer(opts, onconnection)
+      const listen = s.listen.bind(s)
+      s.listen = keyPair => retryListen(() => { s._listening = null; return listen(keyPair) })
+      const resume = s.resume.bind(s)
+      s.resume = () => { if (s._keyPair) retryListen(resume).catch(() => {}) }
+      return s
+    }
+    dht.connect = (publicKey, opts) => {
+      if (descriptors && descriptors.directory.length < 4) resetCache()
+      const conn = dht.privateRouting.connect(publicKey, opts)
+      conn.once('close', () => { if (!conn.rawBytesRead) resetCache() })
+      return conn
+    }
+  }
   // Double-randomized NATs cannot holepunch; relayThrough lets them meet via a blind relay.
-  const swarm = new Hyperswarm({ bootstrap, port: dhtPort, relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null) })
+  const swarm = new Hyperswarm({ dht, maxParallel: 8, bootstrap, port: dhtPort, relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null) })
   swarm.on('connection', conn => tracker.replicate(conn))
-  swarm.join(tracker.discoveryKey)
+  const topic = dht ? createHash('sha256').update('peartube/private/v1/').update(tracker.key).update(String(Math.floor(Date.now() / 86_400_000))).digest() : tracker.discoveryKey
+  const discovery = swarm.join(topic, { server: !dht, client: true })
+  if (dht) {
+    swarm.listen().then(() => { if (!closing) discovery.refresh({ server: true, client: true }).catch(() => {}) }).catch(() => {})
+  }
+  const refreshTimer = dht ? setInterval(() => { if (!closing && swarm.connections.size < 16) discovery.refresh().catch(() => {}) }, 20_000) : null
+  refreshTimer?.unref?.()
 
   // Optional LAN path (mDNS + isolated DHT) for peers the public DHT cannot
   // connect, e.g. two randomized NATs on one network. Same key pair as the
@@ -139,7 +205,7 @@ export async function createNode ({
     const range = id ? { gte: b4a.from(`${id}/`), lt: b4a.from(`${id}/\xff`) } : {}
     for await (const node of tracker.view.createReadStream(range)) {
       const entry = JSON.parse(node.value)
-      results.push({ key: b4a.toString(node.key), id: entry.id, title: entry.title, size: entry.size, sha256: entry.sha256, local: entry.blobs === blobsKey, streamUrl: streamUrl(entry) })
+      results.push({ key: b4a.toString(node.key), id: entry.id, title: entry.title, size: entry.size, sha256: entry.sha256, local: blobSlots.some(s => s.key === entry.blobs), streamUrl: streamUrl(entry) })
     }
     return results
   }
@@ -150,12 +216,40 @@ export async function createNode ({
   // would hang every later put.
   async function put ({ id, title }, source, onData = null) {
     if (!str(id, ID)) throw new Error(`Invalid id ${id}`)
-    const hash = createHash('sha256')
-    let size = 0
-    const hasher = new Transform({ transform (chunk, cb) { hash.update(chunk); size += chunk.length; if (onData) onData(size); cb(null, chunk) } })
-    const writer = blobs.createWriteStream()
-    await pipelinePromise(source, hasher, writer)
-    return { type: 'announce', id, title: String(title || id).slice(0, MAX_TITLE).toWellFormed(), size, sha256: hash.digest('hex'), blobs: blobsKey, blob: writer.id }
+    const slot = blobSlots.find(s => !s.busy) || await openSlot(blobSlots.length)
+    slot.busy = true
+    try {
+      const hash = createHash('sha256')
+      let size = 0
+      let buf = []
+      let bufLen = 0
+      const hasher = new Transform({
+        transform (chunk, cb) {
+          hash.update(chunk)
+          size += chunk.length
+          if (onData) onData(size)
+          buf.push(chunk)
+          bufLen += chunk.length
+          if (bufLen >= BLOB_BLOCK_SIZE) {
+            const full = buf.length === 1 ? buf[0] : b4a.concat(buf, bufLen)
+            let off = 0
+            while (off + BLOB_BLOCK_SIZE <= full.length) this.push(full.subarray(off, off += BLOB_BLOCK_SIZE))
+            buf = off < full.length ? [full.subarray(off)] : []
+            bufLen = full.length - off
+          }
+          cb(null)
+        },
+        flush (cb) {
+          if (bufLen > 0) this.push(buf.length === 1 ? buf[0] : b4a.concat(buf, bufLen))
+          cb(null)
+        }
+      })
+      const writer = slot.blobs.createWriteStream()
+      await pipelinePromise(source, hasher, writer)
+      return { type: 'announce', id, title: String(title || id).slice(0, MAX_TITLE).toWellFormed(), size, sha256: hash.digest('hex'), blobs: slot.key, blob: writer.id }
+    } finally {
+      slot.busy = false
+    }
   }
 
   async function publish (meta, source) {
@@ -184,13 +278,16 @@ export async function createNode ({
   }
 
   function status () {
-    return { tracker: b4a.toString(tracker.key, 'hex'), writer: b4a.toString(tracker.local.key, 'hex'), blobs: blobsKey, blobBytes: blobsCore.byteLength, peers: swarm.connections.size, lanPeers: lanPeers.size }
+    return { tracker: b4a.toString(tracker.key, 'hex'), writer: b4a.toString(tracker.local.key, 'hex'), blobs: blobsKey, blobBytes: blobSlots.reduce((sum, s) => sum + s.core.byteLength, 0), peers: swarm.connections.size, lanPeers: lanPeers.size }
   }
 
   async function close () {
     closing = true
+    clearInterval(refreshTimer)
     await lan?.destroy()
-    await swarm.destroy()
+    for (const d of swarm.topics()) d._needsUnannounce = false
+    await swarm.clear()
+    await Promise.all([swarm.destroy({ force: true }), dhtRelay?.destroy({ force: true })])
     await tracker.close()
     await server.close()
     await store.close()

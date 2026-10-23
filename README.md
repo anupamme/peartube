@@ -25,6 +25,10 @@ Open `http://<relay>:8174/` to see acquisitions.
 | `PEARTUBE_STREAM_HOST` | `127.0.0.1` | Host put in stream URLs; set to a LAN address to serve other machines |
 | `PEARTUBE_STREAM_PORT` | `8175` | Stream port |
 | `PEARTUBE_DHT_PORT` | random | Fixed UDP port, for a port forward |
+| `PEARTUBE_BOOTSTRAP` | mainnet | Comma-separated DHT bootstrap `host:port` list |
+| `PEARTUBE_PRIVATE_ROUTING` | off | `1`: route swarm listen/connect over 4-hop spliced private DHT circuits |
+| `PEARTUBE_PRIVATE_RELAY` | off | `1`: run an embedded private-route hop + descriptor-storage node on `PEARTUBE_DHT_PORT` |
+| `PEARTUBE_PRIVATE_RELAY_PORT` | `PEARTUBE_DHT_PORT` | Dedicated UDP port for the embedded private-route relay |
 | `PEARTUBE_RELAY_THROUGH` | none | Comma-separated blind relay keys |
 | `PEARTUBE_LAN_HOST` | off | This machine's LAN IPv4; turns on mDNS discovery of relays on the local network |
 | `PEARTUBE_LAN_PORT` | `49799` | UDP port of the LAN DHT |

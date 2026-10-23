@@ -22,3 +22,12 @@ exports.createHash = function createHash (algorithm) {
     }
   }
 }
+
+exports.randomUUID = function randomUUID () {
+  const buf = b4a.alloc(16)
+  sodium.randombytes_buf(buf)
+  buf[6] = (buf[6] & 0x0f) | 0x40
+  buf[8] = (buf[8] & 0x3f) | 0x80
+  const h = b4a.toString(buf, 'hex')
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+}

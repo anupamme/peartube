@@ -20,6 +20,7 @@ pub struct SettingsForm {
     relays: Entity<TextareaState>,
     bootstrap: Entity<TextareaState>,
     lan: bool,
+    private_routing: bool,
     error: Option<SharedString>,
 }
 
@@ -30,6 +31,7 @@ impl SettingsForm {
             relays: cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(settings.relay_through.join(", "))),
             bootstrap: cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(settings.bootstrap.join(", "))),
             lan: settings.lan_discovery,
+            private_routing: settings.private_routing,
             error: None,
         }
     }
@@ -90,6 +92,19 @@ impl PearTube {
                         .child(
                             v_flex()
                                 .gap_1()
+                                .child(Checkbox::new("private-routing").checked(form.private_routing).label("Private DHT routing").on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                    if let Screen::Settings(form) = &mut this.screen {
+                                        form.private_routing = *checked;
+                                        cx.notify();
+                                    }
+                                })))
+                                .child(div().text_sm().text_color(rgb(DIM)).child(
+                                    "Route peer connections over 4-hop encrypted relay circuits. Every peer you connect to must also run with private routing.",
+                                )),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
                                 .child(div().font_weight(FontWeight::SEMIBOLD).child("MIDI SoundFont"))
                                 .child(div().text_sm().text_color(rgb(DIM)).child(
                                     "Choose your own SoundFont 2 (.sf2), up to 256 MiB. No bank is bundled. Changes are saved immediately, only on this Mac.",
@@ -128,7 +143,7 @@ impl PearTube {
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Screen::Settings(form) = &mut self.screen else { return };
-        let parsed = Settings::parse(&form.tracker.read(cx).value(), &form.relays.read(cx).value(), &form.bootstrap.read(cx).value(), form.lan);
+        let parsed = Settings::parse(&form.tracker.read(cx).value(), &form.relays.read(cx).value(), &form.bootstrap.read(cx).value(), form.lan, form.private_routing);
         match parsed.and_then(|new| new.save().map(|()| new)) {
             Err(err) => {
                 form.error = Some(err.into());

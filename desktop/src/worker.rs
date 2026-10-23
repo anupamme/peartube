@@ -155,6 +155,7 @@ impl Worker {
             "relayThrough": non_empty(&settings.relay_through),
             "bootstrap": non_empty(&settings.bootstrap),
             "lan": settings.lan_discovery,
+            "privateRouting": settings.private_routing,
         });
         parse(self.call("start", params).await?)
     }
