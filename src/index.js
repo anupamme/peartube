@@ -69,7 +69,7 @@ export async function createNode ({
   onchange = null
 }) {
   const store = new Corestore(join(storage, 'corestore'))
-  store.watch(core => core.replicator.setInflightRange(64, 512))
+  store.watch(core => core.replicator.setInflightRange(32, 64))
   // Autobee reports view changes only through its update handler (its 'update'
   // event fires on interrupts). The handler runs inside the update loop, where
   // a throw would close the tracker, so onchange is queued instead of called.
