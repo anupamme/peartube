@@ -43,7 +43,7 @@ const {
 const m = require('./messages')
 const caps = require('./caps')
 
-const DEFAULT_MAX_INFLIGHT = [8, 24]
+const DEFAULT_MAX_INFLIGHT = [16, 48]
 const SCALE_LATENCY = 50
 const NOT_DOWNLOADING_SLACK = (20000 + Math.random() * 20000) | 0
 const MAX_PEERS_UPGRADE = 3
@@ -1844,7 +1844,7 @@ class Peer {
   }
 
   _requestRangeBatch(start, end, length) {
-    let tries = this.inflight
+    let tries = Math.max(this.inflight, this.replicator._inflight.length + 16)
 
     do {
       start = this._findNext(start)
@@ -2284,10 +2284,26 @@ module.exports = class Replicator {
   }
 
   addBlock(session, index, force) {
-    const b = this._blocks.add(index, PRIORITY.HIGH, force)
+    const b = this._blocks.add(index, PRIORITY.VERY_HIGH, force)
+    b.priority = PRIORITY.VERY_HIGH
     const ref = b.attach(session)
 
     this._queueBlock(b)
+    const hedge = maxCopies => {
+      if (b.resolved || this._blocks.get(index) !== b || this.peers.length <= 1) return
+      const ranked = this.peers
+        .filter(p => p.isActive() && p.remoteUploading && !b.inflight.some(r => r.peer === p))
+        .sort((x, y) => (x.stream.rawStream?.rtt || 9999) - (y.stream.rawStream?.rtt || 9999))
+      for (const p of ranked) {
+        if (b.inflight.length >= maxCopies) break
+        p._requestBlock(b)
+      }
+    }
+    if (b.inflight.length >= 1) hedge(2)
+    if (!b._hedgeTimer && this.peers.length > 1) {
+      b._hedgeTimer = setTimeout(() => { b._hedgeTimer = null; hedge(4) }, 1200)
+      if (b._hedgeTimer.unref) b._hedgeTimer.unref()
+    }
     this.queueUpdateAll()
 
     return ref
@@ -2587,12 +2603,12 @@ module.exports = class Replicator {
     const b = tracker.remove(index)
     if (b === null) return false
 
+    if (b._hedgeTimer) { clearTimeout(b._hedgeTimer); b._hedgeTimer = null }
     removeInflight(b.inflight, req)
     removeHotswap(b)
     b.queued = false
 
     b.resolve(value)
-
     if (b.inflight.length > 0) {
       // if anything is still inflight, cancel it
       for (let i = b.inflight.length - 1; i >= 0; i--) {

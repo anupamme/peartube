@@ -67,7 +67,7 @@ module.exports = class BlobReadStream extends Readable {
     if (this._prefetch) {
       const avg = this.id.blockLength > 0 ? Math.max(1024, this.id.byteLength / this.id.blockLength) : 65536
       const span = Math.min(this.id.blockLength, Math.max(2, Math.ceil(this._length / avg) + 4))
-      const win = Math.max(8, Math.ceil((4 * 1024 * 1024) / avg))
+      const win = Math.max(16, Math.ceil((16 * 1024 * 1024) / avg))
       this._win = Math.min(span, win)
       this._rangeEnd = Math.min(this._blockEnd, start + this._win)
       this._range = this.core.download({ start, end: this._rangeEnd, linear: true })

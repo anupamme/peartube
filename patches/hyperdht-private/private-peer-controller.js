@@ -52,7 +52,7 @@ const CONTROL_SESSION_TIMEOUT_MS = 60000
 const CONTROL_READ_TIMEOUT_MS = 30000
 const CONTROL_OPCODE_TIMEOUT_MS = 10000
 const MAX_CONTROL_SESSIONS = 256
-const MAX_PEER_CONTROL_SESSIONS = 32
+const MAX_PEER_CONTROL_SESSIONS = 128
 const ROUTE_LIFETIME_MS = MAX_LIFETIME_MS
 const GUARD_SET_SIZE = 3
 const GUARD_LIFETIME_MS = 28 * 24 * 60 * 60 * 1000
@@ -89,7 +89,7 @@ const SEND_QUANTUM_BYTES = 4 * CELL_SIZE
 const CREDIT_IDLE_MS = 50
 const CREDIT_GRANT_IDLE_MS = 5000
 const DEMAND_PROGRESS = 32
-const MAX_ROUTE_STREAMS = 64
+const MAX_ROUTE_STREAMS = 256
 const MAX_STREAM_BYTES = 32 * 1024 * 1024 * 1024
 const MAX_STREAM_DATA_FRAMES = Math.ceil(MAX_STREAM_BYTES / MAX_LOGICAL_PAYLOAD)
 const MAX_STREAM_CELLS = 2 * MAX_STREAM_DATA_FRAMES + 4 * MAX_CONTROL_CELLS
@@ -2475,6 +2475,7 @@ class PrivatePeerController {
     this.lastSequences = new Map()
     this.sourceGuards = new PinnedGuards()
     this.unreachableRelays = new Map()
+    this.descriptorCache = new Map()
     this.destinationGuards = new Map()
     this.destinationBridges = new Set()
     this.resolverStreams = new Set()
@@ -2587,6 +2588,7 @@ class PrivatePeerController {
     this.pendingEntryRegistrations.clear()
     for (const stream of this.resolverStreams) stream.destroy(unavailable())
     this.resolverStreams.clear()
+    this.descriptorCache.clear()
   }
 
   async resume() {
@@ -2615,6 +2617,7 @@ class PrivatePeerController {
     this.destinationBridges.clear()
     for (const stream of this.resolverStreams) stream.destroy(unavailable())
     this.resolverStreams.clear()
+    this.descriptorCache.clear()
     const relayClosing = this.relayServer ? this.relayServer.close() : null
     this.relayServer = null
     await Promise.all([
@@ -2749,9 +2752,19 @@ class PrivatePeerController {
     server._guards.ensure(relays, this.clock.now())
     let failure = unavailable()
     const failedGuards = new Set()
+    const busyGuards = new Set()
+    for (const other of this.servers) {
+      if (other !== server && other._route && !other._route.closed && other._guards?.current) {
+        busyGuards.add(key(other._guards.current.publicKey))
+      }
+    }
     const pinned = server._guards.candidates()
     const pinnedSet = new Set(pinned.map((g) => key(g.publicKey)))
-    const guardCandidates = [...pinned, ...relays.filter((pk) => !pinnedSet.has(key(pk))).map((pk) => ({ publicKey: pk, diversityKey: null, unreachable: false }))]
+    const allGuards = [...pinned, ...relays.filter((pk) => !pinnedSet.has(key(pk))).map((pk) => ({ publicKey: pk, diversityKey: null, unreachable: false }))]
+    const guardCandidates = [
+      ...allGuards.filter((g) => !busyGuards.has(key(g.publicKey))),
+      ...allGuards.filter((g) => busyGuards.has(key(g.publicKey)))
+    ]
     for (const guard of guardCandidates) {
       for (const entryRelayPublicKey of relays) {
         if (
@@ -2972,8 +2985,8 @@ class PrivatePeerController {
   _createSpliceStream(peerRaw) {
     if (!peerRaw || !peerRaw.socket || peerRaw.socket.closing) throw unavailable()
     try {
-      peerRaw.socket.setRecvBufferSize(4194304)
-      peerRaw.socket.setSendBufferSize(4194304)
+      peerRaw.socket.setRecvBufferSize(8388608)
+      peerRaw.socket.setSendBufferSize(8388608)
     } catch {}
     const expectedHost = peerRaw.remoteHost
     const expectedPort = peerRaw.remotePort
@@ -3000,28 +3013,26 @@ class PrivatePeerController {
         stream._view[122] = 1200
         stream._view16[246] = 1200
         if (stream._view[139] === 0) {
-          stream._view[139] = 2400
+          stream._view[139] = 2000
         }
-        const srtt = stream._view[139] || 2400
+        const srtt = stream._view[139] || 2000
         stream._view[140] = 900
         const targetRto = Math.min(8000, Math.max(4500, srtt + 2500))
         stream._view[141] = targetRto
         stream._handle[201] = 1
-        stream._view[146] = 12000
-        stream._view[150] = 12000
-        stream._view[154] = 12000
-        stream._view[156] = Math.max(3500, srtt + 1500)
+        stream._view[146] = 8000
+        stream._view[150] = 8000
+        stream._view[154] = 8000
+        stream._view[156] = Math.max(3000, srtt + 1200)
         if (stream._view64 && stream._view64[101] > 0n) {
           stream._view64[82] = stream._view64[101] + 86400000n
         }
-        stream._handle[736] = 2
-        stream._handle[752] = 0
-        stream._handle[753] = 0
+        if (stream._handle[736] === 3) stream._handle[736] = 2
         stream._handle[755] = 1
-        stream._view[198] = 1500
-        if (stream._view[200] > 6000) stream._view[200] = 6000
-        stream._view[401] = 160
-        stream._view[402] = 160
+        if (stream._view[198] < 6000) stream._view[198] = 6000
+        if (stream._view[200] > 24000) stream._view[200] = 24000
+        if (stream._view[401] < 512) stream._view[401] = 512
+        if (stream._view[402] < 512) stream._view[402] = 512
       }
       apply()
       stream.once('connect', apply)
@@ -3078,7 +3089,24 @@ class PrivatePeerController {
     if (this.destroyed || this.suspended || this.relay) throw unavailable()
     const relays = this._liveRelays(shuffle(await this.descriptors.discoverRelays()), 4)
     this.sourceGuards.ensure(relays, this.clock.now())
+    const destKey = key(destinationPublicKey)
     let descriptor = null
+    if (!this.observer) {
+      const cached = this.descriptorCache.get(destKey)
+      if (cached && cached.expiresAt > this.clock.now()) {
+        try {
+          descriptor = decodeDescriptor(cached.wire, {
+            now: this.clock.now(),
+            expectedDestinationPublicKey: destinationPublicKey,
+            expectedPeriod: cached.period
+          })
+        } catch {
+          this.descriptorCache.delete(destKey)
+        }
+      } else if (cached) {
+        this.descriptorCache.delete(destKey)
+      }
+    }
     let resolveAttempts = 0
     let entryDiversity = null
     let guardDiversity = null
@@ -3089,7 +3117,7 @@ class PrivatePeerController {
         ((entryDiversity && b4a.equals(div, entryDiversity)) ||
           (guardDiversity && b4a.equals(div, guardDiversity)))
       )
-    const pinnedCandidates = this.sourceGuards.candidates().filter((g) => !this.unreachableRelays.has(key(g.publicKey)))
+    const pinnedCandidates = shuffle(this.sourceGuards.candidates().filter((g) => !this.unreachableRelays.has(key(g.publicKey))))
     const pinnedIds = new Set(pinnedCandidates.map((g) => key(g.publicKey)))
     const extraCandidates = relays
       .filter((pk) => !pinnedIds.has(key(pk)))
@@ -3100,7 +3128,8 @@ class PrivatePeerController {
         if (guard.ephemeral && !descriptor && resolveAttempts >= MAX_SOURCE_ATTEMPTS) break
         const firstSafetyRelayPublicKey = guard.publicKey
         const attemptedSeconds = new Set()
-        while (resolveAttempts < MAX_SOURCE_ATTEMPTS) {
+        let attempts = 0
+        while (attempts++ < MAX_SOURCE_ATTEMPTS && resolveAttempts < MAX_SOURCE_ATTEMPTS) {
           if (
             descriptor &&
             (same(firstSafetyRelayPublicKey, descriptor.entryRelayPublicKey) ||
@@ -3182,6 +3211,13 @@ class PrivatePeerController {
               const resolved = await this._resolveThrough(inbox, destinationPublicKey)
               clearDescriptor(descriptor)
               descriptor = resolved
+              if (!this.observer && descriptor && descriptor.wire) {
+                this.descriptorCache.set(destKey, {
+                  wire: b4a.from(descriptor.wire),
+                  period: descriptor.period,
+                  expiresAt: Math.min(this.clock.now() + 45000, Number(descriptor.expiresAt) - 5000)
+                })
+              }
             }
             if (
               same(firstSafetyRelayPublicKey, descriptor.entryRelayPublicKey) ||
@@ -3216,7 +3252,12 @@ class PrivatePeerController {
               response
             )
             try {
-              if (response.byteLength !== 65 || response[0] !== STATUS_OK) throw unavailable()
+              if (response.byteLength !== 65 || response[0] !== STATUS_OK) {
+                this.descriptorCache.delete(destKey)
+                clearDescriptor(descriptor)
+                descriptor = null
+                throw unavailable()
+              }
               entryDiversity = b4a.from(response.subarray(1, 33))
               guardDiversity = b4a.from(response.subarray(33, 65))
               requireDiverse(firstDiversity, secondDiversity, entryDiversity, guardDiversity)
@@ -3346,6 +3387,7 @@ class PrivatePeerController {
           } catch {
             if (this.destroyed || this.suspended) throw unavailable()
             if (!firstConnected) {
+              this._markRelayUnreachable(firstSafetyRelayPublicKey)
               this.sourceGuards.failed(guard)
               break
             }
@@ -4003,7 +4045,7 @@ class PrivatePeerController {
   }
 }
 function shuffle(values) {
-  const copy = values.map((value) => b4a.from(value))
+  const copy = values.map((value) => (b4a.isBuffer(value) ? b4a.from(value) : value))
   for (let index = copy.length - 1; index > 0; index--) {
     const candidate = random(4).readUInt32BE(0) % (index + 1)
     ;[copy[index], copy[candidate]] = [copy[candidate], copy[index]]
