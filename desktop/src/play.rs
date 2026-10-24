@@ -355,12 +355,17 @@ impl PlayScreen {
 
     fn render_details(&self, error: Option<SharedString>, cx: &mut Context<Self>) -> impl IntoElement {
         let sha = self.entry.sha256.get(..16).unwrap_or(&self.entry.sha256);
+        let cached_note = if !self.entry.local && self.entry.cached_bytes > 0 {
+            format!(" · cached {}", format_bytes(self.entry.cached_bytes))
+        } else {
+            String::new()
+        };
         div().bg(rgb(BG)).child(
             column()
                 .py_4()
                 .gap_1()
                 .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).truncate().child(self.entry.title.clone()))
-                .child(div().text_sm().text_color(rgb(DIM)).child(format!("{} · {} · {}", label(&self.entry.id), format_bytes(self.entry.size), origin(&self.entry))))
+                .child(div().text_sm().text_color(rgb(DIM)).child(format!("{} · {} · {}{cached_note}", label(&self.entry.id), format_bytes(self.entry.size), origin(&self.entry))))
                 .children({
                     let menus: Vec<_> = [
                         self.track_menu(TrackKind::Audio, chip("audio-chip", Lucide::Volume2.into(), self.track_name(TrackKind::Audio)), Anchor::TopLeft, cx),

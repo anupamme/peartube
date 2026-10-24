@@ -45,6 +45,7 @@ module.exports = class BlobReadStream extends Readable {
 
   async _openp () {
     if (!this.core.opened) await this.core.ready()
+    if (this.destroying) return
 
     if (this._length === -1) this._length = this.id.byteLength - this._start
     this._blockEnd = this.id.blockOffset + this.id.blockLength
@@ -56,6 +57,7 @@ module.exports = class BlobReadStream extends Readable {
     }
 
     const start = await this._setStart()
+    if (this.destroying) return
     if (start < this.id.blockOffset || start >= this._blockEnd) {
       this._length = 0
       this.push(null)
@@ -65,8 +67,10 @@ module.exports = class BlobReadStream extends Readable {
     if (this._prefetch) {
       const avg = this.id.blockLength > 0 ? Math.max(1024, this.id.byteLength / this.id.blockLength) : 65536
       const span = Math.min(this.id.blockLength, Math.max(2, Math.ceil(this._length / avg) + 4))
-      const end = Math.min(this._blockEnd, start + span)
-      this._range = this.core.download({ start, end, linear: true })
+      const win = Math.max(8, Math.ceil((4 * 1024 * 1024) / avg))
+      this._win = Math.min(span, win)
+      this._rangeEnd = Math.min(this._blockEnd, start + this._win)
+      this._range = this.core.download({ start, end: this._rangeEnd, linear: true })
     }
   }
 
@@ -133,9 +137,18 @@ module.exports = class BlobReadStream extends Readable {
     this._index++
     this._length -= block.byteLength
 
+    if (this._range && this._length > 0 && this._rangeEnd < this._blockEnd && this._rangeEnd - this._index <= (this._win >> 1)) {
+      const rem = Math.max(2, Math.ceil(this._length / Math.max(1024, block.byteLength)) + 2)
+      this._rangeEnd = Math.min(this._blockEnd, Math.max(this._rangeEnd, this._index + Math.min(this._win, rem)))
+      const r = this._range.request && this._range.request.context
+      if (r && r.end !== -1 && this._rangeEnd > r.end) {
+        r.userEnd = r.end = this._rangeEnd
+        r.replicator.queueUpdateAll()
+      }
+    }
+
     this.push(block)
     if (this._length === 0 || this._index >= this._blockEnd) this.push(null)
-
     cb(null)
   }
 

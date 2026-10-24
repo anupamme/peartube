@@ -1,6 +1,6 @@
 {
   "name": "peartube",
-  "version": "0.4.29",
+  "version": "0.4.30",
   "description": "Decentralized CDN and debrid provider on the Holepunch stack",
   "license": "MIT",
   "type": "module",
@@ -63,7 +63,7 @@
     "peartube-relay": "bin/relay.js"
   },
   "scripts": {
-    "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ && cp patches/hypercore/hypercore-index.js node_modules/hypercore/index.js && cp patches/hypercore/replicator.js node_modules/hypercore/lib/replicator.js && cp patches/hypercore/blob-server.js node_modules/hypercore-blob-server/index.js && cp patches/hypercore/byte-stream.js node_modules/hypercore-byte-stream/index.js || true",
+    "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ && cp patches/hypercore/hypercore-index.js node_modules/hypercore/index.js && cp patches/hypercore/replicator.js node_modules/hypercore/lib/replicator.js && cp patches/hypercore/merkle-tree.js node_modules/hypercore/lib/merkle-tree.js && cp patches/hypercore/session-state.js node_modules/hypercore/lib/session-state.js && cp patches/hypercore/blob-server.js node_modules/hypercore-blob-server/index.js && cp patches/hypercore/byte-stream.js node_modules/hypercore-byte-stream/index.js || true",
     "start": "bare bin/relay.js",
     "test": "node --test test/*.test.js",
     "test:desktop": "node --test test/desktop.e2e.js",

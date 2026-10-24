@@ -16,7 +16,7 @@ const jobsFile = join(storage, 'jobs.json')
 const state = {
   node: null,
   acquirer: null,
-  fallbackStatus: { tracker: env.PEARTUBE_TRACKER || '', writer: '', blobs: '', blobBytes: 0, peers: 0, lanPeers: 0 },
+  fallbackStatus: { tracker: env.PEARTUBE_TRACKER || '', writer: '', blobs: '', blobBytes: 0, cachedBytes: 0, peers: 0, lanPeers: 0, downBps: 0, upBps: 0, rxBytes: 0, txBytes: 0, inflightBlocks: 0, rtt: 0, retransmits: 0 },
   fallbackJobs () {
     try { return JSON.parse(readFileSync(jobsFile, 'utf8')).map(({ source, announce, ...j }) => j) } catch { return [] }
   }

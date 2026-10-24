@@ -43,9 +43,11 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -87,6 +89,7 @@ import com.peartube.app.Entry
 import com.peartube.app.Screen
 import com.peartube.app.formatBytes
 import com.peartube.app.label
+import com.peartube.app.p2pSummary
 import com.peartube.app.player.NativePlayer
 import com.peartube.app.player.PlayerHost
 import com.peartube.app.player.PlayerState
@@ -109,6 +112,9 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
     val context = LocalContext.current
     val activity = remember(context) { context.activity() }
     val view = LocalView.current
+    val status by model.status.collectAsState()
+    val entries by model.entries.collectAsState()
+    val liveEntry = remember(entries, entry) { entries.firstOrNull { it.key == entry.key } ?: entry }
     var handle by remember { mutableLongStateOf(0L) }
     var openError by remember { mutableStateOf<String?>(null) }
     var state by remember { mutableStateOf(PlayerState()) }
@@ -368,10 +374,17 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(entry.title, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                val cachedNote = if (!liveEntry.local && liveEntry.cachedBytes > 0) " · cached ${formatBytes(liveEntry.cachedBytes)}" else ""
                 Text(
-                    "${label(entry.id)} · ${formatBytes(entry.size)} · ${if (entry.local) "on this device" else "from peers"}",
+                    "${label(liveEntry.id)} · ${formatBytes(liveEntry.size)} · ${if (liveEntry.local) "on this device" else "from peers"}$cachedNote",
                     color = Dim, fontSize = 13.sp,
                 )
+                p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 13.sp) }
+                if (!liveEntry.local && liveEntry.cachedBytes > 0) {
+                    TextButton(onClick = { model.clearCache(liveEntry.key) }, modifier = Modifier.padding(top = 2.dp)) {
+                        Text("Clear cached (${formatBytes(liveEntry.cachedBytes)})", color = Dim, fontSize = 13.sp)
+                    }
+                }
                 if (audioOptions.isNotEmpty() || subtitleOptions.isNotEmpty()) {
                     Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (audioOptions.isNotEmpty()) {

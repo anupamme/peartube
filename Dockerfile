@@ -7,8 +7,14 @@ COPY --from=gluetun /gluetun /gluetun
 WORKDIR /app
 COPY package.json package-lock.json ./
 COPY worklet/crypto ./worklet/crypto
-RUN npm ci --omit=dev --no-audit --no-fund && chmod +x /app/node_modules/bare-runtime-linux-x64/bin/bare && ln -sfn bare-events node_modules/events && ln -sfn bare-dgram node_modules/dgram && ln -sfn bare-os node_modules/os && ln -sfn bare-net node_modules/net && ln -sfn peartube-crypto node_modules/crypto && ln -sfn bare-buffer node_modules/buffer && ln -sfn /app/node_modules/bare-runtime-linux-x64/bin/bare /usr/local/bin/bare && rm -f /usr/sbin/openvpn2.6 && printf '#!/bin/sh\nsed -i "/^user *\$/d" /etc/openvpn/target.ovpn 2>/dev/null || true\nexec /usr/sbin/openvpn "$@"\n' > /usr/sbin/openvpn2.6 && chmod +x /usr/sbin/openvpn2.6
+RUN npm ci --omit=dev --no-audit --no-fund && chmod +x /app/node_modules/bare-runtime-linux-x64/bin/bare && ln -sfn bare-events node_modules/events && ln -sfn bare-dgram node_modules/dgram && ln -sfn bare-os node_modules/os && ln -sfn bare-net node_modules/net && ln -sfn peartube-crypto node_modules/crypto && ln -sfn bare-buffer node_modules/buffer && ln -sfn /app/node_modules/bare-runtime-linux-x64/bin/bare /usr/local/bin/bare && rm -f /usr/sbin/openvpn2.6 && printf '#!/bin/sh\nsed -i "/^user *\$/d" /etc/openvpn/target.ovpn 2>/dev/null || true\ngrep -q "^sndbuf " /etc/openvpn/target.ovpn 2>/dev/null || printf "\\nsndbuf 4194304\\nrcvbuf 4194304\\n" >> /etc/openvpn/target.ovpn 2>/dev/null || true\nexec /usr/sbin/openvpn "$@"\n' > /usr/sbin/openvpn2.6 && chmod +x /usr/sbin/openvpn2.6
 COPY patches/hyperdht-private ./node_modules/hyperdht/lib/private
+COPY patches/hypercore/hypercore-index.js ./node_modules/hypercore/index.js
+COPY patches/hypercore/replicator.js ./node_modules/hypercore/lib/replicator.js
+COPY patches/hypercore/merkle-tree.js ./node_modules/hypercore/lib/merkle-tree.js
+COPY patches/hypercore/session-state.js ./node_modules/hypercore/lib/session-state.js
+COPY patches/hypercore/blob-server.js ./node_modules/hypercore-blob-server/index.js
+COPY patches/hypercore/byte-stream.js ./node_modules/hypercore-byte-stream/index.js
 COPY src ./src
 COPY bin ./bin
 ENV PEARTUBE_STORAGE=/data

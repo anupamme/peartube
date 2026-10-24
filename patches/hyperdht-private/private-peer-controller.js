@@ -2459,7 +2459,7 @@ class PrivatePeerController {
       options.spliced !== undefined
         ? Boolean(options.spliced)
         : options.profile === 'spliced' || this.observer === null
-    this.relayKeyPair = this.relay ? (this.keyPair || createKeyPair()) : null
+    this.relayKeyPair = this.relay ? (this.keyPair || this.dht.defaultKeyPair || createKeyPair()) : null
     this.descriptors = new OverlayDescriptorService(
       this.dht,
       this.relayKeyPair ? this.relayKeyPair.publicKey : null,
@@ -2971,6 +2971,10 @@ class PrivatePeerController {
 
   _createSpliceStream(peerRaw) {
     if (!peerRaw || !peerRaw.socket || peerRaw.socket.closing) throw unavailable()
+    try {
+      peerRaw.socket.setRecvBufferSize(4194304)
+      peerRaw.socket.setSendBufferSize(4194304)
+    } catch {}
     const expectedHost = peerRaw.remoteHost
     const expectedPort = peerRaw.remotePort
     let stream = this.dht.createRawStream({
@@ -2989,6 +2993,68 @@ class PrivatePeerController {
       })
     }
     stream.on('error', noop)
+    if (stream._view && stream._view16 && stream._handle) {
+      const apply = () => {
+        if (stream._closed) return
+        stream._view[118] = 4
+        stream._view[122] = 1200
+        stream._view16[246] = 1200
+        if (stream._view[139] === 0) {
+          stream._view[139] = 2400
+        }
+        const srtt = stream._view[139] || 2400
+        stream._view[140] = 900
+        const targetRto = Math.min(8000, Math.max(4500, srtt + 2500))
+        stream._view[141] = targetRto
+        stream._handle[201] = 1
+        stream._view[146] = 12000
+        stream._view[150] = 12000
+        stream._view[154] = 12000
+        stream._view[156] = Math.max(3500, srtt + 1500)
+        if (stream._view64 && stream._view64[101] > 0n) {
+          stream._view64[82] = stream._view64[101] + 86400000n
+        }
+        stream._handle[736] = 2
+        stream._handle[752] = 0
+        stream._handle[753] = 0
+        stream._handle[755] = 1
+        stream._view[198] = 1500
+        if (stream._view[200] > 6000) stream._view[200] = 6000
+        stream._view[401] = 160
+        stream._view[402] = 160
+      }
+      apply()
+      stream.once('connect', apply)
+      stream.on('data', apply)
+      const keepTimer = setInterval(apply, 50)
+      if (keepTimer.unref) keepTimer.unref()
+      stream.once('close', () => clearInterval(keepTimer))
+      const wrapWfree = (arr) => {
+        if (arr && !arr._tuned) {
+          const origPush = arr.push.bind(arr)
+          arr.push = (id) => {
+            apply()
+            return origPush(id)
+          }
+          arr._tuned = true
+        }
+        return arr
+      }
+      let wfree = wrapWfree(stream._wfree)
+      Object.defineProperty(stream, '_wfree', {
+        configurable: true,
+        enumerable: true,
+        get: () => wfree,
+        set: (next) => { wfree = wrapWfree(next) }
+      })
+      if (typeof stream._allocWrite === 'function') {
+        const origAlloc = stream._allocWrite.bind(stream)
+        stream._allocWrite = (n) => {
+          apply()
+          return origAlloc(n)
+        }
+      }
+    }
     return stream
   }
 

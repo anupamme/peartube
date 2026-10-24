@@ -28,6 +28,11 @@ export function createApi (state) {
       return { results: node ? await node.search(id) : [] }
     }
     if (req.method === 'GET' && path === '/v1/entries') return { results: node ? await node.search() : [] }
+    if (req.method === 'POST' && path === '/v1/cache/clear') {
+      if (!node) throw Object.assign(new Error('Node still starting'), { status: 503 })
+      const { key = null } = await body(req).catch(() => ({}))
+      return node.clearCache(key)
+    }
     if (req.method === 'POST' && path === '/v1/acquire') {
       if (!acquirer) throw Object.assign(new Error('Node still starting'), { status: 503 })
       const { id, title, source } = await body(req)

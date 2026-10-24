@@ -25,6 +25,8 @@ export const page = `<!doctype html>
   .bar > div { height: 100%; background: #4c8dff; }
   .error { color: #ff8a8a; font-size: 12px; margin-top: 4px; }
   .empty { color: var(--dim); padding: 24px 0; }
+  button { background: #262b36; color: var(--text); border: 1px solid #363d4d; border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+  button:hover { background: #323947; }
 </style>
 </head>
 <body>
@@ -65,7 +67,22 @@ function job (j) {
 async function refresh () {
   try {
     const [status, list] = await Promise.all([fetch('/v1/status').then(r => r.json()), fetch('/v1/jobs').then(r => r.json())])
-    $('facts').replaceChildren(fact('peers', status.peers), fact('LAN peers', status.lanPeers ?? 0), fact('stored', size(status.blobBytes)), fact('tracker', status.tracker.slice(0, 12) + '\\u2026'))
+    const facts = [
+      fact('peers', status.peers),
+      fact('LAN peers', status.lanPeers ?? 0),
+      fact('stored', size(status.blobBytes)),
+      fact('cached', size(status.cachedBytes || 0)),
+      fact('P2P', '\\u2193 ' + size(status.downBps || 0) + '/s \\u00b7 \\u2191 ' + size(status.upBps || 0) + '/s'),
+      fact('inflight', (status.inflightBlocks || 0) + ' blks'),
+      fact('RTT', status.rtt ? status.rtt + ' ms' : '\\u2014'),
+      fact('tracker', status.tracker.slice(0, 12) + '\\u2026')
+    ]
+    if ((status.cachedBytes || 0) > 0) {
+      const btn = el('button', null, 'clear cache')
+      btn.onclick = () => fetch('/v1/cache/clear', { method: 'POST', body: '{}' }).then(refresh)
+      facts.push(btn)
+    }
+    $('facts').replaceChildren(...facts)
     const jobs = list.jobs.slice().sort((a, b) => b.created - a.created)
     $('jobs').replaceChildren(...(jobs.length ? jobs.map(job) : [el('div', 'empty', 'No acquisitions yet.')]))
   } catch (err) {

@@ -90,6 +90,16 @@ impl PearTube {
         cx.notify();
     }
 
+    pub fn clear_cache(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            if let Ok(w) = worker() {
+                let _ = w.clear_cache(key.as_deref()).await;
+                refresh(&this, cx).await;
+            }
+        })
+        .detach();
+    }
+
     pub fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.screen = Screen::Settings(SettingsForm::new(&self.settings, window, cx));
         cx.notify();

@@ -77,6 +77,17 @@ class AppModel(private val app: Application) {
         starts.trySend(next)
     }
 
+
+    fun clearCache(key: String? = null) {
+        scope.launch {
+            try {
+                worker.clearCache(key)
+                refresh()
+            } catch (e: Exception) {
+                error.value = e.message
+            }
+        }
+    }
     fun importSoundFont(uri: Uri) = soundFontJob { SoundFont.import(app.contentResolver, uri, dataDir) }
 
     fun clearSoundFont() = soundFontJob { SoundFont.clear(dataDir) }

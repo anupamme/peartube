@@ -69,7 +69,7 @@ export async function createNode ({
   onchange = null
 }) {
   const store = new Corestore(join(storage, 'corestore'))
-  store.watch(core => core.replicator.setInflightRange(128, 256))
+  store.watch(core => core.replicator.setInflightRange(12, 32))
   // Autobee reports view changes only through its update handler (its 'update'
   // event fires on interrupts). The handler runs inside the update loop, where
   // a throw would close the tracker, so onchange is queued instead of called.
@@ -96,7 +96,7 @@ export async function createNode ({
   }
   for (let i = 0; i < 4; i++) await openSlot(i)
   const blobsKey = blobSlots[0].key
-
+  const blobCores = new Map(blobSlots.map(s => [s.key, s.core]))
   // Optional alpha private routing: 4-hop relay circuits (2 destination, 2 source)
   // with period-blinded descriptors stored on a 3-node DHT quorum. A relay node
   // (privateRelay) contributes hop + descriptor-storage capacity on dhtPort; an
@@ -147,8 +147,16 @@ export async function createNode ({
     }
   }
   // Double-randomized NATs cannot holepunch; relayThrough lets them meet via a blind relay.
+  let closedRx = 0, closedTx = 0, prevRx = 0, prevTx = 0, prevAt = Date.now(), downBps = 0, upBps = 0
+  const trackConn = conn => {
+    conn.once('close', () => {
+      closedRx += conn.rawBytesRead || conn.rawStream?.bytesReceived || 0
+      closedTx += conn.rawBytesWritten || conn.rawStream?.bytesTransmitted || 0
+    })
+    tracker.replicate(conn)
+  }
   const swarm = new Hyperswarm({ dht, maxParallel: 16, bootstrap, port: dhtPort, relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null) })
-  swarm.on('connection', conn => tracker.replicate(conn))
+  swarm.on('connection', trackConn)
   const topic = dht ? createHash('sha256').update('peartube/private/v1/').update(tracker.key).update(String(Math.floor(Date.now() / 86_400_000))).digest() : tracker.discoveryKey
   const discovery = swarm.join(topic, { server: !dht, client: true })
   if (dht) {
@@ -173,7 +181,7 @@ export async function createNode ({
     next.on('connection', conn => {
       lanPeers.add(conn)
       conn.once('close', () => lanPeers.delete(conn))
-      tracker.replicate(conn)
+      trackConn(conn)
     })
     try {
       await next.ready()
@@ -198,16 +206,71 @@ export async function createNode ({
     return server.getLink(b4a.from(entry.blobs, 'hex'), { blob: entry.blob })
   }
 
+  async function blobCore (hex) {
+    let core = blobCores.get(hex)
+    if (!core) {
+      const slot = blobSlots.find(s => s.key === hex)
+      core = slot ? slot.core : store.get({ key: b4a.from(hex, 'hex') })
+      blobCores.set(hex, core)
+    }
+    if (!core.opened) await core.ready()
+    return core
+  }
+
+  function entryCachedBytes (core, entry) {
+    const { blockOffset, blockLength } = entry.blob
+    if (!core?.opened || blockLength <= 0 || core.length <= blockOffset) return 0
+    const len = Math.min(blockLength, core.length - blockOffset)
+    const blocks = core.core.bitfield.countSet(blockOffset, len)
+    if (blocks <= 0) return 0
+    return blocks >= blockLength ? entry.size : Math.min(entry.size, Math.round((blocks / blockLength) * entry.size))
+  }
+
   // Every tracker entry for id, or every entry in the tracker without one.
   async function search (id = null) {
     await tracker.update()
-    const results = []
+    const raw = []
     const range = id ? { gte: b4a.from(`${id}/`), lt: b4a.from(`${id}/\xff`) } : {}
     for await (const node of tracker.view.createReadStream(range)) {
-      const entry = JSON.parse(node.value)
-      results.push({ key: b4a.toString(node.key), id: entry.id, title: entry.title, size: entry.size, sha256: entry.sha256, local: blobSlots.some(s => s.key === entry.blobs), streamUrl: streamUrl(entry) })
+      raw.push({ key: b4a.toString(node.key), entry: JSON.parse(node.value) })
     }
-    return results
+    await Promise.all([...new Set(raw.map(r => r.entry.blobs))].map(blobCore))
+    return raw.map(({ key, entry }) => ({
+      key,
+      id: entry.id,
+      title: entry.title,
+      size: entry.size,
+      sha256: entry.sha256,
+      local: blobSlots.some(s => s.key === entry.blobs),
+      cachedBytes: entryCachedBytes(blobCores.get(entry.blobs), entry),
+      streamUrl: streamUrl(entry)
+    }))
+  }
+
+  async function clearCache (key = null) {
+    await tracker.update()
+    if (key) {
+      const node = await tracker.view.get(b4a.from(key))
+      if (!node) return { clearedBytes: 0 }
+      const entry = JSON.parse(node.value)
+      if (blobSlots.some(s => s.key === entry.blobs)) return { clearedBytes: 0 }
+      const core = await blobCore(entry.blobs)
+      const clearedBytes = entryCachedBytes(core, entry)
+      if (clearedBytes > 0 && entry.blob.blockLength > 0 && core.length > entry.blob.blockOffset) {
+        await core.clear(entry.blob.blockOffset, Math.min(core.length, entry.blob.blockOffset + entry.blob.blockLength))
+      }
+      return { clearedBytes }
+    }
+    let clearedBytes = 0
+    for (const [hex, core] of blobCores) {
+      if (blobSlots.some(s => s.key === hex) || !core.opened || core.length === 0) continue
+      const blocks = core.core.bitfield.countSet(0, core.length)
+      if (blocks > 0) {
+        clearedBytes += Math.min(core.byteLength, Math.round((blocks / core.length) * core.byteLength))
+        await core.clear(0, core.length)
+      }
+    }
+    return { clearedBytes }
   }
 
   // Store a readable stream as a blob and hash it on the way in. Returns the
@@ -278,7 +341,44 @@ export async function createNode ({
   }
 
   function status () {
-    return { tracker: b4a.toString(tracker.key, 'hex'), writer: b4a.toString(tracker.local.key, 'hex'), blobs: blobsKey, blobBytes: blobSlots.reduce((sum, s) => sum + s.core.byteLength, 0), peers: swarm.connections.size, lanPeers: lanPeers.size }
+    let rxBytes = closedRx, txBytes = closedTx, rttSum = 0, rttCount = 0, retransmits = 0
+    for (const c of [...swarm.connections, ...lanPeers]) {
+      rxBytes += c.rawBytesRead || c.rawStream?.bytesReceived || 0
+      txBytes += c.rawBytesWritten || c.rawStream?.bytesTransmitted || 0
+      const r = c.rawStream
+      if (r?.rtt > 0) { rttSum += r.rtt; rttCount++ }
+      if (r?.retransmits > 0) retransmits += r.retransmits
+    }
+    const now = Date.now(), dt = now - prevAt
+    if (dt >= 500) {
+      downBps = Math.max(0, Math.round(((rxBytes - prevRx) * 1000) / dt))
+      upBps = Math.max(0, Math.round(((txBytes - prevTx) * 1000) / dt))
+      prevRx = rxBytes; prevTx = txBytes; prevAt = now
+    }
+    let inflightBlocks = 0, cachedBytes = 0
+    for (const c of store.cores) inflightBlocks += c.replicator?._inflight?.length || 0
+    for (const [k, c] of blobCores) {
+      if (!blobSlots.some(s => s.key === k) && c.opened && c.length > 0 && c.byteLength > 0) {
+        const blocks = c.core.bitfield.countSet(0, c.length)
+        if (blocks > 0) cachedBytes += Math.min(c.byteLength, Math.round((blocks / c.length) * c.byteLength))
+      }
+    }
+    return {
+      tracker: b4a.toString(tracker.key, 'hex'),
+      writer: b4a.toString(tracker.local.key, 'hex'),
+      blobs: blobsKey,
+      blobBytes: blobSlots.reduce((sum, s) => sum + s.core.byteLength, 0),
+      cachedBytes,
+      peers: swarm.connections.size,
+      lanPeers: lanPeers.size,
+      downBps,
+      upBps,
+      rxBytes,
+      txBytes,
+      inflightBlocks,
+      rtt: rttCount ? Math.round(rttSum / rttCount) : 0,
+      retransmits
+    }
   }
 
   async function close () {
@@ -293,5 +393,5 @@ export async function createNode ({
     await store.close()
   }
 
-  return { tracker, swarm, search, put, append, publish, remove, status, streamUrl, setLan, close, get closing () { return closing } }
+  return { tracker, swarm, search, put, append, publish, remove, clearCache, status, streamUrl, setLan, close, get closing () { return closing } }
 }

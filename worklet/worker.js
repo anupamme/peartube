@@ -132,6 +132,7 @@ const methods = {
   }),
   status: async () => { await current(); return report() },
   search: async ({ id = null }) => (await current()).search(id),
+  clearCache: async ({ key = null } = {}) => { const res = await (await current()).clearCache(key); update(); return res },
   stop: () => serial(close)
 }
 
@@ -185,3 +186,10 @@ Bare.on('resume', () => {
 
 // Joining or leaving a network does not suspend the app.
 setInterval(() => serial(moveLan).catch(fatal), 10_000)
+let wasTransferring = false
+setInterval(() => {
+  if (!node || suspended) return
+  const st = node.status()
+  const active = st.downBps > 0 || st.upBps > 0 || st.inflightBlocks > 0
+  if (active || wasTransferring) { wasTransferring = active; update() }
+}, 2000)

@@ -75,8 +75,16 @@ data class Status(
     val writer: String,
     val blobs: String,
     val blobBytes: Long,
+    val cachedBytes: Long = 0,
     val peers: Long,
     val lanPeers: Long,
+    val downBps: Long = 0,
+    val upBps: Long = 0,
+    val rxBytes: Long = 0,
+    val txBytes: Long = 0,
+    val inflightBlocks: Long = 0,
+    val rtt: Long = 0,
+    val retransmits: Long = 0,
     val lan: String?,
 ) {
     companion object {
@@ -85,8 +93,16 @@ data class Status(
             writer = json.optString("writer"),
             blobs = json.optString("blobs"),
             blobBytes = json.optLong("blobBytes"),
+            cachedBytes = json.optLong("cachedBytes"),
             peers = json.optLong("peers"),
             lanPeers = json.optLong("lanPeers"),
+            downBps = json.optLong("downBps"),
+            upBps = json.optLong("upBps"),
+            rxBytes = json.optLong("rxBytes"),
+            txBytes = json.optLong("txBytes"),
+            inflightBlocks = json.optLong("inflightBlocks"),
+            rtt = json.optLong("rtt"),
+            retransmits = json.optLong("retransmits"),
             lan = json.optString("lan").takeUnless { json.isNull("lan") || it.isEmpty() },
         )
     }
@@ -100,6 +116,7 @@ data class Entry(
     val size: Long,
     val sha256: String,
     val local: Boolean,
+    val cachedBytes: Long = 0,
     val streamUrl: String,
 ) {
     companion object {
@@ -110,6 +127,7 @@ data class Entry(
             size = json.optLong("size"),
             sha256 = json.optString("sha256"),
             local = json.optBoolean("local"),
+            cachedBytes = json.optLong("cachedBytes"),
             streamUrl = json.getString("streamUrl"),
         )
     }
@@ -128,6 +146,13 @@ fun formatBytes(bytes: Long): String {
         bytes >= kb -> "%.1f KB".format(Locale.ROOT, bytes / kb)
         else -> "$bytes B"
     }
+}
+
+fun p2pSummary(status: Status?): String? {
+    val st = status ?: return null
+    if (st.downBps <= 0 && st.upBps <= 0 && st.inflightBlocks <= 0) return null
+    val rtt = if (st.rtt > 0) " · ${st.rtt} ms" else ""
+    return "P2P ↓ ${formatBytes(st.downBps)}/s · ↑ ${formatBytes(st.upBps)}/s · ${st.inflightBlocks} blks$rtt"
 }
 
 /** "S01E02" for an episode id (`tt…:s01e02`), else "Movie". */

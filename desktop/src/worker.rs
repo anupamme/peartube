@@ -25,9 +25,25 @@ pub struct Status {
     pub writer: String,
     pub blobs: String,
     pub blob_bytes: u64,
+    #[serde(default)]
+    pub cached_bytes: u64,
     pub peers: u64,
     /// Peers connected over LAN discovery.
     pub lan_peers: u64,
+    #[serde(default)]
+    pub down_bps: u64,
+    #[serde(default)]
+    pub up_bps: u64,
+    #[serde(default)]
+    pub rx_bytes: u64,
+    #[serde(default)]
+    pub tx_bytes: u64,
+    #[serde(default)]
+    pub inflight_blocks: u64,
+    #[serde(default)]
+    pub rtt: u64,
+    #[serde(default)]
+    pub retransmits: u64,
     /// What LAN discovery is doing, for the status line: "on 10.0.0.5",
     /// "paused", "failed on …" or "found no Wi-Fi address; …". None while off.
     pub lan: Option<String>,
@@ -43,6 +59,8 @@ pub struct Entry {
     pub size: u64,
     pub sha256: String,
     pub local: bool,
+    #[serde(default)]
+    pub cached_bytes: u64,
     pub stream_url: String,
 }
 
@@ -167,6 +185,10 @@ impl Worker {
     /// Every entry for `id`, or the whole tracker when `id` is None.
     pub async fn search(&self, id: Option<&str>) -> Result<Vec<Entry>, String> {
         parse(self.call("search", json!({ "id": id })).await?)
+    }
+
+    pub async fn clear_cache(&self, key: Option<&str>) -> Result<(), String> {
+        self.call("clearCache", json!({ "key": key })).await.map(drop)
     }
 
     /// Events from the worker, until it exits.

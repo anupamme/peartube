@@ -38,7 +38,7 @@ import com.peartube.app.Entry
 import com.peartube.app.Screen
 import com.peartube.app.formatBytes
 import com.peartube.app.label
-
+import com.peartube.app.p2pSummary
 @Composable
 fun ListScreen(model: AppModel) {
     val settings by model.settings.collectAsState()
@@ -48,9 +48,15 @@ fun ListScreen(model: AppModel) {
     val focus = LocalFocusManager.current
 
     val peers = status?.let { it.peers + it.lanPeers } ?: 0
+    val cached = status?.cachedBytes ?: 0L
     val tracker = status?.tracker ?: settings.tracker
     val short = if (tracker.length >= 8) tracker.take(8) + "…" else tracker
-    val facts = "$peers peers · ${formatBytes(status?.blobBytes ?: 0)} · $short"
+    val facts = buildList {
+        add("$peers peers")
+        add(formatBytes(status?.blobBytes ?: 0))
+        if (cached > 0) add("cached ${formatBytes(cached)}")
+        add(short)
+    }.joinToString(" · ")
     // Grouped by title: groups in case-insensitive order, episodes by id.
     val groups = remember(entries, query) { groups(entries, query.lowercase()) }
 
@@ -58,9 +64,13 @@ fun ListScreen(model: AppModel) {
         Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("PearTube", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.weight(1f))
+                if (cached > 0) {
+                    TextButton(onClick = { model.clearCache(null) }) { Text("Clear cache", fontSize = 13.sp, color = Dim) }
+                }
                 TextButton(onClick = { model.screen.value = Screen.Settings }) { Text("⚙", fontSize = 22.sp, color = Ink) }
             }
             Text(facts, color = Dim, fontSize = 14.sp)
+            p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 13.sp) }
             status?.lan?.let { Text("LAN $it", color = Dim, fontSize = 14.sp) }
             OutlinedTextField(
                 value = query,
@@ -95,7 +105,11 @@ fun ListScreen(model: AppModel) {
                             .border(1.dp, Line, RoundedCornerShape(10.dp))) {
                             rows.forEachIndexed { i, entry ->
                                 if (i > 0) HorizontalDivider(color = Line)
-                                Row(entry) { model.screen.value = Screen.Play(entry) }
+                                Row(
+                                    entry = entry,
+                                    onClear = if (!entry.local && entry.cachedBytes > 0) ({ model.clearCache(entry.key) }) else null,
+                                    onClick = { model.screen.value = Screen.Play(entry) },
+                                )
                             }
                         }
                     }
@@ -116,14 +130,20 @@ fun ListScreen(model: AppModel) {
 }
 
 @Composable
-private fun Row(entry: Entry, onClick: () -> Unit) {
+private fun Row(entry: Entry, onClear: (() -> Unit)?, onClick: () -> Unit) {
     val where = if (entry.local) "on this device" else "from peers"
-    Column(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+    val cached = if (!entry.local && entry.cachedBytes > 0) " · cached ${formatBytes(entry.cachedBytes)}" else ""
+    Row(
+        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label(entry.id), color = Ink, fontSize = 17.sp)
-        Text("${formatBytes(entry.size)} · $where", color = Dim, fontSize = 14.sp)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(label(entry.id), color = Ink, fontSize = 17.sp)
+            Text("${formatBytes(entry.size)} · $where$cached", color = Dim, fontSize = 14.sp)
+        }
+        if (onClear != null) {
+            TextButton(onClick = onClear) { Text("Clear", color = Dim, fontSize = 13.sp) }
+        }
     }
 }
 

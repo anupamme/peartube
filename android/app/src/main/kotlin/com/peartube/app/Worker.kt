@@ -89,6 +89,10 @@ class Worker(context: Context) {
         return List(list.length()) { Entry.from(list.getJSONObject(it)) }
     }
 
+    suspend fun clearCache(key: String? = null) {
+        call("clearCache", JSONObject().put("key", key ?: JSONObject.NULL))
+    }
+
     /** Stops the worklet's I/O while the app is in the background. */
     fun suspend() = handler.post { worklet?.suspend() }
 

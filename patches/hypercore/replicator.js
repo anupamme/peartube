@@ -43,7 +43,7 @@ const {
 const m = require('./messages')
 const caps = require('./caps')
 
-const DEFAULT_MAX_INFLIGHT = [16, 512]
+const DEFAULT_MAX_INFLIGHT = [8, 24]
 const SCALE_LATENCY = 50
 const NOT_DOWNLOADING_SLACK = (20000 + Math.random() * 20000) | 0
 const MAX_PEERS_UPGRADE = 3
@@ -603,7 +603,7 @@ class Peer {
 
     let activePeers = 0
     for (const p of this.replicator.peers) {
-      if (p._remoteContiguousLength > 0 || p.remoteLength > 0) activePeers++
+      if (p._remoteContiguousLength > 0 || p.remoteBitfield.findFirst(true, 0) !== -1) activePeers++
     }
     const scale =
       stream.rtt <= SCALE_LATENCY
@@ -788,12 +788,6 @@ class Peer {
   }
 
   closeIfIdle() {
-    if (this.remoteDownloading === false && this.replicator.isDownloading() === false) {
-      // idling, shut it down...
-      this.channel.close()
-      return true
-    }
-
     return false
   }
 
@@ -983,6 +977,7 @@ class Peer {
     if (this.receiverBusy || this.replicator.destroyed) return
     this.receiverBusy = true
     this.protomux.cork()
+    let batched = 0
 
     while (
       this.remoteOpened &&
@@ -992,6 +987,11 @@ class Peer {
     ) {
       const msg = this.receiverQueue.shift()
       await this._handleRequest(msg)
+      if (++batched >= 4) {
+        batched = 0
+        this.protomux.uncork()
+        this.protomux.cork()
+      }
     }
 
     this.protomux.uncork()
@@ -1394,7 +1394,7 @@ class Peer {
       return
     }
 
-    const rem = start & (RemoteBitfield.BITS_PER_SEGMENT - 1)
+    const rem = start & (RemoteBitfield.BITS_PER_PAGE - 1)
     if (rem > 0) {
       start -= rem
       length += rem
@@ -1409,7 +1409,7 @@ class Peer {
         this.missingBlocks.insert(start, remote.bitfield)
       }
 
-      start += RemoteBitfield.BITS_PER_SEGMENT
+      start += RemoteBitfield.BITS_PER_PAGE
     }
 
     this._clearLocalRange(fixedStart, length)
@@ -1566,9 +1566,14 @@ class Peer {
 
     if (s.seeker.start >= length) {
       const targetBlock = s.seeker.approxBlock !== undefined ? s.seeker.approxBlock : s.seeker.minBlock
-      if (targetBlock !== undefined && !this._remoteHasBlock(targetBlock)) return false
-
-      const req = this._makeRequest(true, 0, targetBlock !== undefined ? targetBlock + 1 : 0)
+      if (targetBlock !== undefined) {
+        if (this.remoteLength <= targetBlock) return false
+        if (!this._remoteHasBlock(targetBlock)) {
+          this._maybeWant(targetBlock, s)
+          if (this.replicator.peers.some(p => p._remoteHasBlock(targetBlock))) return false
+        }
+      }
+      const req = this._makeRequest(true, PRIORITY.VERY_HIGH, targetBlock !== undefined ? targetBlock + 1 : 0)
 
       // We need an upgrade for the seek, if non can be provided, skip
       if (req === null) return false
@@ -1590,17 +1595,22 @@ class Peer {
     const len = seekEnd - seekStart
     if (len <= 0) return false
 
+    const off = s.seeker.approxBlock !== undefined && s.seeker.approxBlock >= seekStart && s.seeker.approxBlock < seekEnd
+      ? s.seeker.approxBlock
+      : seekStart + Math.floor(Math.random() * len)
+
     if (this._remoteContiguousLength <= seekStart) {
-      const first = this.remoteBitfield.findFirst(true, seekStart)
+      if (this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength > seekStart)) {
+        return false
+      }
+      const first = this.missingBlocks.findFirst(true, seekStart)
       if (first === -1 || first >= seekEnd) {
+        this._maybeWant(off, s)
         this._maybeWantAnyRange(seekStart, len, s)
         return false
       }
     }
 
-    const off = s.seeker.approxBlock !== undefined && s.seeker.approxBlock >= seekStart && s.seeker.approxBlock < seekEnd
-      ? s.seeker.approxBlock
-      : seekStart + Math.floor(Math.random() * len)
     const tries = Math.min(len, 64)
 
     for (let i = 0; i < tries; i++) {
@@ -1610,20 +1620,19 @@ class Peer {
       if (this._remoteHasBlock(index) === false) {
         if (this._remoteContiguousLength > seekStart) index = seekStart
         else {
-          index = this.remoteBitfield.findFirst(true, index)
-          if (index === -1 || index >= seekEnd) index = this.remoteBitfield.findFirst(true, seekStart)
+          index = this.missingBlocks.findFirst(true, index)
+          if (index === -1 || index >= seekEnd) index = this.missingBlocks.findFirst(true, seekStart)
           if (index === -1 || index >= seekEnd) break
         }
       }
       if (this.core.bitfield.get(index) === true) continue
       if (!this._canRequest(index, false)) continue
-
       // Check if this block is currently inflight - if so pick another
       const b = this.replicator._blocks.get(index)
       if (b !== null && b.inflight.length > 0) continue
 
       // Block is not inflight, but we only want the hash, check if that is inflight
-      const h = this.replicator._hashes.add(index, PRIORITY.NORMAL, false)
+      const h = this.replicator._hashes.add(index, PRIORITY.VERY_HIGH, false)
       if (h.inflight.length > 0) continue
 
       const req = this._makeRequest(false, h.priority, index + 1)
@@ -1687,6 +1696,9 @@ class Peer {
   _requestBlock(b) {
     const { length, fork } = this.core.state
 
+    if (this._remoteContiguousLength <= b.index && this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength > b.index)) {
+      return false
+    }
     if (this._remoteHasBlock(b.index) === false || fork !== this.remoteFork) {
       if (!this.core.bitfield.get(b.index)) this._maybeWant(b.index, b)
       return false
@@ -1864,9 +1876,10 @@ class Peer {
   _requestRange(r) {
     const { WANT_BATCH } = w
     if (this.syncsProcessing > 0) return false
-
+    if (this._remoteContiguousLength <= r.start && this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength > r.start)) {
+      return false
+    }
     const { length, fork } = this.core.state
-
     if (r.blocks) {
       for (let i = r.start; i < r.end; i++) {
         const index = r.blocks[i]
@@ -3144,11 +3157,11 @@ module.exports = class Replicator {
     const limit = all ? peers.length : MIN_PEER_UPDATE_ALL
     let tried = 0
     for (const peer of peers) {
-      tried++
       if (this._updatePeer(peer) === true) {
         peers.requeue()
+      } else if (++tried >= limit) {
+        break
       }
-      if (tried >= limit) break
     }
 
     // Check if we can skip the non primary check fully
@@ -3159,11 +3172,11 @@ module.exports = class Replicator {
 
     tried = 0
     for (const peer of peers.restart()) {
-      tried++
       if (this._updatePeerNonPrimary(peer) === true) {
         peers.requeue()
+      } else if (++tried >= limit) {
+        break
       }
-      if (tried >= limit) break
     }
 
     this._checkUpgradeIfAvailable()

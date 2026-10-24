@@ -63,6 +63,7 @@ export function createAcquirer (node, file, { concurrency = Number(process.env.P
         job.bytes = 0
         const op = await node.put({ id: job.id, title: job.title }, res, bytes => { job.bytes = bytes })
         if (job.status === 'cancelled') throw new Error('Cancelled')
+        await node.clearCache?.().catch(() => {})
         Object.assign(job, { status: 'announcing', announce: op, source: null })
         save()
       }
