@@ -450,15 +450,7 @@ module.exports = class HypercoreBlobServer {
       return
     }
 
-    for (const prev of this.streams) {
-      if (prev._range !== null) {
-        prev._range.destroy()
-        prev._range = null
-      }
-    }
-
     const rs = new ByteStream(core, info.blob, { start, length })
-    this.streams.add(rs)
 
     rs.on('error', teardown)
     res.on('error', teardown)
@@ -466,9 +458,7 @@ module.exports = class HypercoreBlobServer {
 
     rs.pipe(res)
 
-    const streams = this.streams
     function teardown () {
-      streams.delete(rs)
       if (!rs.destroyed) rs.destroy()
       if (!isEnded(rs)) res.destroy()
     }
