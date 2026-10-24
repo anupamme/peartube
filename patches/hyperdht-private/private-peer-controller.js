@@ -2474,6 +2474,7 @@ class PrivatePeerController {
     this.pendingEntryRegistrations = new Map()
     this.lastSequences = new Map()
     this.sourceGuards = new PinnedGuards()
+    this.unreachableRelays = new Map()
     this.destinationGuards = new Map()
     this.destinationBridges = new Set()
     this.resolverStreams = new Set()
@@ -2631,6 +2632,7 @@ class PrivatePeerController {
     }
     this.directDestinationKeys.clear()
     this.sourceGuards.clear()
+    this.unreachableRelays.clear()
     for (const guards of this.destinationGuards.values()) guards.clear()
     this.destinationGuards.clear()
   }
@@ -2742,7 +2744,7 @@ class PrivatePeerController {
     if (this.destroyed || this.suspended || server.closed || server.suspended || !server._keyPair) {
       throw unavailable()
     }
-    const relays = shuffle(await this.descriptors.discoverRelays())
+    const relays = this._liveRelays(shuffle(await this.descriptors.discoverRelays()), 2)
     if (relays.length < 2) throw unavailable()
     server._guards.ensure(relays, this.clock.now())
     let failure = unavailable()
@@ -2990,10 +2992,25 @@ class PrivatePeerController {
     return stream
   }
 
+  _markRelayUnreachable(publicKey) {
+    if (publicKey) this.unreachableRelays.set(key(publicKey), this.clock.now() + 60000)
+  }
+
+  _liveRelays(relays, minCount = 4) {
+    const now = this.clock.now()
+    for (const [k, exp] of this.unreachableRelays) {
+      if (now >= exp) this.unreachableRelays.delete(k)
+    }
+    const live = relays.filter((pk) => !this.unreachableRelays.has(key(pk)))
+    if (live.length >= minCount) return live
+    this.unreachableRelays.clear()
+    return relays
+  }
+
   async _openSession(destinationPublicKey, useSpliced = this.spliced) {
     await this.ready()
     if (this.destroyed || this.suspended || this.relay) throw unavailable()
-    const relays = shuffle(await this.descriptors.discoverRelays())
+    const relays = this._liveRelays(shuffle(await this.descriptors.discoverRelays()), 4)
     this.sourceGuards.ensure(relays, this.clock.now())
     let descriptor = null
     let resolveAttempts = 0
@@ -3006,7 +3023,7 @@ class PrivatePeerController {
         ((entryDiversity && b4a.equals(div, entryDiversity)) ||
           (guardDiversity && b4a.equals(div, guardDiversity)))
       )
-    const pinnedCandidates = this.sourceGuards.candidates()
+    const pinnedCandidates = this.sourceGuards.candidates().filter((g) => !this.unreachableRelays.has(key(g.publicKey)))
     const pinnedIds = new Set(pinnedCandidates.map((g) => key(g.publicKey)))
     const extraCandidates = relays
       .filter((pk) => !pinnedIds.has(key(pk)))
@@ -3014,7 +3031,7 @@ class PrivatePeerController {
     const allFirstCandidates = [...pinnedCandidates, ...extraCandidates]
     try {
       for (const guard of allFirstCandidates) {
-        if (guard.ephemeral && !descriptor) break
+        if (guard.ephemeral && !descriptor && resolveAttempts >= MAX_SOURCE_ATTEMPTS) break
         const firstSafetyRelayPublicKey = guard.publicKey
         const attemptedSeconds = new Set()
         while (resolveAttempts < MAX_SOURCE_ATTEMPTS) {
@@ -3034,6 +3051,7 @@ class PrivatePeerController {
               !same(candidate, firstSafetyRelayPublicKey) &&
               !attemptedSeconds.has(cid) &&
               !this.sourceGuards.isUnavailable(candidate) &&
+              !this.unreachableRelays.has(cid) &&
               !(firstKnownDiv && cDiv && b4a.equals(firstKnownDiv, cDiv)) &&
               !ConflictWithDescriptor(cDiv) &&
               (!descriptor ||
@@ -3051,12 +3069,7 @@ class PrivatePeerController {
           let inbox = null
           let request = null
           let firstConnected = false
-          let countedResolve = false
           try {
-            if (!descriptor) {
-              resolveAttempts++
-              countedResolve = true
-            }
             connection = await this._connectRelay(firstSafetyRelayPublicKey)
             firstConnected = true
             guard.unreachable = false
@@ -3079,8 +3092,10 @@ class PrivatePeerController {
             request = null
             if (
               (await this._readControl(connection, 1, OP_BUILD_SOURCE, 'status'))[0] !== STATUS_OK
-            )
+            ) {
+              this._markRelayUnreachable(secondSafetyRelayPublicKey)
               throw unavailable()
+            }
             const secondDiversity = await this._readControl(
               connection,
               32,
@@ -3089,7 +3104,6 @@ class PrivatePeerController {
             )
             knownDiversity.set(key(secondSafetyRelayPublicKey), b4a.from(secondDiversity))
             if (b4a.equals(firstDiversity, secondDiversity)) {
-              if (countedResolve && !descriptor) resolveAttempts--
               throw unavailable()
             }
             requireDiverse(firstDiversity, secondDiversity)
@@ -3098,6 +3112,7 @@ class PrivatePeerController {
             localContext = null
             inbox = new ControlInbox(link)
             if (!descriptor) {
+              resolveAttempts++
               const resolved = await this._resolveThrough(inbox, destinationPublicKey)
               clearDescriptor(descriptor)
               descriptor = resolved
@@ -3266,9 +3281,7 @@ class PrivatePeerController {
             if (this.destroyed || this.suspended) throw unavailable()
             if (!firstConnected) {
               this.sourceGuards.failed(guard)
-              if (!guard.ephemeral) {
-                break
-              }
+              break
             }
           } finally {
             if (inbox) inbox.destroy()
@@ -3300,12 +3313,13 @@ class PrivatePeerController {
     stream.once('close', () => this.resolverStreams.delete(stream))
     try {
       if (session) session.ownStream(stream)
-      await opened(stream, 8000)
+      await opened(stream, 3000)
       if (this.destroyed || this.suspended) throw unavailable()
       if (session) session.check()
       this._relayDiversityKey(stream)
       return stream
     } catch (error) {
+      if (!this.destroyed && !this.suspended) this._markRelayUnreachable(publicKey)
       stream.destroy(error)
       throw error
     }

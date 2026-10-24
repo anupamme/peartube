@@ -147,7 +147,7 @@ export async function createNode ({
     }
   }
   // Double-randomized NATs cannot holepunch; relayThrough lets them meet via a blind relay.
-  const swarm = new Hyperswarm({ dht, maxParallel: 8, bootstrap, port: dhtPort, relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null) })
+  const swarm = new Hyperswarm({ dht, maxParallel: 16, bootstrap, port: dhtPort, relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null) })
   swarm.on('connection', conn => tracker.replicate(conn))
   const topic = dht ? createHash('sha256').update('peartube/private/v1/').update(tracker.key).update(String(Math.floor(Date.now() / 86_400_000))).digest() : tracker.discoveryKey
   const discovery = swarm.join(topic, { server: !dht, client: true })

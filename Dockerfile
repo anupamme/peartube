@@ -1,5 +1,5 @@
-FROM qmcgaw/gluetun:latest AS gluetun
-FROM node:22-bookworm-slim
+FROM docker.io/qmcgaw/gluetun:latest AS gluetun
+FROM docker.io/library/node:22-bookworm-slim
 # rocksdb-native links libatomic; openvpn + iptables + gluetun-entrypoint let relay containers run their own VPN tunnel without a sidecar container.
 RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 git ca-certificates openvpn iptables iproute2 && rm -rf /var/lib/apt/lists/* && ln -sf /usr/sbin/openvpn /usr/sbin/openvpn2.6 && usermod -l nonrootuser -g 0 node && mkdir -p /etc/openvpn /tmp/gluetun
 COPY --from=gluetun /gluetun-entrypoint /gluetun-entrypoint

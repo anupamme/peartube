@@ -64,6 +64,7 @@ class StorageRouting {
     this.bootstrapExpiresAt = 0
     this.learning = new Map()
     this.learnedAt = new Map()
+    this.deadEndpoints = new Map()
     this.started = false
     this.stopped = false
     this.closed = false
@@ -149,6 +150,16 @@ class StorageRouting {
     }
   }
 
+  _isDead(id) {
+    const exp = this.deadEndpoints.get(id)
+    if (!exp) return false
+    if (Date.now() >= exp) {
+      this.deadEndpoints.delete(id)
+      return false
+    }
+    return true
+  }
+
   _retain(contact) {
     if (this.closed || this.stopped) return
     if (this.table.size >= MAX_CONTACTS && !this.table.has(contact.id)) return
@@ -188,7 +199,8 @@ class StorageRouting {
     const closerNodes = []
     for (let i = 0; i < count; i++) {
       try {
-        closerNodes.push(this._contact(c.ipv4Address.decode(state)))
+        const next = this._contact(c.ipv4Address.decode(state))
+        if (!this._isDead(endpointKey(next))) closerNodes.push(next)
       } catch {
         throw unavailable()
       }
@@ -227,8 +239,11 @@ class StorageRouting {
       },
       (error) => {
         if (!cancelled) {
+          const ep = endpointKey(contact)
+          this.deadEndpoints.set(ep, Date.now() + 60000)
           this.table.remove(contact.id)
-          this.bootstrapExpiresAt = 0
+          this.bootstrapHints = this.bootstrapHints.filter((c) => endpointKey(c) !== ep)
+          if (this.bootstrapHints.length < 3) this.bootstrapExpiresAt = 0
         }
         throw error
       }
@@ -272,7 +287,7 @@ class StorageRouting {
                 continue
               }
               const id = endpointKey(contact)
-              if (retained.has(id)) continue
+              if (retained.has(id) || this._isDead(id)) continue
               const rank = b4a.allocUnsafe(32)
               sodium.crypto_generichash(rank, contact.id, sampleKey)
               if (sample.length === MAX_REFERRALS && b4a.compare(rank, sample[0].rank) >= 0) {
@@ -291,8 +306,9 @@ class StorageRouting {
           }
         }
         operation.check()
+        if (sample.length === 0) this.deadEndpoints.clear()
         this.bootstrapHints = sample.map((entry) => entry.contact)
-        this.bootstrapExpiresAt = Date.now() + BOOTSTRAP_TTL_MS
+        this.bootstrapExpiresAt = sample.length > 0 ? Date.now() + BOOTSTRAP_TTL_MS : 0
         complete = true
       } finally {
         operation.releaseQuery(query)
