@@ -20,7 +20,7 @@ fn main() {
     for path in ["worker.js", "pack.cjs", "imports.json", "crypto", "vendor/bare-kit"] {
         println!("cargo:rerun-if-changed={}", worklet.join(path).display());
     }
-    for path in ["src", "package.json", "package-lock.json"] {
+    for path in ["src", "patches", "package.json", "package-lock.json"] {
         println!("cargo:rerun-if-changed={}", root.join(path).display());
     }
 
