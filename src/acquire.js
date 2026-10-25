@@ -122,10 +122,23 @@ export function createAcquirer (node, file, {
     return view(job)
   }
 
+  function repointBlob (oldTag, target) {
+    let updated = 0
+    for (const job of jobs) {
+      if (job.announce && `${job.announce.blobs}:${job.announce.blob?.blockOffset}` === oldTag) {
+        job.announce = { ...job.announce, blobs: target.blobs, blob: target.blob }
+        updated++
+      }
+    }
+    if (updated > 0) save()
+    return updated
+  }
+
   next()
   return {
     add,
     cancel,
+    repointBlob,
     get: jobId => { const job = jobs.find(j => j.jobId === jobId); return job ? view(job) : null },
     list: () => jobs.map(view)
   }

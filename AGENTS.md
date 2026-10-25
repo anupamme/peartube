@@ -10,8 +10,9 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 
 |File|Purpose|
 |---|---|
-|`src/index.js`|`createNode`: Corestore, Autobee tracker + `apply`, Hyperblobs, blob server, Hyperswarm, `search` / `put` / `append` / `publish` / `remove`, and `setLan` to swap LAN discovery without restarting the node|
-|`src/acquire.js`|Private job queue: fetch a source, `put` it, save the announce, `append` it durably. Stored in `jobs.json`, never in the Corestore|
+|`src/index.js`|`createNode`: Corestore, Autobee tracker + `apply`, Hyperblobs (`512 KiB` blocks across capped slots), `rechunkLegacyBlobs`, Hyperswarm, `search` / `put` / `append` / `publish` / `remove`, and `setLan` to swap LAN discovery without restarting the node|
+|`src/blob-server.js`|Zero-patch HTTP Range blob server over stock `hypercore` sessions: `O(1)` integer-division block seeks (`Math.floor(byte / 524288)`) with zero `core.seek()` network walks, bounded `core.get()` sliding lookahead, and instant session cancellation when a player seeks|
+|`src/acquire.js`|Private job queue: fetch a source, `put` it, save the announce, `append` it durably, and `repointBlob` on `512 KiB` slot migration. Stored in `jobs.json`, never in the Corestore|
 |`src/http.js`|One port: the UI at `/`, `/v1` API, `/v1/blob` same-origin HTTP Range blob streaming, and `/web/*` WASM player assets|
 |`src/ui.js`|The acquisitions & catalog page (one HTML string), with in-browser `peartube-media` WebAssembly playback|
 |`web/`|Browser WebAssembly player (`peartube_web.wasm`, `sh web/build.sh` -> `web/assets/`, not part of the core line budget): compiles `peartube-media`'s containers, software decoders, surround downmixer, subtitle decoders, and low-latency CMAF fMP4 muxer to `wasm32-unknown-unknown` (`+simd128`) inside a Dedicated Web Worker|

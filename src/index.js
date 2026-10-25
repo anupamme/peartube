@@ -5,10 +5,10 @@ import Corestore from 'corestore'
 import Hyperswarm from 'hyperswarm'
 import HyperDHT from 'hyperdht'
 import Hyperblobs from 'hyperblobs'
-import BlobServer from 'hypercore-blob-server'
+import { BlobServer } from './blob-server.js'
 import b4a from 'b4a'
 import { createHash } from 'node:crypto'
-import { pipelinePromise, Transform } from 'streamx'
+import { pipelinePromise, Readable, Transform } from 'streamx'
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tuneUdxSocket } from './lan.js'
@@ -16,7 +16,16 @@ const ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
 const HEX64 = /^[0-9a-f]{64}$/
 const MAX_TITLE = 300
 const BLOB_BLOCK_SIZE = 512 * 1024
+const MAX_SLOT_BLOCKS = 262_144
+const MAX_WRITE_SLOTS = 16
 const MAX_CONTENT_TOPICS = 24
+const isUniform512 = blob => Boolean(blob && (
+  blob.byteLength === 0 || (
+    blob.blockLength > 0 &&
+    (blob.blockLength - 1) * BLOB_BLOCK_SIZE < blob.byteLength &&
+    blob.byteLength <= blob.blockLength * BLOB_BLOCK_SIZE
+  )
+))
 
 // Every peer value is untrusted until decodeOp blesses it; typeof guards every regex.
 const str = (v, re) => typeof v === 'string' && re.test(v)
@@ -175,11 +184,13 @@ export async function createNode ({
   }
 
   const blobSlots = []
+  const blobCores = new Map()
   async function openSlot (i) {
     const core = store.get({ name: i === 0 ? 'blobs' : `blobs-${i}` })
     await core.ready()
     const slot = { core, blobs: new Hyperblobs(core, { blockSize: BLOB_BLOCK_SIZE }), key: b4a.toString(core.key, 'hex'), busy: false }
     blobSlots.push(slot)
+    blobCores.set(slot.key, core)
     return slot
   }
   for (let i = 0; i < 4; i++) await openSlot(i)
@@ -187,10 +198,11 @@ export async function createNode ({
     const core = store.get({ name: `blobs-${i}` })
     await core.ready()
     if (core.length === 0) { await core.close(); break }
-    blobSlots.push({ core, blobs: new Hyperblobs(core, { blockSize: BLOB_BLOCK_SIZE }), key: b4a.toString(core.key, 'hex'), busy: false })
+    const slot = { core, blobs: new Hyperblobs(core, { blockSize: BLOB_BLOCK_SIZE }), key: b4a.toString(core.key, 'hex'), busy: false }
+    blobSlots.push(slot)
+    blobCores.set(slot.key, core)
   }
   const blobsKey = blobSlots[0].key
-  const blobCores = new Map(blobSlots.map(s => [s.key, s.core]))
 
   const host = privateHost ?? (Array.isArray(bootstrap) && bootstrap.some(b => String(b?.host || b).startsWith('127.')) ? '127.0.0.1' : undefined)
   const privateOpts = relay => ({ release: 'alpha', acknowledgeAlpha: true, mode: 'optional', profile: 'spliced', relay })
@@ -606,7 +618,10 @@ export async function createNode ({
           if (op?.type === 'announce') raw.push({ key: `tracker:${s.key}/${sub}`, entry: op, source: s.key, sourceKind: 'tracker' })
         }
       } else {
-        raw.push(...(await readChannelEntries(s.bee, id, s.key)))
+        for (const item of await readChannelEntries(s.bee, id, s.key)) {
+          if (!filterSource && primarySlices.has(`${item.entry.id}/${item.entry.blobs}:${item.entry.blob.blockOffset}`)) continue
+          raw.push(item)
+        }
       }
     }
     for (const [key, item] of ephemeralWatches) {
@@ -623,7 +638,7 @@ export async function createNode ({
         title: cleanText(entry.title, entry.id),
         size: entry.size,
         sha256: entry.sha256,
-        local: blobSlots.some(s => s.key === entry.blobs),
+        local: blobSlots.some(s => s.key === entry.blobs) && cached >= entry.size,
         cachedBytes: cached,
         streamUrl: streamUrl(entry),
         magnetUrl: formatWatchUri(entry, source, sourceKind),
@@ -784,9 +799,20 @@ export async function createNode ({
     return { clearedBytes, reclaimedBytes }
   }
 
-  async function put ({ id, title }, source, onData = null) {
+  async function pickWriteSlot (excludeHex = null) {
+    let slot = blobSlots.find(s => !s.busy && s.key !== excludeHex && s.core.length < MAX_SLOT_BLOCKS)
+    if (!slot && blobSlots.length < MAX_WRITE_SLOTS) slot = await openSlot(blobSlots.length)
+    if (!slot) {
+      const candidates = blobSlots.filter(s => !s.busy && s.key !== excludeHex && (s !== blobSlots[0] || s.core.length < MAX_SLOT_BLOCKS))
+      const pool = candidates.length ? candidates : blobSlots.filter(s => !s.busy && s.key !== excludeHex)
+      if (pool.length) slot = pool.reduce((a, b) => a.core.length <= b.core.length ? a : b)
+    }
+    return slot || openSlot(blobSlots.length)
+  }
+
+  async function put ({ id, title }, source, onData = null, opts = {}) {
     if (!str(id, ID)) throw new Error(`Invalid id ${id}`)
-    const slot = blobSlots.find(s => !s.busy) || await openSlot(blobSlots.length)
+    const slot = await pickWriteSlot(opts?.excludeHex || null)
     slot.busy = true
     try {
       const hash = createHash('sha256')
@@ -987,6 +1013,140 @@ export async function createNode ({
     })
   }
 
+  // Re-chunks legacy variable-block local blobs into uniform 512 KiB slots, SHA-256 verifies
+  // every byte before swapping tracker + channel pointers, then clears & compacts the old spans.
+  async function rechunkLegacyBlobs ({ onMigrate = null, onProgress = null, limit = Infinity } = {}) {
+    const writer = b4a.toString(tracker.local.key, 'hex')
+    const uniformByHash = new Map()
+    const legacyGroups = new Map()
+    const slotMap = new Map(blobSlots.map(s => [s.key, s]))
+    const hasAllBlocks = (slot, blob) => {
+      if (!slot || blob.blockLength <= 0) return blob.byteLength === 0
+      const end = blob.blockOffset + blob.blockLength
+      if (slot.core.length < end) return false
+      const unset = slot.core.core.bitfield.firstUnset(blob.blockOffset)
+      return unset === -1 || unset >= end
+    }
+    const addRef = (op, kind, fullKey) => {
+      const slot = slotMap.get(op.blobs)
+      if (!slot) return
+      if (isUniform512(op.blob)) {
+        if (hasAllBlocks(slot, op.blob)) uniformByHash.set(`${op.sha256}:${op.size}`, { blobs: op.blobs, blob: op.blob })
+        return
+      }
+      if (!hasAllBlocks(slot, op.blob)) return
+      const oldTag = `${op.blobs}:${op.blob.blockOffset}`
+      let g = legacyGroups.get(oldTag)
+      if (!g) {
+        g = { oldTag, blobs: op.blobs, blob: op.blob, sha256: op.sha256, size: op.size, trackerOps: [], channelOps: [] }
+        legacyGroups.set(oldTag, g)
+      }
+      if (kind === 'tracker') g.trackerOps.push({ fullKey, op })
+      else g.channelOps.push({ fullKey, op })
+    }
+
+    if (usePrimaryTracker) {
+      await tracker.update()
+      for await (const n of tracker.view.createReadStream()) {
+        const key = b4a.toString(n.key)
+        if (key.startsWith('peer/') || key.startsWith('source/')) continue
+        const op = decodeOp(n.value)
+        if (op?.type === 'announce' && key.split('/')[1] === writer) addRef(op, 'tracker', key)
+      }
+    }
+    if (localChannel.core.length > 0) {
+      for await (const n of localChannel.createReadStream({ gte: b4a.from('entry/'), lt: b4a.from('entry/\xff') })) {
+        const subKey = b4a.toString(n.key)
+        const op = decodeOp(n.value)
+        if (op?.type === 'announce') addRef(op, 'channel', subKey)
+      }
+    }
+
+    const queue = [...legacyGroups.values()].sort((a, b) => a.size - b.size)
+    let migrated = 0, deduped = 0, migratedBytes = 0, clearedSinceGc = 0
+    onProgress?.({ total: queue.length, migrated, deduped, remaining: queue.length, migratedBytes, currentId: null, currentTitle: null })
+
+    for (const g of queue) {
+      if (closing || migrated >= limit) break
+      const sample = g.trackerOps[0]?.op || g.channelOps[0]?.op
+      onProgress?.({ total: queue.length, migrated, deduped, remaining: queue.length - migrated, migratedBytes, currentId: sample.id, currentTitle: sample.title })
+      const oldSlot = slotMap.get(g.blobs)
+      if (!oldSlot || !hasAllBlocks(oldSlot, g.blob)) continue
+
+      let target = uniformByHash.get(`${g.sha256}:${g.size}`)
+      if (target) {
+        const tSlot = blobSlots.find(s => s.key === target.blobs)
+        if (!hasAllBlocks(tSlot, target.blob)) target = null
+      }
+
+      if (target) {
+        deduped++
+      } else {
+        let idx = g.blob.blockOffset
+        const endIdx = g.blob.blockOffset + g.blob.blockLength
+        const src = new Readable({
+          read (cb) {
+            if (closing) return cb(new Error('Node closing'))
+            if (idx >= endIdx) { this.push(null); return cb(null) }
+            const batchEnd = Math.min(endIdx, idx + 16)
+            const reqs = []
+            while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++))
+            Promise.all(reqs).then(blocks => {
+              for (const blk of blocks) this.push(blk)
+              setTimeout(() => cb(null), 0)
+            }, cb)
+          }
+        })
+        const newOp = await put({ id: sample.id, title: sample.title }, src, null, { excludeHex: g.blobs })
+        slotMap.set(newOp.blobs, blobSlots.find(s => s.key === newOp.blobs))
+        if (newOp.sha256 !== g.sha256 || newOp.size !== g.size) {
+          const badSlot = blobSlots.find(s => s.key === newOp.blobs)
+          if (badSlot) await badSlot.core.clear(newOp.blob.blockOffset, newOp.blob.blockOffset + newOp.blob.blockLength).catch(() => {})
+          throw new Error(`SHA-256 mismatch rechunking ${sample.id}: expected ${g.sha256}, got ${newOp.sha256}`)
+        }
+        target = { blobs: newOp.blobs, blob: newOp.blob }
+        uniformByHash.set(`${g.sha256}:${g.size}`, target)
+      }
+
+      await onMigrate?.(g.oldTag, target, sample)
+      for (const { op } of g.trackerOps) {
+        await append({ ...op, blobs: target.blobs, blob: target.blob })
+      }
+      for (const { op } of g.channelOps) {
+        await publishChannel({ ...op, blobs: target.blobs, blob: target.blob })
+      }
+      if (g.channelOps.length > 0) {
+        await withChannelLock(async () => {
+          const w = localChannel.write()
+          for (const { fullKey } of g.channelOps) w.tryDelete(b4a.from(fullKey))
+          await w.flush()
+        })
+      }
+      for (const { fullKey } of g.trackerOps) {
+        await append({ type: 'remove', key: fullKey })
+      }
+
+      const clearEnd = Math.min(oldSlot.core.length, g.blob.blockOffset + g.blob.blockLength)
+      if (clearEnd > g.blob.blockOffset) {
+        await oldSlot.core.clear(g.blob.blockOffset, clearEnd)
+        ensureBlockCounter(oldSlot.core)
+        syncBlockCounter(oldSlot.core)
+      }
+      migrated++
+      migratedBytes += g.size
+      clearedSinceGc += g.size
+      if (clearedSinceGc >= 16 * 1024 * 1024 * 1024) {
+        clearedSinceGc = 0
+        await gcStorage({ full: false })
+      }
+      onProgress?.({ total: queue.length, migrated, deduped, remaining: queue.length - migrated, migratedBytes, currentId: null, currentTitle: null })
+    }
+
+    if (clearedSinceGc > 0) await gcStorage({ full: false })
+    if (migrated > 0) update()
+    return { total: queue.length, migrated, deduped, remaining: Math.max(0, queue.length - migrated), migratedBytes }
+  }
+
   async function remove (key) {
     if (key.startsWith(`channel:${channelKey}/`)) return removeChannel(key)
     const prev = await findEntry(key).catch(() => null)
@@ -1062,7 +1222,7 @@ export async function createNode ({
       prevRx = rxBytes; prevTx = txBytes; prevAt = now
     }
     let inflightBlocks = 0, cachedBytes = 0
-    for (const c of store.cores) { const inf = c.replicator?._inflight; if (inf) inflightBlocks += Math.max(0, (inf._requests?.length || 0) - (inf._free?.length || 0)) }
+    for (const c of store.cores) { const peers = c.replicator?.peers; if (peers) for (const p of peers) inflightBlocks += p.inflight || 0 }
     for (const [k, c] of blobCores) {
       if (!blobSlots.some(s => s.key === k) && c.opened && c.length > 0 && c.byteLength > 0) {
         ensureBlockCounter(c)
@@ -1073,7 +1233,13 @@ export async function createNode ({
         }
       }
     }
-    const blobBytes = blobSlots.reduce((sum, s) => sum + s.core.byteLength, 0)
+    const blobBytes = blobSlots.reduce((sum, s) => {
+      if (s.core.length === 0 || s.core.byteLength === 0) return sum
+      ensureBlockCounter(s.core)
+      const blocks = s.core._ptBlocks
+      if (blocks <= 0) return sum
+      return sum + (blocks >= s.core.length ? s.core.byteLength : Math.round((blocks / s.core.length) * s.core.byteLength))
+    }, 0)
     const reciprocity = applyReciprocity(blobBytes + cachedBytes, txBytes, rxBytes, contributingPeers)
     return {
       tracker: usePrimaryTracker ? primaryKey : (extraSources.keys().next().value || primaryKey),
@@ -1139,6 +1305,7 @@ export async function createNode ({
     removeChannel,
     publishSource,
     syncLocalChannel,
+    rechunkLegacyBlobs,
     unpublishSource,
     publishedSources,
     addSource,
@@ -1149,6 +1316,7 @@ export async function createNode ({
     warm,
     setAllowedPeers,
     clearCache,
+    gcStorage,
     status,
     streamUrl,
     blobServer: server,

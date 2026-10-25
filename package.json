@@ -72,7 +72,7 @@
     "peartube-receiver": "bin/receiver.js"
   },
   "scripts": {
-    "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ && cp patches/hypercore/hypercore-index.js node_modules/hypercore/index.js && cp patches/hypercore/replicator.js node_modules/hypercore/lib/replicator.js && cp patches/hypercore/merkle-tree.js node_modules/hypercore/lib/merkle-tree.js && cp patches/hypercore/session-state.js node_modules/hypercore/lib/session-state.js && cp patches/hypercore/blob-server.js node_modules/hypercore-blob-server/index.js && cp patches/hypercore/byte-stream.js node_modules/hypercore-byte-stream/index.js || true",
+    "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ || true",
     "start": "bare bin/relay.js",
     "receiver": "node bin/receiver.js",
     "test": "node --test test/*.test.js",
@@ -101,7 +101,6 @@
     "corestore": "^7.12.6",
     "hyperblobs": "^2.12.1",
     "hyperdht": "github:ayooooo123/hyperdht#39d8f8b0e862446ae3a045651ccda9210c6f2146",
-    "hypercore-blob-server": "^1.15.0",
     "hyperswarm": "^4.17.2",
     "peartube-crypto": "file:worklet/crypto",
     "sodium-native": "github:ayooooo123/sodium-native#562d642e1a78a8e124cf97bfbda77f01c02d1a7f",

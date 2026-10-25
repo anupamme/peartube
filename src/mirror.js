@@ -3,13 +3,15 @@
 //   - Automatically backfills all previously saved tracker blobs into this relay's single-writer Channel (`channel-backfill`)
 //   - Mirrors local media folders (`watch-dir`, e.g. `/data/import` on Unraid) without re-ingesting unchanged files
 //   - Mirrors remote JSON manifests or peer relay `/v1/entries` catalogs (`feed-mirror`)
+//   - Greedy P2P Hyperblobs block replication (`p2p-replicate`) to stuff a replica disk full without duplicating catalog ops
 //   - Dynamically loads custom user plugins dropped into `/data/plugins/*.mjs` or `*.js`
-import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { basename, extname, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import b4a from 'b4a'
+import { parseUri } from './index.js'
 
 const VALID_ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
 const MEDIA_EXT = new Set(['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.ogg', '.flac', '.mp3', '.opus', '.wav', '.aac'])
@@ -72,8 +74,13 @@ export async function createMirrorHost ({
   storage,
   acquirer,
   mirrorChannel = true,
+  rechunk = true,
   watchDir = null,
   feeds = [],
+  replicate = false,
+  replicateMinFreeBytes = 20 * 1024 * 1024 * 1024,
+  replicateConcurrency = 1,
+  replicateStallMs = 20_000,
   pluginsDir = join(storage, 'plugins'),
   pollIntervalMs = 60_000,
   onchange = null
@@ -192,6 +199,35 @@ export async function createMirrorHost ({
     }
   })
 
+  // 2b. Built-in plugin: SHA-256-verified migration of legacy variable-block blobs into uniform 512 KiB slots.
+  let rechunkRunning = false
+  let rechunkProgress = { running: false, total: 0, migrated: 0, deduped: 0, remaining: 0, migratedBytes: 0, currentId: null, currentTitle: null }
+  register({
+    name: 'blob-rechunk',
+    description: 'Re-chunks legacy variable-block local blobs into uniform 512 KiB blocks with SHA-256 verification and space reclamation',
+    async run (payload = {}) {
+      if (rechunkRunning) return { busy: true, ...rechunkProgress }
+      if (typeof node.rechunkLegacyBlobs !== 'function') return { skipped: true }
+      rechunkRunning = true
+      rechunkProgress = { ...rechunkProgress, running: true }
+      try {
+        const res = await node.rechunkLegacyBlobs({
+          limit: Number.isFinite(Number(payload?.limit)) && Number(payload.limit) > 0 ? Number(payload.limit) : Infinity,
+          onMigrate: (oldTag, target) => { acquirer?.repointBlob?.(oldTag, target) },
+          onProgress: p => { rechunkProgress = { running: true, ...p } }
+        })
+        rechunkProgress = { running: false, ...res, currentId: null, currentTitle: null }
+        return res
+      } finally {
+        rechunkRunning = false
+        rechunkProgress.running = false
+      }
+    },
+    info () {
+      return { ...rechunkProgress }
+    }
+  })
+
   // 3. Built-in plugin: local directory Drop/Watch folder mirror (e.g. /data/import on Unraid).
   let scanningWatchDir = false
   async function scanFolder (dir, ctx) {
@@ -294,6 +330,371 @@ export async function createMirrorHost ({
     info: () => ({ feeds: configuredFeeds })
   })
 
+  // 5. Built-in plugin: greedy P2P Hyperblobs block replicator — sucks every announced peer slice onto disk up to the free-space floor without forging duplicate tracker entries.
+  const allowReplicateKeys = Array.isArray(replicate) && replicate.length
+    ? new Set(replicate.map(k => String(k).trim().toLowerCase()).filter(Boolean))
+    : null
+  const replicateEnabled = Boolean(replicate) && (!Array.isArray(replicate) || Boolean(allowReplicateKeys?.size))
+  const activeReplicaRanges = new Set()
+  const deadReplicaCores = new Map()
+  let replicating = false
+  let replicateRerun = false
+  const repState = {
+    replicatedEntries: 0,
+    totalEntries: 0,
+    replicatedBytes: 0,
+    targetBytes: 0,
+    activeSlices: 0,
+    activeTitles: [],
+    skippedDiskFull: 0,
+    skippedUnavailable: 0
+  }
+
+  function freeDiskBytes () {
+    try {
+      const st = statfsSync(storage)
+      return Number(st.bavail) * Number(st.bsize)
+    } catch {
+      return Infinity
+    }
+  }
+
+  // Purges cached spans in non-writable replica cores that no live catalog entry still points at so fresh Unraid flesh can take their place.
+  async function pruneUnreferencedReplicaBlocks (allItems) {
+    const keepByCore = new Map()
+    for (const item of allItems) {
+      if (!item?.magnetUrl) continue
+      let parsed
+      try { parsed = parseUri(item.magnetUrl) } catch { continue }
+      const b = parsed?.entry?.blob
+      if (!parsed?.entry?.blobs || !b || !(b.blockLength > 0)) continue
+      let list = keepByCore.get(parsed.entry.blobs)
+      if (!list) { list = []; keepByCore.set(parsed.entry.blobs, list) }
+      list.push([b.blockOffset, b.blockOffset + b.blockLength])
+    }
+    let clearedAny = false
+    for (const [blobsHex, spans] of keepByCore) {
+      const core = await node.blobCore(blobsHex).catch(() => null)
+      if (!core || core.writable || !core.opened || core.length === 0) continue
+      spans.sort((a, b) => a[0] - b[0])
+      const merged = []
+      for (const [s, e] of spans) {
+        if (!merged.length || s > merged[merged.length - 1][1]) merged.push([s, e])
+        else if (e > merged[merged.length - 1][1]) merged[merged.length - 1][1] = e
+      }
+      const bf = core.core.bitfield
+      let cursor = 0
+      for (const [s, e] of merged) {
+        if (s > cursor && bf.firstSet(cursor) >= 0 && bf.firstSet(cursor) < Math.min(s, core.length)) {
+          await core.clear(cursor, Math.min(s, core.length))
+          clearedAny = true
+        }
+        cursor = Math.max(cursor, e)
+      }
+      if (cursor < core.length && bf.firstSet(cursor) >= 0) {
+        await core.clear(cursor, core.length)
+        clearedAny = true
+      }
+      if (clearedAny) {
+        core._ptBlocks = core.length > 0 ? bf.countSet(0, core.length) : 0
+        core._ptSeq = (core._ptSeq || 0) + 1
+        core._ptSlices?.clear()
+      }
+    }
+    if (clearedAny) await node.gcStorage?.({ full: false }).catch(() => {})
+    return clearedAny
+  }
+
+  // Double-buffered 64 MiB linear windows keep Unraid's spinning platters stroking forward sequentially instead of thrashing random 64 KiB seeks.
+  async function downloadReplicaSlice (core, slice, minFreeBytes, stallMs, onProgress = null) {
+    const endBlock = slice.blockOffset + slice.blockLength
+    const countHave = () => core.length > slice.blockOffset
+      ? core.core.bitfield.countSet(slice.blockOffset, Math.min(slice.blockLength, core.length - slice.blockOffset))
+      : 0
+    let lastHave = countHave()
+    if (lastHave >= slice.blockLength) return { ok: true, bytes: slice.size }
+    const avgBlock = slice.blockLength > 0 ? Math.max(4096, slice.size / slice.blockLength) : 65536
+    const winBlocks = Math.max(64, Math.min(1024, Math.ceil((64 * 1024 * 1024) / avgBlock)))
+    let cursor = slice.blockOffset
+    if (core.length > cursor) {
+      const unset = core.core.bitfield.firstUnset(cursor)
+      if (unset >= cursor && unset < endBlock) cursor = unset
+    }
+    const openWin = start => {
+      if (start >= endBlock) return null
+      const end = Math.min(endBlock, start + winBlocks)
+      const handle = { start, end, range: core.download({ start, end, linear: true }), done: false, err: null }
+      activeReplicaRanges.add(handle.range)
+      handle.range.done().then(() => { handle.done = true }, err => { handle.err = err; handle.done = true })
+      return handle
+    }
+    const closeWin = h => {
+      if (!h) return
+      activeReplicaRanges.delete(h.range)
+      h.range.destroy()
+    }
+    let cur = openWin(cursor)
+    let next = cur && cur.end < endBlock ? openWin(cur.end) : null
+    let lastProgressAt = Date.now()
+    try {
+      while (cur && !closed) {
+        while (!cur.done && !closed) {
+          await new Promise(resolve => setTimeout(resolve, 250))
+          const nowHave = countHave()
+          if (nowHave > lastHave) {
+            lastHave = nowHave
+            lastProgressAt = Date.now()
+            onProgress?.(nowHave)
+            if (freeDiskBytes() < Math.max(minFreeBytes * 0.5, 4 * 1024 * 1024 * 1024)) {
+              return { ok: false, reason: 'disk_full' }
+            }
+          } else if (Date.now() - lastProgressAt >= stallMs) {
+            return { ok: false, reason: 'stalled' }
+          }
+        }
+        if (cur.err || closed) return { ok: false, reason: closed ? 'closed' : 'error' }
+        const nowHave = countHave()
+        if (nowHave > lastHave) {
+          lastHave = nowHave
+          lastProgressAt = Date.now()
+          onProgress?.(nowHave)
+        }
+        closeWin(cur)
+        cur = next
+        next = cur && cur.end < endBlock ? openWin(cur.end) : null
+      }
+      return { ok: countHave() >= slice.blockLength, bytes: slice.size }
+    } finally {
+      closeWin(cur)
+      closeWin(next)
+    }
+  }
+
+  async function runReplicatePass (payload = {}) {
+    const minFreeBytes = payload?.minFreeBytes != null ? Number(payload.minFreeBytes) : replicateMinFreeBytes
+    const stallMs = payload?.stallMs != null ? Number(payload.stallMs) : replicateStallMs
+    const filterSet = Array.isArray(payload?.sources) && payload.sources.length
+      ? new Set(payload.sources.map(k => String(k).trim().toLowerCase()))
+      : allowReplicateKeys
+    const baseItems = await node.search()
+    const channelSources = node.listSources?.().filter(s => s.kind === 'channel' && !s.writable) || []
+    const channelItems = (await Promise.all(channelSources.map(s => node.search(null, { source: s.key }).catch(() => [])))).flat()
+    const allItems = [...baseItems, ...channelItems]
+    const sliceMap = new Map()
+    for (const item of allItems) {
+      if (item.local || !item.magnetUrl) continue
+      let parsed
+      try { parsed = parseUri(item.magnetUrl) } catch { continue }
+      const entry = parsed?.entry
+      const b = entry?.blob
+      if (!entry?.blobs || !b || !(b.blockLength > 0)) continue
+      const tag = `${entry.blobs}:${b.blockOffset}:${b.blockLength}`
+      let rec = sliceMap.get(tag)
+      if (!rec) {
+        rec = {
+          tag,
+          id: item.id,
+          title: item.title || item.id,
+          size: item.size || b.byteLength || 0,
+          blobs: entry.blobs,
+          blockOffset: b.blockOffset,
+          blockLength: b.blockLength,
+          inChannel: false,
+          owners: new Set([entry.blobs])
+        }
+        sliceMap.set(tag, rec)
+      }
+      if (item.source) rec.owners.add(String(item.source).toLowerCase())
+      if (item.sourceKind === 'channel') rec.inChannel = true
+      if (typeof item.key === 'string' && !item.key.startsWith('channel:') && !item.key.startsWith('watch/')) {
+        const rawKey = item.key.replace(/^tracker:[0-9a-f]{64}\//i, '')
+        const writer = rawKey.split('/')[1]
+        if (writer) rec.owners.add(writer.toLowerCase())
+      }
+    }
+    const slices = [...sliceMap.values()].filter(s => !filterSet || [...s.owners].some(o => filterSet.has(o)))
+    const uniqueBlobs = [...new Set(slices.map(s => s.blobs))]
+    const cores = new Map()
+    await Promise.all(uniqueBlobs.map(async hex => {
+      const c = await node.blobCore(hex).catch(() => null)
+      if (c) cores.set(hex, c)
+    }))
+    slices.sort((a, b) => {
+      if (a.inChannel !== b.inChannel) return a.inChannel ? -1 : 1
+      const ca = cores.get(a.blobs), cb = cores.get(b.blobs)
+      const pa = Boolean(ca && (ca.length >= a.blockOffset + a.blockLength || ca.peers?.some(p => (p.remoteLength || 0) > a.blockOffset)))
+      const pb = Boolean(cb && (cb.length >= b.blockOffset + b.blockLength || cb.peers?.some(p => (p.remoteLength || 0) > b.blockOffset)))
+      if (pa !== pb) return pa ? -1 : 1
+      return a.blobs.localeCompare(b.blobs) || (a.blockOffset - b.blockOffset)
+    })
+
+    repState.totalEntries = slices.length
+    repState.targetBytes = slices.reduce((sum, s) => sum + s.size, 0)
+    let doneEntries = 0
+    let doneBytes = 0
+    let skippedFull = 0
+    let skippedDead = 0
+    let prunedOnce = false
+    let inflightMissingBytes = 0
+    const pending = []
+    for (const s of slices) {
+      const core = cores.get(s.blobs)
+      if (!core) { skippedDead++; continue }
+      const have = core.length > s.blockOffset
+        ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
+        : 0
+      if (have >= s.blockLength) {
+        doneEntries++
+        doneBytes += s.size
+      } else {
+        if (have > 0) doneBytes += Math.min(s.size, Math.round((have / s.blockLength) * s.size))
+        pending.push(s)
+      }
+    }
+    repState.replicatedEntries = doneEntries
+    repState.replicatedBytes = doneBytes
+    repState.skippedDiskFull = 0
+    repState.skippedUnavailable = skippedDead
+
+    let idx = 0
+    const activeTitles = new Set()
+    const workerCount = Math.max(1, Math.min(replicateConcurrency, pending.length))
+    async function worker () {
+      while (!closed) {
+        const s = pending[idx++]
+        if (!s) break
+        const core = cores.get(s.blobs)
+        if (!core) continue
+        const now = Date.now()
+        if ((deadReplicaCores.get(s.blobs) || 0) > now) {
+          skippedDead++
+          repState.skippedUnavailable = skippedDead
+          continue
+        }
+        const have = core.length > s.blockOffset
+          ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
+          : 0
+        if (have >= s.blockLength) {
+          doneEntries++
+          repState.replicatedEntries = doneEntries
+          continue
+        }
+        const priorPartial = have > 0 ? Math.min(s.size, Math.round((have / s.blockLength) * s.size)) : 0
+        const missingBytes = Math.max(0, s.size - priorPartial)
+        if (freeDiskBytes() - inflightMissingBytes - missingBytes < minFreeBytes) {
+          if (!prunedOnce) {
+            prunedOnce = true
+            await pruneUnreferencedReplicaBlocks(allItems)
+          }
+          if (freeDiskBytes() - inflightMissingBytes - missingBytes < minFreeBytes) {
+            skippedFull++
+            repState.skippedDiskFull = skippedFull
+            continue
+          }
+        }
+        inflightMissingBytes += missingBytes
+        const label = `${s.id} · ${s.title}`
+        activeTitles.add(label)
+        repState.activeSlices = activeTitles.size
+        repState.activeTitles = [...activeTitles]
+        let reportedDelta = 0
+        try {
+          const res = await downloadReplicaSlice(core, s, minFreeBytes, stallMs, nowHave => {
+            const curBytes = nowHave >= s.blockLength
+              ? s.size
+              : Math.min(s.size, Math.round((nowHave / s.blockLength) * s.size))
+            const nextDelta = Math.max(0, curBytes - priorPartial)
+            if (nextDelta > reportedDelta) {
+              doneBytes += nextDelta - reportedDelta
+              reportedDelta = nextDelta
+              repState.replicatedBytes = doneBytes
+            }
+          })
+          const afterHave = core.length > s.blockOffset
+            ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
+            : 0
+          const afterBytes = afterHave >= s.blockLength
+            ? s.size
+            : (afterHave > 0 ? Math.min(s.size, Math.round((afterHave / s.blockLength) * s.size)) : 0)
+          const finalDelta = Math.max(0, afterBytes - priorPartial)
+          if (finalDelta > reportedDelta) {
+            doneBytes += finalDelta - reportedDelta
+            repState.replicatedBytes = doneBytes
+          }
+          if (res.ok) {
+            doneEntries++
+            repState.replicatedEntries = doneEntries
+            deadReplicaCores.delete(s.blobs)
+            onchange?.()
+          } else if (res.reason === 'stalled') {
+            const st = node.status()
+            const hasAnyPeers = (st.peers + st.lanPeers) > 0
+            deadReplicaCores.set(s.blobs, Date.now() + (hasAnyPeers ? 5 * 60_000 : 15_000))
+            skippedDead++
+            repState.skippedUnavailable = skippedDead
+          } else if (res.reason === 'disk_full') {
+            skippedFull++
+            repState.skippedDiskFull = skippedFull
+          }
+        } finally {
+          inflightMissingBytes = Math.max(0, inflightMissingBytes - missingBytes)
+          activeTitles.delete(label)
+          repState.activeSlices = activeTitles.size
+          repState.activeTitles = [...activeTitles]
+        }
+      }
+    }
+    if (pending.length > 0) {
+      await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    }
+    return {
+      totalEntries: slices.length,
+      replicatedEntries: doneEntries,
+      replicatedBytes: doneBytes,
+      targetBytes: repState.targetBytes,
+      freeDiskBytes: freeDiskBytes(),
+      skippedDiskFull: skippedFull,
+      skippedUnavailable: skippedDead
+    }
+  }
+
+  register({
+    name: 'p2p-replicate',
+    description: 'Replicates remote Hyperblobs slices across P2P/LAN up to a free-disk reserve with zero duplicate catalog entries',
+    async run (payload) {
+      if (replicating) {
+        replicateRerun = true
+        return { running: true, ...this.info() }
+      }
+      replicating = true
+      try {
+        let result
+        do {
+          replicateRerun = false
+          result = await runReplicatePass(payload)
+        } while (replicateRerun && !closed && !payload?.once)
+        return result
+      } finally {
+        replicating = false
+      }
+    },
+    async poll () {
+      if (!replicateEnabled || replicating) return null
+      return this.run({})
+    },
+    async stop () {
+      for (const r of activeReplicaRanges) r.destroy()
+      activeReplicaRanges.clear()
+    },
+    info: () => ({
+      enabled: replicateEnabled,
+      replicating,
+      minFreeBytes: replicateMinFreeBytes,
+      freeDiskBytes: freeDiskBytes(),
+      ...repState
+    })
+  })
+
   // Load any external user plugins placed in `/data/plugins/*.mjs` or `*.js`.
   if (pluginsDir && existsSync(pluginsDir)) {
     for (const file of readdirSync(pluginsDir).sort()) {
@@ -312,12 +713,18 @@ export async function createMirrorHost ({
   if (mirrorChannel) {
     await run('channel-backfill').catch(() => {})
   }
+  if (rechunk) {
+    run('blob-rechunk').catch(() => {})
+  }
   if (watchDir) {
     mkdirSync(watchDir, { recursive: true })
     await run('watch-dir').catch(() => {})
   }
   if (configuredFeeds.length) {
     run('feed-mirror').catch(() => {})
+  }
+  if (replicateEnabled) {
+    run('p2p-replicate').catch(() => {})
   }
 
   const timer = pollIntervalMs > 0
