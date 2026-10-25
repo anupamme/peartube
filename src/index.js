@@ -159,7 +159,7 @@ export async function createNode ({
   } catch (err) {
     if (!/Invalid device file/i.test(err?.message || '')) throw err
     await store.close().catch(() => {})
-    try { unlinkSync(join(csDir, 'STORAGE')) } catch {}
+    try { unlinkSync(join(csDir, 'CORESTORE')) } catch {}
     store = new Corestore(csDir)
     await store.ready()
   }
