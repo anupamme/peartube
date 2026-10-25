@@ -1,19 +1,21 @@
 # PearTube
 
-PearTube lets you host videos on your own server or NAS and stream them between peers, built with [Holepunch](https://holepunch.to).
+PearTube lets you host videos on your own server or NAS and stream them between peers. Built with [Holepunch](https://holepunch.to).
 
-Videos are split into small pieces (up to about half a megabyte each) so you can start watching or seek ahead without downloading the whole file first. Relays, phones, desktops, and TVs fetch the pieces they need from whichever peers hold them, cache watched pieces locally, and share them with other viewers while online.
+Videos are split into small pieces so you can start watching or seek ahead before the whole file downloads. Relays, phones, desktops, and TVs fetch the pieces they need from whichever peers hold them, cache watched pieces locally, and share them with other viewers while online.
 
-Catalogs come in two forms: **shared Trackers**, where anyone with the tracker key can add listings under their own writer key, and **personal Channels**, where only the channel owner can publish listings while subscribers still help distribute the catalog and video pieces.
+Catalogs come in two forms: **shared Trackers**, where anyone with the tracker key can add their own listings, and **personal Channels**, where only the channel owner can publish listings while subscribers still help distribute the catalog and video pieces.
 
 ## Run a relay
+
+A relay is the PearTube service you run on a server or NAS to import and share videos.
 
 ```sh
 npm install
 PEARTUBE_TRACKER=<tracker key> npm start
 ```
 
-Leave `PEARTUBE_TRACKER` unset to found a new tracker; the relay prints its `tracker` and `channel` keys on startup (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` for the web UI, `http://<relay>:8174/manifest.json` in Stremio, `http://<relay>:8174/v1/playlist.m3u` in VLC/MPV/IINA/Kodi, or `http://<relay>:8174/tv` on a Smart TV browser. Run an unauthenticated relay only on a trusted network (anyone who can reach it can queue downloads unless `PEARTUBE_API_TOKEN` is set).
+Leave `PEARTUBE_TRACKER` unset to found a new tracker; the relay prints its `tracker` and `channel` keys on startup (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` for the web UI (which plays MKV/AVI/MP4/TS streams directly in the browser via `peartube-media` compiled to WebAssembly, including DTS/AC-3/TrueHD surround audio and PGS/ASS/SRT subtitles), `http://<relay>:8174/manifest.json` in Stremio, `http://<relay>:8174/v1/playlist.m3u` in VLC/MPV/IINA/Kodi, or `http://<relay>:8174/tv` on a Smart TV browser. Run an unauthenticated relay only on a trusted network (anyone who can reach it can queue downloads unless `PEARTUBE_API_TOKEN` is set).
 
 Prebuilt multi-arch container (`linux/amd64` and `linux/arm64`, published from `main` by CI):
 
@@ -26,11 +28,11 @@ docker run -d --name peartube-relay \
   ghcr.io/ayooooo123/peartube-relay:latest
 ```
 
-No static UDP or P2P port mapping is needed: HyperDHT binds ephemeral UDP ports and punches through NATs over UDX automatically (`PEARTUBE_DHT_PORT` is only for double-randomized NATs that abort holepunching).
+Peers try to connect automatically, and relays on the same local network can discover each other (`PEARTUBE_LAN_HOST`). Some restrictive router setups still need a forwarded UDP port (`PEARTUBE_DHT_PORT`) or a relay; see [Reachability](#reachability).
 
 Or build locally with `docker build -t peartube-relay .` and mount `/data`.
 
-There is no browser file-upload UI yet. Media gets onto a relay either by posting a direct HTTP/debrid URL to `POST /v1/acquire` (from `curl` or an external client) or by pointing `PEARTUBE_WATCH_DIR` at a local folder of media files:
+There is no browser file-upload UI yet. Media gets onto a relay either by posting a direct download URL to `POST /v1/acquire` (from `curl` or an external client) or by pointing `PEARTUBE_WATCH_DIR` at a local folder of media files:
 
 ```sh
 curl -X POST http://127.0.0.1:8174/v1/acquire \
@@ -45,16 +47,16 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 | `PEARTUBE_API_HOST` | `0.0.0.0` | Interface bound by the UI and `/v1` API server |
 | `PEARTUBE_API_PORT` | `8174` | UI, `/v1` API, Stremio addon, M3U, and `/tv` port |
 | `PEARTUBE_STREAM_HOST` | `127.0.0.1` | Host put in stream URLs; set to a LAN or reachable host address to serve other machines |
-| `PEARTUBE_STREAM_PORT` | `8175` | HTTP Range blob stream port |
+| `PEARTUBE_STREAM_PORT` | `8175` | Port used by players to stream video |
 | `PEARTUBE_DHT_PORT` | random | Fixed UDP port, only needed when manually port-forwarding behind a double-randomized NAT |
-| `PEARTUBE_BOOTSTRAP` | mainnet | Comma-separated DHT bootstrap `host:port` list |
+| `PEARTUBE_BOOTSTRAP` | mainnet | Default public peer-discovery network; override with comma-separated `host:port` servers |
 | `PEARTUBE_PRIVATE_ROUTING` | off | **Early alpha (needs testing):** `1` routes swarm connections over four-hop private circuits; endpoint peer addresses are not announced to the tracker DHT topic |
 | `PEARTUBE_PRIVATE_RELAY` | off | `1`: run an embedded private-route hop; with private routing also enabled, publicly announce this relay as a discovery anchor (its egress IP is visible to the DHT) |
 | `PEARTUBE_PRIVATE_RELAY_PORT` | `PEARTUBE_DHT_PORT` | Dedicated UDP port for the embedded private-route relay |
 | `PEARTUBE_RELAY_THROUGH` | none | Comma-separated blind relay keys |
 | `PEARTUBE_LAN_HOST` | off | This machine's LAN IPv4; turns on mDNS discovery of relays on the local network |
 | `PEARTUBE_SOURCES` | none | Comma-separated extra channel/tracker keys or `peartube://` URIs to subscribe to |
-| `PEARTUBE_PUBLISH_CHANNEL` | `1` on relays | Mirror existing saved tracker blobs and future acquisitions into this relay's single-writer `Hyperbee` channel (`0` disables) |
+| `PEARTUBE_PUBLISH_CHANNEL` | `1` on relays | List this relay's saved videos and future imports in its own channel without duplicating the media (`0` disables) |
 | `PEARTUBE_DIRECTORY` | off | `1`: publish a list of subscribed channels and trackers so other peers can discover them |
 | `PEARTUBE_WATCH_DIR` | none | Optional local folder (e.g. `/data/import`) automatically imported once per file |
 | `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON feed or peer `/v1/entries` URLs to import automatically |
@@ -100,7 +102,7 @@ Both are public catalogs of videos; the difference is who can add listings:
 
 | | Shared Tracker (`peartube://tracker/<key>`) | Personal Channel (`peartube://channel/<key>`) |
 |---|---|---|
-| **Who can publish** | Anyone with the tracker key | Only the node holding that channel's local publishing secret (share `status.channel` with subscribers) |
+| **Who can publish** | Anyone with the tracker key | Only the owner can publish; share the channel link (`status.channel`) with subscribers, not the local publishing secret |
 | **Unwanted listings** | Contributors can add their own listings, not edit someone else's, and there is no moderation yet | Subscribers follow read-only and cannot add listings |
 | **When publisher is offline** | Other online peers continue serving the catalog and any video pieces they hold | Other online subscribers continue serving the catalog and any video pieces they hold |
 | **Typical use** | A shared catalog across several trusted relays | Your own published video library or a directory linking to other catalogs (`PEARTUBE_DIRECTORY=1`) |

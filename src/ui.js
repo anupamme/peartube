@@ -439,7 +439,7 @@ function openPlayer (entry) {
         sb.mode = 'segments'
         p.sb = sb
         sb.addEventListener('updateend', () => {
-          if (player !== p || p.sb !== sb) return
+          if (player !== p || p.sb !== sb || p.ms?.readyState !== 'open') return
           if (!p.mseReady && sb.buffered.length > 0) {
             p.mseReady = true
             const bStart = sb.buffered.start(0)
@@ -455,9 +455,10 @@ function openPlayer (entry) {
       }
     }, { once: true })
   }
+  p.resetMediaOutputs = resetMediaOutputs
 
   function drainMseQueue () {
-    if (!p.sb || p.sb.updating) return
+    if (!p.sb || p.ms?.readyState !== 'open' || p.sb.updating) return
     if (p.mseQueue.length > 0) {
       const buf = p.mseQueue.shift()
       try { p.sb.appendBuffer(buf) } catch { fallbackSw(currentMediaTime()) }
@@ -711,53 +712,8 @@ function seekTo (targetSecs) {
   player.eof = false
   $('pStatus').style.display = ''
   $('pStatus').textContent = 'Seeking…'
-  for (const s of player.audioNodes) { try { s.node.stop(); s.node.disconnect() } catch {} }
-  player.audioNodes.length = 0
-  player.nextAudioCtxTime = 0
-  player.audioStarted = false
-  player.audioBaseMedia = clamped
-  player.freeBaseMedia = clamped
-  player.freeBasePerf = performance.now()
-  player.swFrames.length = 0
   player.drawnFrames = 0
-  player.subCues.length = 0
-  $('pSubText').textContent = ''
-  $('pSubCanvas').getContext('2d').clearRect(0, 0, $('pSubCanvas').width, $('pSubCanvas').height)
-  if (player.useMse) {
-    const v = $('pVideo')
-    v.pause()
-    if (player.msUrl) { try { URL.revokeObjectURL(player.msUrl) } catch {} player.msUrl = '' }
-    player.mseQueue.length = 0
-    player.sb = null
-    player.mseReady = false
-    const MS = window.MediaSource || window.ManagedMediaSource
-    const mime = 'video/mp4; codecs="' + player.manifest.mseCodec + '"'
-    const ms = new MS()
-    player.ms = ms
-    player.msUrl = URL.createObjectURL(ms)
-    v.src = player.msUrl
-    ms.addEventListener('sourceopen', () => {
-      if (!player || player.ms !== ms) return
-      const sb = ms.addSourceBuffer(mime)
-      sb.mode = 'segments'
-      player.sb = sb
-      sb.addEventListener('updateend', () => {
-        if (!player || player.sb !== sb) return
-        if (!player.mseReady && sb.buffered.length > 0) {
-          player.mseReady = true
-          v.currentTime = Math.max(sb.buffered.start(0), clamped)
-          $('pStatus').style.display = 'none'
-          if (!player.paused) v.play().catch(() => {})
-        }
-        if (!sb.updating && player.mseQueue.length > 0) {
-          try { sb.appendBuffer(player.mseQueue.shift()) } catch {}
-        }
-      })
-      if (player.mseQueue.length > 0) {
-        try { sb.appendBuffer(player.mseQueue.shift()) } catch {}
-      }
-    }, { once: true })
-  }
+  player.resetMediaOutputs(clamped)
   player.worker.postMessage({
     cmd: 'seek',
     seq: player.seq,

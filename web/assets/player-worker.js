@@ -120,7 +120,7 @@ function pump () {
   if (bufferedAhead()) return
 
   const seq = activeSeq
-  const budget = useMse ? 12 : 4
+  const budget = useMse ? 24 : 8
   for (let i = 0; i < budget; i++) {
     if (closed || seq !== activeSeq) return
     const code = wasm.pt_step()

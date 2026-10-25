@@ -12,8 +12,9 @@ Builds, installs, and deploy commands may be run when explicitly requested.
 |---|---|
 |`src/index.js`|`createNode`: Corestore, Autobee tracker + `apply`, Hyperblobs, blob server, Hyperswarm, `search` / `put` / `append` / `publish` / `remove`, and `setLan` to swap LAN discovery without restarting the node|
 |`src/acquire.js`|Private job queue: fetch a source, `put` it, save the announce, `append` it durably. Stored in `jobs.json`, never in the Corestore|
-|`src/http.js`|One port: the UI at `/` and the `/v1` API (no auth for now)|
-|`src/ui.js`|The acquisitions page, one HTML string|
+|`src/http.js`|One port: the UI at `/`, `/v1` API, `/v1/blob` same-origin HTTP Range blob streaming, and `/web/*` WASM player assets|
+|`src/ui.js`|The acquisitions & catalog page (one HTML string), with in-browser `peartube-media` WebAssembly playback|
+|`web/`|Browser WebAssembly player (`peartube_web.wasm`, `sh web/build.sh` -> `web/assets/`, not part of the core line budget): compiles `peartube-media`'s containers, software decoders, surround downmixer, subtitle decoders, and low-latency CMAF fMP4 muxer to `wasm32-unknown-unknown` (`+simd128`) inside a Dedicated Web Worker|
 |`src/lan.js`|Optional zero-wrapper LAN discovery directly over an isolated ephemeral `HyperDHT` (`port: 0`) + mDNS (`bonjour-service`), stamping each peer's advertised address (`h`) so peers dial directly rather than an mDNS reflector, rebrowsing every 10 s for missed Wi-Fi multicast answers, and falling back to dialing from the larger-key side after 3 s when a host firewall blocks incoming UDP. `bin/relay.js` passes it to `createNode` as a factory; `lanAddress` picks Wi-Fi/Ethernet IPv4 and `interfaceAdapter` pins multicast to that interface|
 |`bin/relay.js`|Relay process, configured by env|
 |`src/cast.js`|`peartube-cast/v1` Cast & TV Receiver stack: `_peartube-cast._tcp` mDNS discovery, 6-char TV code + `peartube://receiver/<pubkey>?token=…` Noise P2P keypair pairing over HyperDHT, byte-exact mid-stream `HTTP -> P2P` splice proxy, and autonomous P2P receiver peer adoption (public P2P or 4-hop `privateRouting` matching the cast initiator) so once a cast starts, the receiver keeps playing and seeds the video as a normal peer even when the initiator goes offline. Pairing tokens and receiver seeds stay in private files (`receiver.json`, `cast-receivers.json`), never in Corestore|
@@ -94,6 +95,7 @@ cd android && ./gradlew -Ppeartube.dev :app:assembleRelease    # phone release b
 sh android/release.sh       # signed arm64 phone release APK in android/build/release-apk
 sh android/release-tv.sh    # signed arm64 Dumb TV Receiver APK (com.peartube.receiver) in android/build/release-apk
 node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path]   # E2E on a connected phone
+sh web/build.sh             # compiles peartube-media to wasm32-unknown-unknown (+simd128) into web/assets/peartube_web.wasm
 python3 sync-player.py      # after pushing peartube-media: pin both apps to its HEAD
 ```
 

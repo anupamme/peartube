@@ -108,3 +108,13 @@ android/.gradle/
 android/.kotlin/
 android/local.properties
 android/native/target/
+
+# iOS app: generated project specification, native products, and user state
+ios/build/
+ios/native/target/
+ios/project.generated.json
+ios/PearTube.xcodeproj/xcuserdata/
+ios/PearTube.xcodeproj/project.xcworkspace/xcuserdata/
+
+# WebAssembly player build artifacts (compiled assets live in web/assets/)
+web/target/

@@ -557,24 +557,30 @@ struct GopPacket {
 fn build_fmp4_segment(
     seq: u32,
     gop: &[GopPacket],
-    next_start_90k: Option<i64>,
+    lookahead: &[GopPacket],
     frame_90k: i64,
     min_dts_90k: &mut i64,
 ) -> Option<(Vec<u8>, f64, f64)> {
     if gop.is_empty() {
         return None;
     }
-    let mut sorted_pts: Vec<i64> = gop.iter().map(|p| p.pts_90k.max(0)).collect();
+    let mut sorted_pts: Vec<i64> = gop
+        .iter()
+        .chain(lookahead.iter())
+        .map(|p| p.pts_90k.max(0))
+        .collect();
     sorted_pts.sort_unstable();
     let mut dts = Vec::with_capacity(gop.len());
     let mut prev = *min_dts_90k - 1;
-    for &p in &sorted_pts {
+    for &p in &sorted_pts[..gop.len()] {
         let cur = p.max(prev + 1).max(0);
         dts.push(cur);
         prev = cur;
     }
     let last_dts = *dts.last().unwrap_or(&0);
-    let end_dts = next_start_90k
+    let end_dts = sorted_pts
+        .get(gop.len())
+        .copied()
         .filter(|&n| n > last_dts)
         .unwrap_or_else(|| last_dts + frame_90k.max(1));
     *min_dts_90k = end_dts;
@@ -582,7 +588,6 @@ fn build_fmp4_segment(
     let base_decode_time = dts[0] as u64;
     let start_secs = (sorted_pts[0] as f64) / (VIDEO_TIMESCALE as f64);
     let end_secs = (end_dts as f64) / (VIDEO_TIMESCALE as f64);
-
     let moof_body_size = 16 + 64 + gop.len() * 16;
     let moof_size = 8 + moof_body_size;
     let payload_bytes: usize = gop.iter().map(|p| p.data_4byte.len()).sum();
@@ -777,6 +782,10 @@ struct WebSession {
     sub_dec: Option<Box<dyn Decoder>>,
     audio_mix: Option<(ChannelLayout, StereoMix)>,
     audio_next_pts: Option<f64>,
+    audio_accum: Vec<u8>,
+    audio_accum_pts: Option<f64>,
+    audio_accum_rate: u32,
+    audio_accum_frames: u32,
     video_next_pts: f64,
     sw_reorder: Vec<PendingVideoFrame>,
     mse_gop: Vec<GopPacket>,
@@ -867,11 +876,14 @@ impl WebSession {
         self.sub_dec = None;
         self.audio_mix = None;
         self.audio_next_pts = None;
+        self.audio_accum.clear();
+        self.audio_accum_pts = None;
+        self.audio_accum_rate = 0;
+        self.audio_accum_frames = 0;
         self.video_next_pts = 0.0;
         self.sw_reorder.clear();
         self.mse_gop.clear();
         self.mse_started = false;
-
         if !self.use_mse
             && let Some(vi) = self.video_idx
             && let Some(s) = self.stream_info(vi).cloned()
@@ -893,6 +905,23 @@ impl WebSession {
             self.sub_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
                 .ok()
                 .and_then(Result::ok);
+        }
+    }
+
+    fn flush_audio_accum(&mut self) {
+        if self.audio_accum_frames > 0
+            && let Some(pts) = self.audio_accum_pts.take()
+        {
+            let data = std::mem::take(&mut self.audio_accum);
+            let frames = self.audio_accum_frames;
+            let rate = self.audio_accum_rate;
+            self.audio_accum_frames = 0;
+            self.out_queue.push_back(OutItem::AudioF32 {
+                data,
+                pts,
+                rate,
+                frames,
+            });
         }
     }
 
@@ -976,23 +1005,6 @@ impl WebSession {
                 }
                 self.mse_started = true;
                 self.mse_min_dts = pts_90k;
-            } else if is_sync && !self.mse_gop.is_empty() {
-                let first_pts = self.mse_gop[0].pts_90k;
-                let span_secs = ((pts_90k - first_pts) as f64) / f64::from(VIDEO_TIMESCALE);
-                let target_span = if self.mse_seq == 0 { 0.4 } else { 1.5 };
-                if span_secs >= target_span {
-                    self.mse_seq = self.mse_seq.wrapping_add(1);
-                    let gop = std::mem::take(&mut self.mse_gop);
-                    if let Some((seg, start, end)) = build_fmp4_segment(
-                        self.mse_seq,
-                        &gop,
-                        Some(pts_90k),
-                        cfg.frame_ticks_90k,
-                        &mut self.mse_min_dts,
-                    ) {
-                        self.out_queue.push_back(OutItem::MseSegment { data: seg, start, end });
-                    }
-                }
             }
             let data_4byte = to_4byte_nals(&pkt.data, cfg.framing);
             if !data_4byte.is_empty() {
@@ -1001,6 +1013,20 @@ impl WebSession {
                     sync: is_sync,
                     data_4byte,
                 });
+            }
+            // Emit low-latency CMAF chunks every 16 frames while keeping an 8-packet lookahead for B-frame PTS sorting.
+            if self.mse_gop.len() >= 24 {
+                let chunk: Vec<GopPacket> = self.mse_gop.drain(..16).collect();
+                self.mse_seq = self.mse_seq.wrapping_add(1);
+                if let Some((seg, start, end)) = build_fmp4_segment(
+                    self.mse_seq,
+                    &chunk,
+                    &self.mse_gop,
+                    cfg.frame_ticks_90k,
+                    &mut self.mse_min_dts,
+                ) {
+                    self.out_queue.push_back(OutItem::MseSegment { data: seg, start, end });
+                }
             }
             return;
         }
@@ -1102,16 +1128,37 @@ impl WebSession {
             }
             let stereo = self.audio_mix.as_ref().unwrap().1.mix(&raw_pcm);
             let stereo_frames = (stereo.len() / 2) as u32;
-            let mut bytes = Vec::with_capacity(stereo.len() * 4);
-            for sample in stereo {
-                bytes.extend_from_slice(&sample.to_le_bytes());
+            if self.audio_accum_frames > 0 && self.audio_accum_rate != rate
+                && let Some(pts) = self.audio_accum_pts.take()
+            {
+                self.out_queue.push_back(OutItem::AudioF32 {
+                    data: std::mem::take(&mut self.audio_accum),
+                    pts,
+                    rate: self.audio_accum_rate,
+                    frames: self.audio_accum_frames,
+                });
+                self.audio_accum_frames = 0;
             }
-            self.out_queue.push_back(OutItem::AudioF32 {
-                data: bytes,
-                pts: pts_secs,
-                rate,
-                frames: stereo_frames,
-            });
+            if self.audio_accum_pts.is_none() {
+                self.audio_accum_pts = Some(pts_secs);
+                self.audio_accum_rate = rate;
+            }
+            self.audio_accum.reserve(stereo.len() * 4);
+            for sample in stereo {
+                self.audio_accum.extend_from_slice(&sample.to_le_bytes());
+            }
+            self.audio_accum_frames += stereo_frames;
+            if self.audio_accum_frames >= 4096
+                && let Some(pts) = self.audio_accum_pts.take()
+            {
+                self.out_queue.push_back(OutItem::AudioF32 {
+                    data: std::mem::take(&mut self.audio_accum),
+                    pts,
+                    rate: self.audio_accum_rate,
+                    frames: self.audio_accum_frames,
+                });
+                self.audio_accum_frames = 0;
+            }
         }
     }
 
@@ -1196,12 +1243,13 @@ impl WebSession {
             return;
         }
         self.flushed_eof = true;
+        self.flush_audio_accum();
         if self.use_mse {
             if !self.mse_gop.is_empty() && let Some(cfg) = self.mse_cfg.clone() {
                 self.mse_seq = self.mse_seq.wrapping_add(1);
                 let gop = std::mem::take(&mut self.mse_gop);
                 if let Some((seg, start, end)) =
-                    build_fmp4_segment(self.mse_seq, &gop, None, cfg.frame_ticks_90k, &mut self.mse_min_dts)
+                    build_fmp4_segment(self.mse_seq, &gop, &[], cfg.frame_ticks_90k, &mut self.mse_min_dts)
                 {
                     self.out_queue.push_back(OutItem::MseSegment { data: seg, start, end });
                 }
@@ -1483,6 +1531,10 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             sub_dec: None,
             audio_mix: None,
             audio_next_pts: None,
+            audio_accum: Vec::with_capacity(4096 * 8),
+            audio_accum_pts: None,
+            audio_accum_rate: 0,
+            audio_accum_frames: 0,
             video_next_pts: 0.0,
             sw_reorder: Vec::new(),
             mse_gop: Vec::new(),
@@ -1560,6 +1612,11 @@ pub extern "C" fn pt_seek(target_secs: f64) -> i32 {
             let _ = catch_unwind(AssertUnwindSafe(|| sess.demuxer.seek_to(seek_stream, 0)));
         }
         sess.rebuild_decoders();
+        if sess.use_mse
+            && let Some(cfg) = sess.mse_cfg.as_ref()
+        {
+            sess.out_queue.push_back(OutItem::MseInit(build_fmp4_init(cfg)));
+        }
         0
     })
 }
