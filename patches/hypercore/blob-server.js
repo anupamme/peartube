@@ -322,6 +322,7 @@ module.exports = class HypercoreBlobServer {
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type')
     res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges')
+    res.setHeader('Cache-Control', 'no-store')
     if (req.method === 'OPTIONS') {
       res.statusCode = 204
       res.end()

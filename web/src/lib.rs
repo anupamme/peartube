@@ -6,7 +6,8 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use oxideav_core::{
     ChannelLayout, ChannelPosition, Decoder, Demuxer, Error as AvError, Frame,
@@ -22,54 +23,66 @@ unsafe extern "C" {
     fn host_read_at(offset: u64, dst: *mut u8, len: usize) -> isize;
 }
 
-const PAGE_SIZE: usize = 512 * 1024;
-const MAX_PAGES: usize = 32; // 16 MiB sliding LRU block cache aligned to 512 KiB Hyperblobs blocks
+const PROBE_PAGE_SIZE: usize = 128 * 1024;
+const STREAM_PAGE_SIZE: usize = 1024 * 1024;
+const MAX_PAGES: usize = 20;
 const VIDEO_TIMESCALE: u32 = 90_000;
 
 static REGISTRY: LazyLock<RuntimeContext> = LazyLock::new(codecs::context);
 
 struct CachePage {
-    index: u64,
+    start: u64,
     stamp: u64,
     data: Vec<u8>,
 }
 
-// Sucks 512 KiB HTTP Range blocks on demand into an LRU ring so 20+ GB Blu-ray MKVs seek in milliseconds.
+// Sucks 128 KiB probe slices on open and 1 MiB streaming blocks during playback so 20+ GB Blu-rays open & stream fast.
 struct HttpRangeSource {
     len: u64,
     pos: u64,
     clock: u64,
+    streaming: Arc<AtomicBool>,
     pages: Vec<CachePage>,
 }
 
 impl HttpRangeSource {
-    fn new() -> Self {
+    fn new(streaming: Arc<AtomicBool>) -> Self {
         let len = unsafe { host_stream_len() };
         Self {
             len,
             pos: 0,
             clock: 0,
+            streaming,
             pages: Vec::with_capacity(MAX_PAGES),
         }
     }
 
-    fn fetch_page(&mut self, page_index: u64) -> io::Result<usize> {
+    fn fetch_at(&mut self, pos: u64) -> io::Result<usize> {
         self.clock = self.clock.wrapping_add(1);
-        if let Some(idx) = self.pages.iter().position(|p| p.index == page_index) {
+        if let Some(idx) = self
+            .pages
+            .iter()
+            .position(|p| pos >= p.start && pos < p.start + p.data.len() as u64)
+        {
             self.pages[idx].stamp = self.clock;
             return Ok(idx);
         }
-        let start = page_index.saturating_mul(PAGE_SIZE as u64);
-        if start >= self.len {
+        let chunk_size = if self.streaming.load(Ordering::Relaxed) {
+            STREAM_PAGE_SIZE
+        } else {
+            PROBE_PAGE_SIZE
+        };
+        let aligned_start = (pos / chunk_size as u64) * chunk_size as u64;
+        if aligned_start >= self.len {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past stream end"));
         }
-        let want = (self.len - start).min(PAGE_SIZE as u64) as usize;
+        let want = (self.len - aligned_start).min(chunk_size as u64) as usize;
         let mut buf = vec![0u8; want];
         let mut filled = 0usize;
         while filled < want {
             let got = unsafe {
                 host_read_at(
-                    start + filled as u64,
+                    aligned_start + filled as u64,
                     buf[filled..].as_mut_ptr(),
                     want - filled,
                 )
@@ -95,7 +108,7 @@ impl HttpRangeSource {
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             self.pages[lru] = CachePage {
-                index: page_index,
+                start: aligned_start,
                 stamp: self.clock,
                 data: buf,
             };
@@ -103,7 +116,7 @@ impl HttpRangeSource {
         } else {
             let idx = self.pages.len();
             self.pages.push(CachePage {
-                index: page_index,
+                start: aligned_start,
                 stamp: self.clock,
                 data: buf,
             });
@@ -117,19 +130,18 @@ impl Read for HttpRangeSource {
         if out.is_empty() || self.pos >= self.len {
             return Ok(0);
         }
-        let page_index = self.pos / PAGE_SIZE as u64;
-        let page_off = (self.pos % PAGE_SIZE as u64) as usize;
-        let slot = match self.fetch_page(page_index) {
+        let slot = match self.fetch_at(self.pos) {
             Ok(s) => s,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(0),
             Err(e) => return Err(e),
         };
-        let page = &self.pages[slot].data;
-        if page_off >= page.len() {
+        let page = &self.pages[slot];
+        let page_off = (self.pos - page.start) as usize;
+        if page_off >= page.data.len() {
             return Ok(0);
         }
-        let n = out.len().min(page.len() - page_off);
-        out[..n].copy_from_slice(&page[page_off..page_off + n]);
+        let n = out.len().min(page.data.len() - page_off);
+        out[..n].copy_from_slice(&page.data[page_off..page_off + n]);
         self.pos += n as u64;
         Ok(n)
     }
@@ -293,9 +305,18 @@ fn split_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
     out
 }
 
-fn to_4byte_nals(data: &[u8], framing: NalFraming) -> Vec<u8> {
+fn keep_hevc_nal(nal: &[u8]) -> bool {
+    if nal.len() < 2 {
+        return false;
+    }
+    let nal_type = (nal[0] >> 1) & 0x3F;
+    let layer_id = ((nal[0] & 1) << 5) | (nal[1] >> 3);
+    layer_id == 0 && nal_type < 62
+}
+
+fn to_4byte_nals(data: &[u8], framing: NalFraming, kind: VideoCodecKind) -> Vec<u8> {
     match framing {
-        NalFraming::LengthPrefixed(4) => data.to_vec(),
+        NalFraming::LengthPrefixed(4) if kind == VideoCodecKind::H264 => data.to_vec(),
         NalFraming::LengthPrefixed(w) => {
             let width = w as usize;
             let mut out = Vec::with_capacity(data.len() + 16);
@@ -309,15 +330,22 @@ fn to_4byte_nals(data: &[u8], framing: NalFraming) -> Vec<u8> {
                 if len == 0 || pos + len > data.len() {
                     break;
                 }
-                out.extend_from_slice(&(len as u32).to_be_bytes());
-                out.extend_from_slice(&data[pos..pos + len]);
+                let nal = &data[pos..pos + len];
                 pos += len;
+                if kind == VideoCodecKind::Hevc && !keep_hevc_nal(nal) {
+                    continue;
+                }
+                out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+                out.extend_from_slice(nal);
             }
             out
         }
         NalFraming::AnnexB => {
             let mut out = Vec::with_capacity(data.len() + 16);
             for nal in split_annexb_nals(data) {
+                if kind == VideoCodecKind::Hevc && !keep_hevc_nal(nal) {
+                    continue;
+                }
                 out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
                 out.extend_from_slice(nal);
             }
@@ -392,8 +420,49 @@ fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option
         "h265" | "hevc" => {
             if extra.len() >= 23 && extra[0] == 1 {
                 let len_size = (extra[21] & 3) + 1;
-                let mut rec = extra.clone();
-                rec[21] |= 0x03; // declare 4-byte NAL lengths in hvcC
+                let mut header_22 = extra[0..22].to_vec();
+                header_22[21] |= 0x03; // declare 4-byte NAL lengths in hvcC
+                // Strip SEI (39/40) and Dolby Vision RPU/EL arrays from hvcC so Apple VideoToolbox accepts 4K UHD remuxes.
+                let num_arrays = extra[22] as usize;
+                let mut pos = 23usize;
+                let mut kept_arrays: Vec<(u8, Vec<Vec<u8>>)> = Vec::new();
+                for _ in 0..num_arrays {
+                    if pos + 3 > extra.len() {
+                        break;
+                    }
+                    let nal_type = extra[pos] & 0x3F;
+                    let count = u16::from_be_bytes([extra[pos + 1], extra[pos + 2]]) as usize;
+                    pos += 3;
+                    let mut nals = Vec::new();
+                    for _ in 0..count {
+                        if pos + 2 > extra.len() {
+                            break;
+                        }
+                        let nlen = u16::from_be_bytes([extra[pos], extra[pos + 1]]) as usize;
+                        pos += 2;
+                        if pos + nlen > extra.len() {
+                            break;
+                        }
+                        if matches!(nal_type, 32..=34) {
+                            nals.push(extra[pos..pos + nlen].to_vec());
+                        }
+                        pos += nlen;
+                    }
+                    if !nals.is_empty() {
+                        kept_arrays.push((nal_type, nals));
+                    }
+                }
+                let mut rec = Vec::with_capacity(23 + 256);
+                rec.extend_from_slice(&header_22);
+                rec.push(kept_arrays.len() as u8);
+                for (nal_type, nals) in &kept_arrays {
+                    rec.push(0x80 | nal_type);
+                    rec.extend_from_slice(&(nals.len() as u16).to_be_bytes());
+                    for nal in nals {
+                        rec.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+                        rec.extend_from_slice(nal);
+                    }
+                }
                 let space = match (extra[1] >> 6) & 3 {
                     1 => "A",
                     2 => "B",
@@ -754,20 +823,15 @@ enum OutItem {
     MseInit(Vec<u8>),
     MseSegment { data: Vec<u8>, start: f64, end: f64 },
     VideoRgba { data: Vec<u8>, pts: f64, w: u32, h: u32 },
+    VideoYuv420 { data: Vec<u8>, pts: f64, w: u32, h: u32 },
     AudioF32 { data: Vec<u8>, pts: f64, rate: u32, frames: u32 },
     SubText { text: Vec<u8>, start: f64, end: f64 },
     SubBitmap { rgba: Vec<u8>, start: f64, end: f64, x: i32, y: i32, w: u32, h: u32, cw: u32, ch: u32 },
 }
 
-struct PendingVideoFrame {
-    pts: f64,
-    w: u32,
-    h: u32,
-    fmt: PixelFormat,
-    frame: VideoFrame,
-}
-
 struct WebSession {
+    container: String,
+    streaming_io: Arc<AtomicBool>,
     demuxer: Box<dyn Demuxer>,
     streams: Vec<StreamInfo>,
     mse_cfg: Option<MseVideoConfig>,
@@ -786,8 +850,10 @@ struct WebSession {
     audio_accum_pts: Option<f64>,
     audio_accum_rate: u32,
     audio_accum_frames: u32,
+    audio_first_flushed: bool,
     video_next_pts: f64,
-    sw_reorder: Vec<PendingVideoFrame>,
+    video_seeded: bool,
+    client_clock: f64,
     mse_gop: Vec<GopPacket>,
     mse_seq: u32,
     mse_min_dts: i64,
@@ -880,8 +946,10 @@ impl WebSession {
         self.audio_accum_pts = None;
         self.audio_accum_rate = 0;
         self.audio_accum_frames = 0;
-        self.video_next_pts = 0.0;
-        self.sw_reorder.clear();
+        self.audio_first_flushed = false;
+        self.video_next_pts = self.seek_target.unwrap_or(0.0);
+        self.video_seeded = false;
+        self.client_clock = self.seek_target.unwrap_or(0.0);
         self.mse_gop.clear();
         self.mse_started = false;
         if !self.use_mse
@@ -925,53 +993,102 @@ impl WebSession {
         }
     }
 
-    fn flush_one_sw_frame(&mut self) -> bool {
-        if self.sw_reorder.is_empty() {
-            return false;
+    fn convert_and_push_video(&mut self, vf: &VideoFrame, pts: f64, w: u32, h: u32, fmt: PixelFormat) {
+        if let Some(target) = self.seek_target {
+            if pts + 0.025 < target {
+                return;
+            }
+            self.seek_target = None;
         }
-        let min_idx = self
-            .sw_reorder
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| a.pts.total_cmp(&b.pts))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let item = self.sw_reorder.swap_remove(min_idx);
-        if let Some(target) = self.seek_target
-            && item.pts + 0.025 < target
-        {
-            return true;
+        // Drop display conversion for frames already >85ms behind speaker playback so heavy 1080p software codecs stay locked to real-time.
+        if self.client_clock > 0.25 && pts + 0.085 < self.client_clock {
+            return;
         }
-        let info = FrameInfo::new(item.fmt, item.w, item.h);
+        let wu = w as usize;
+        let hu = h as usize;
+        let cwu = (wu + 1) / 2;
+        let chu = (hu + 1) / 2;
+
+        // Zero-conversion GPU planar YUV420P fast path (3.1 MB at 1080p vs 8.3 MB RGBA, zero CPU color matrix math!).
+        if fmt == PixelFormat::Yuv420P && vf.planes.len() >= 3 {
+            let y_len = wu * hu;
+            let c_len = cwu * chu;
+            let mut packed = Vec::with_capacity(y_len + c_len * 2);
+            let p0 = &vf.planes[0];
+            if p0.stride == wu && p0.data.len() >= y_len {
+                packed.extend_from_slice(&p0.data[..y_len]);
+            } else {
+                for r in 0..hu {
+                    let s = r * p0.stride;
+                    if s + wu <= p0.data.len() {
+                        packed.extend_from_slice(&p0.data[s..s + wu]);
+                    }
+                }
+            }
+            for plane in [&vf.planes[1], &vf.planes[2]] {
+                if plane.stride == cwu && plane.data.len() >= c_len {
+                    packed.extend_from_slice(&plane.data[..c_len]);
+                } else {
+                    for r in 0..chu {
+                        let s = r * plane.stride;
+                        if s + cwu <= plane.data.len() {
+                            packed.extend_from_slice(&plane.data[s..s + cwu]);
+                        }
+                    }
+                }
+            }
+            if packed.len() == y_len + c_len * 2 {
+                self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
+                return;
+            }
+        } else if fmt == PixelFormat::Yuv420P10Le && vf.planes.len() >= 3 {
+            let y_len = wu * hu;
+            let c_len = cwu * chu;
+            let mut packed = Vec::with_capacity(y_len + c_len * 2);
+            let pack_10 = |plane: &oxideav_core::VideoPlane, cols: usize, rows: usize, dst: &mut Vec<u8>| {
+                let row_bytes = cols * 2;
+                for r in 0..rows {
+                    let s = r * plane.stride;
+                    if s + row_bytes <= plane.data.len() {
+                        for px in plane.data[s..s + row_bytes].chunks_exact(2) {
+                            dst.push((u16::from_le_bytes([px[0], px[1]]) >> 2).min(255) as u8);
+                        }
+                    }
+                }
+            };
+            pack_10(&vf.planes[0], wu, hu, &mut packed);
+            pack_10(&vf.planes[1], cwu, chu, &mut packed);
+            pack_10(&vf.planes[2], cwu, chu, &mut packed);
+            if packed.len() == y_len + c_len * 2 {
+                self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
+                return;
+            }
+        }
+
+        let info = FrameInfo::new(fmt, w, h);
         let converted = catch_unwind(AssertUnwindSafe(|| {
-            oxideav_pixfmt::convert(&item.frame, info, PixelFormat::Rgba, &ConvertOptions::default())
+            oxideav_pixfmt::convert(vf, info, PixelFormat::Rgba, &ConvertOptions::default())
         }));
         if let Ok(Ok(rgba_frame)) = converted
             && let Some(plane) = rgba_frame.planes.first()
         {
-            let row_bytes = (item.w as usize) * 4;
+            let row_bytes = wu * 4;
             let stride = plane.stride;
-            let mut tight = Vec::with_capacity(row_bytes * item.h as usize);
-            if stride == row_bytes && plane.data.len() >= row_bytes * item.h as usize {
-                tight.extend_from_slice(&plane.data[..row_bytes * item.h as usize]);
+            let mut tight = Vec::with_capacity(row_bytes * hu);
+            if stride == row_bytes && plane.data.len() >= row_bytes * hu {
+                tight.extend_from_slice(&plane.data[..row_bytes * hu]);
             } else {
-                for y in 0..item.h as usize {
+                for y in 0..hu {
                     let s = y * stride;
                     if s + row_bytes <= plane.data.len() {
                         tight.extend_from_slice(&plane.data[s..s + row_bytes]);
                     }
                 }
             }
-            if tight.len() == row_bytes * item.h as usize {
-                self.out_queue.push_back(OutItem::VideoRgba {
-                    data: tight,
-                    pts: item.pts,
-                    w: item.w,
-                    h: item.h,
-                });
+            if tight.len() == row_bytes * hu {
+                self.out_queue.push_back(OutItem::VideoRgba { data: tight, pts, w, h });
             }
         }
-        true
     }
 
     fn handle_video_packet(&mut self, pkt: Packet) {
@@ -985,12 +1102,14 @@ impl WebSession {
         else {
             return;
         };
-        let fps = self
+        let frame_dur = self
             .stream_info(vi)
             .and_then(|s| s.params.frame_rate)
-            .map(|r| if r.den > 0 { r.num as f64 / r.den as f64 } else { 0.0 })
-            .filter(|&f| f > 1.0 && f < 240.0)
-            .unwrap_or(24.0);
+            .filter(|r| r.num > 0 && r.den > 0)
+            .map(|r| (r.den as f64) / (r.num as f64))
+            .filter(|&d| d > 0.004 && d < 0.2)
+            .or_else(|| tb.is_valid().then(|| tb.seconds_of(1)).filter(|&d| d > 0.004 && d < 0.2))
+            .unwrap_or(1.0 / 24.0);
 
         if self.use_mse {
             let Some(cfg) = self.mse_cfg.clone() else { return };
@@ -1006,7 +1125,7 @@ impl WebSession {
                 self.mse_started = true;
                 self.mse_min_dts = pts_90k;
             }
-            let data_4byte = to_4byte_nals(&pkt.data, cfg.framing);
+            let data_4byte = to_4byte_nals(&pkt.data, cfg.framing, cfg.kind);
             if !data_4byte.is_empty() {
                 self.mse_gop.push(GopPacket {
                     pts_90k,
@@ -1014,9 +1133,9 @@ impl WebSession {
                     data_4byte,
                 });
             }
-            // Emit low-latency CMAF chunks every 16 frames while keeping an 8-packet lookahead for B-frame PTS sorting.
-            if self.mse_gop.len() >= 24 {
-                let chunk: Vec<GopPacket> = self.mse_gop.drain(..16).collect();
+            let (emit_n, need_n) = if self.mse_seq == 0 { (8usize, 12usize) } else { (16usize, 24usize) };
+            if self.mse_gop.len() >= need_n {
+                let chunk: Vec<GopPacket> = self.mse_gop.drain(..emit_n).collect();
                 self.mse_seq = self.mse_seq.wrapping_add(1);
                 if let Some((seg, start, end)) = build_fmp4_segment(
                     self.mse_seq,
@@ -1031,8 +1150,14 @@ impl WebSession {
             return;
         }
 
+        let mut decoded_frames = Vec::new();
+        let is_avi = self.container == "avi";
         if let Some(dec) = self.video_dec.as_mut() {
-            let pkt_pts = pkt.pts.or(pkt.dts);
+            let mut pkt_pts_secs = pkt
+                .pts
+                .or(pkt.dts)
+                .filter(|_| tb.is_valid())
+                .map(|t| tb.seconds_of(t).max(0.0));
             if catch_unwind(AssertUnwindSafe(|| dec.send_packet(&pkt))).is_err() {
                 return;
             }
@@ -1048,29 +1173,31 @@ impl WebSession {
                 if w == 0 || h == 0 || w > 8192 || h > 8192 {
                     continue;
                 }
-                let pts_secs = match vf.pts.or(pkt_pts) {
-                    Some(t) if tb.is_valid() => {
-                        let s = tb.seconds_of(t).max(0.0);
-                        self.video_next_pts = s + 1.0 / fps;
-                        s
+                let seed_pkt = pkt_pts_secs.take();
+                if !self.video_seeded {
+                    self.video_next_pts = seed_pkt.unwrap_or_else(|| self.seek_target.unwrap_or(0.0));
+                    self.video_seeded = true;
+                }
+                let pts_secs = if is_avi {
+                    // Anchor AVI directly to container packet timestamps when advancing so 23.976/29.97fps never drifts.
+                    match seed_pkt {
+                        Some(p) if p + 0.005 >= self.video_next_pts && p <= self.video_next_pts + 0.25 => p,
+                        _ => self.video_next_pts,
                     }
-                    _ => {
-                        let s = self.video_next_pts;
-                        self.video_next_pts += 1.0 / fps;
-                        s
-                    }
+                } else {
+                    vf.pts
+                        .filter(|_| tb.is_valid())
+                        .map(|t| tb.seconds_of(t).max(0.0))
+                        .filter(|&s| (s - self.video_next_pts).abs() < 2.0)
+                        .or_else(|| seed_pkt.filter(|&s| (s - self.video_next_pts).abs() < 0.5))
+                        .unwrap_or(self.video_next_pts)
                 };
-                self.sw_reorder.push(PendingVideoFrame {
-                    pts: pts_secs,
-                    w,
-                    h,
-                    fmt,
-                    frame: vf,
-                });
+                self.video_next_pts = pts_secs + frame_dur;
+                decoded_frames.push((vf, pts_secs, w, h, fmt));
             }
         }
-        while self.sw_reorder.len() > 6 {
-            self.flush_one_sw_frame();
+        for (vf, pts, w, h, fmt) in decoded_frames {
+            self.convert_and_push_video(&vf, pts, w, h, fmt);
         }
     }
 
@@ -1103,10 +1230,17 @@ impl WebSession {
             if frames == 0 {
                 continue;
             }
-            let pts_secs = match (af.pts.or(pkt_pts.take()), self.audio_next_pts) {
-                (Some(t), _) if stream.time_base.is_valid() => stream.time_base.seconds_of(t).max(0.0),
-                (_, Some(next)) => next,
-                _ => 0.0,
+            let pkt_secs = af
+                .pts
+                .or(pkt_pts.take())
+                .filter(|_| stream.time_base.is_valid())
+                .map(|t| stream.time_base.seconds_of(t).max(0.0));
+            let pts_secs = match (self.audio_next_pts, pkt_secs) {
+                (None, Some(s)) => s,
+                (None, None) => self.seek_target.unwrap_or(0.0),
+                // Align within 40ms (GStreamer/peartube-media AUDIO_ALIGN_SECS) for sample-exact continuity; snap on real discontinuities.
+                (Some(next), Some(s)) if (s - next).abs() > 0.040 && (s - next).abs() < 30.0 => s,
+                (Some(next), _) => next,
             };
             self.audio_next_pts = Some(pts_secs + (frames as f64) / f64::from(rate));
             if let Some(target) = self.seek_target
@@ -1148,9 +1282,11 @@ impl WebSession {
                 self.audio_accum.extend_from_slice(&sample.to_le_bytes());
             }
             self.audio_accum_frames += stereo_frames;
-            if self.audio_accum_frames >= 4096
+            let flush_thresh = if self.audio_first_flushed { 4096 } else { 1024 };
+            if self.audio_accum_frames >= flush_thresh
                 && let Some(pts) = self.audio_accum_pts.take()
             {
+                self.audio_first_flushed = true;
                 self.out_queue.push_back(OutItem::AudioF32 {
                     data: std::mem::take(&mut self.audio_accum),
                     pts,
@@ -1256,6 +1392,7 @@ impl WebSession {
             }
         } else {
             let vinfo = self.video_idx.and_then(|vi| self.stream_info(vi).cloned());
+            let mut tail_frames = Vec::new();
             if let (Some(dec), Some(s)) = (self.video_dec.as_mut(), vinfo) {
                 let _ = catch_unwind(AssertUnwindSafe(|| dec.flush()));
                 loop {
@@ -1269,16 +1406,14 @@ impl WebSession {
                     let fmt = dec
                         .output_pixel_format()
                         .unwrap_or(s.params.pixel_format.unwrap_or(PixelFormat::Yuv420P));
-                    let pts = vf
-                        .pts
-                        .filter(|_| s.time_base.is_valid())
-                        .map(|t| s.time_base.seconds_of(t).max(0.0))
-                        .unwrap_or(self.video_next_pts);
+                    let pts = self.video_next_pts;
                     self.video_next_pts = pts + 0.04;
-                    self.sw_reorder.push(PendingVideoFrame { pts, w, h, fmt, frame: vf });
+                    tail_frames.push((vf, pts, w, h, fmt));
                 }
             }
-            while self.flush_one_sw_frame() {}
+            for (vf, pts, w, h, fmt) in tail_frames {
+                self.convert_and_push_video(&vf, pts, w, h, fmt);
+            }
         }
     }
 }
@@ -1381,7 +1516,8 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
         let mut st = cell.borrow_mut();
         st.session = None;
         let ctx = &*REGISTRY;
-        let mut src = HttpRangeSource::new();
+        let streaming_io = Arc::new(AtomicBool::new(false));
+        let mut src = HttpRangeSource::new(Arc::clone(&streaming_io));
         if src.len == 0 {
             return set_json_error(&mut st, "Stream has zero bytes");
         }
@@ -1517,6 +1653,8 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
         });
         st.json_buf = manifest.to_string().into_bytes();
         st.session = Some(WebSession {
+            container,
+            streaming_io,
             demuxer,
             streams,
             mse_cfg,
@@ -1535,8 +1673,10 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             audio_accum_pts: None,
             audio_accum_rate: 0,
             audio_accum_frames: 0,
+            audio_first_flushed: false,
             video_next_pts: 0.0,
-            sw_reorder: Vec::new(),
+            video_seeded: false,
+            client_clock: 0.0,
             mse_gop: Vec::new(),
             mse_seq: 0,
             mse_min_dts: 0,
@@ -1561,6 +1701,7 @@ pub extern "C" fn pt_configure(video_stream: i32, audio_stream: i32, sub_stream:
         sess.sub_idx = (sub_stream >= 0).then_some(sub_stream as u32);
         sess.use_mse = use_mse != 0 && sess.mse_cfg.is_some();
         sess.out_queue.clear();
+        sess.streaming_io.store(true, Ordering::Relaxed);
 
         let mut active = Vec::new();
         if let Some(v) = sess.video_idx {
@@ -1619,6 +1760,15 @@ pub extern "C" fn pt_seek(target_secs: f64) -> i32 {
         }
         0
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn pt_set_clock(clock_secs: f64) {
+    STATE.with(|cell| {
+        if let Some(sess) = cell.borrow_mut().session.as_mut() {
+            sess.client_clock = clock_secs.max(0.0);
+        }
+    });
 }
 
 #[unsafe(no_mangle)]
@@ -1684,6 +1834,13 @@ pub extern "C" fn pt_step() -> i32 {
                     st.out_w = w;
                     st.out_h = h;
                     3
+                }
+                Some(OutItem::VideoYuv420 { data, pts, w, h }) => {
+                    st.out_buf = data;
+                    st.out_pts = pts;
+                    st.out_w = w;
+                    st.out_h = h;
+                    7
                 }
                 Some(OutItem::AudioF32 { data, pts, rate, frames }) => {
                     st.out_buf = data;

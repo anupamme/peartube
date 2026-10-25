@@ -234,10 +234,20 @@ export function createApi (state) {
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && (url.pathname === '/web/peartube_web.wasm' || url.pathname === '/web/player-worker.js')) {
       const name = url.pathname.slice(5)
-      const asset = readWebAsset(name)
+      const acceptsGzip = name.endsWith('.wasm') && String(req.headers['accept-encoding'] || '').includes('gzip')
+      const gzAsset = acceptsGzip ? readWebAsset(name + '.gz') : null
+      const asset = gzAsset || readWebAsset(name)
       if (!asset) { res.writeHead(404, CORS); res.end('not found'); return }
+      const etag = '"' + asset.byteLength + '-' + asset[0] + '-' + asset[asset.byteLength - 1] + (gzAsset ? '-gz' : '') + '"'
+      if (req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ...CORS, etag, 'cache-control': 'no-cache' })
+        res.end()
+        return
+      }
       const mime = name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript; charset=utf-8'
-      res.writeHead(200, { ...CORS, 'content-type': mime, 'content-length': String(asset.byteLength), 'cache-control': 'no-cache' })
+      const headers = { ...CORS, 'content-type': mime, 'content-length': String(asset.byteLength), 'cache-control': 'no-cache', vary: 'accept-encoding', etag }
+      if (gzAsset) headers['content-encoding'] = 'gzip'
+      res.writeHead(200, headers)
       res.end(req.method === 'HEAD' ? undefined : asset)
       return
     }
