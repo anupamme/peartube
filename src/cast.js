@@ -277,12 +277,14 @@ function hasBlockCached (core, blob, byteStart) {
   return core.length > blockIdx && Boolean(core.core?.bitfield?.get(blockIdx))
 }
 
-function hasActiveReplicationPeer (core, blob) {
+function hasActiveReplicationPeer (core, blob, bytePos = 0) {
   if (!core?.opened || !blob || !Array.isArray(core.peers)) return false
   const endIdx = blob.blockOffset + blob.blockLength
+  const curIdx = estimateBlobBlock(blob, bytePos)
+  const midIdx = blob.blockOffset + (blob.blockLength >> 1)
   return core.peers.some(p =>
     p.remoteContiguousLength >= endIdx ||
-    (p.remoteLength >= endIdx && p.remoteBitfield?.findFirst?.(true, blob.blockOffset) === blob.blockOffset)
+    (p.remoteLength > curIdx && Boolean(p.remoteBitfield?.get?.(curIdx)) && Boolean(p.remoteBitfield?.get?.(midIdx)))
   )
 }
 
@@ -432,21 +434,26 @@ async function serveSpliceStream (media, req, res, onModeUpgrade) {
 
   let cursor = start
   const COLD_HTTP_WINDOW = 1024 * 1024 // 1 MiB max before re-checking P2P peer/cache cutover
+  let forceHttpFallback = false
   while (cursor <= end && !clientClosed) {
-    const useP2P = Boolean(media.localP2PUrl) && (
-      !media.senderHttpAlive ||
-      !media.httpStreamUrl ||
-      hasBlockCached(media.core, media.blob, cursor) ||
-      hasActiveReplicationPeer(media.core, media.blob)
+    const canHttp = Boolean(media.senderHttpAlive && media.httpStreamUrl)
+    const spanEnd = Math.min(end, cursor + 4 * 1048576)
+    const spanCached = hasBlockCached(media.core, media.blob, cursor) && hasBlockCached(media.core, media.blob, spanEnd)
+    const useP2P = Boolean(media.localP2PUrl) && !forceHttpFallback && (
+      !canHttp ||
+      spanCached ||
+      hasActiveReplicationPeer(media.core, media.blob, cursor)
     )
     if (useP2P) {
       onModeUpgrade?.(media.p2pMode)
       try {
-        const n = await pipeRangeSlice(media.localP2PUrl, cursor, end, res, { stallTimeoutMs: 0, clientClosed: () => clientClosed })
+        const n = await pipeRangeSlice(media.localP2PUrl, cursor, end, res, { stallTimeoutMs: canHttp ? 3500 : 0, clientClosed: () => clientClosed })
         cursor += n
         break
-      } catch {
-        break
+      } catch (err) {
+        cursor += Number(err?.written) || 0
+        if (!canHttp) break
+        forceHttpFallback = true
       }
     }
     const sliceEnd = media.localP2PUrl ? Math.min(end, cursor + COLD_HTTP_WINDOW - 1) : end
@@ -755,9 +762,9 @@ export async function createReceiver ({
       peerNode = managedPeerNode
     }
 
-    // Public/LAN receivers join the blob content swarm directly without burning CPU on full tracker oplogs.
-    if (peerNode && sourceKey && wantPrivate) {
-      await peerNode.addSource({ key: sourceKey, kind: sourceKind }).catch(() => {})
+    if (peerNode && sourceKey) {
+      if (wantPrivate) await peerNode.addSource({ key: sourceKey, kind: sourceKind }).catch(() => {})
+      else peerNode.joinSourceSwarm?.(sourceKey)
     }
     return peerNode
   }
@@ -838,9 +845,11 @@ export async function createReceiver ({
     }
 
     const loadToken = randomHex(16)
-    // Start cold casts instantly off the sender's warm HTTP Range server via /cast/v1/hybrid/<token>,
-    // then splice mid-stream to local P2P BlobServer the moment swarm peers/blocks arrive (or if sender dies).
-    const startOnP2P = Boolean(localP2PUrl && (!allowColdHttp || hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
+    // Native P2P receivers (Android TV / Pi 4 / Mac HTPC / daemon) hand OxideAV/mpv the direct 1-hop
+    // BlobServer URL — avoiding a second QuickJS HTTP copy at 75+ Mbps 4K UHD bitrates.
+    // External Smart TV Web browsers (!onCommand) use the LAN-reachable /cast/v1/hybrid/<token> proxy.
+    const directLocalP2P = Boolean(onCommand && localP2PUrl)
+    const startOnP2P = Boolean(localP2PUrl && (directLocalP2P || !allowColdHttp || hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
     const initialMode = startOnP2P ? p2pMode : 'http'
     activeMedia = {
       token: loadToken,
@@ -859,9 +868,11 @@ export async function createReceiver ({
     }
 
     const hostForPlayer = onCommand ? '127.0.0.1' : (currentHost || '127.0.0.1')
-    const streamUrl = (localP2PUrl && allowColdHttp && !startOnP2P)
-      ? `http://${hostForPlayer}:${actualPort}/cast/v1/hybrid/${loadToken}`
-      : (localP2PUrl || httpStreamUrl)
+    const streamUrl = directLocalP2P
+      ? localP2PUrl
+      : (localP2PUrl && allowColdHttp)
+          ? `http://${hostForPlayer}:${actualPort}/cast/v1/hybrid/${loadToken}`
+          : (localP2PUrl || httpStreamUrl)
     return {
       entry,
       mode: initialMode,

@@ -74,7 +74,7 @@ export async function createMirrorHost ({
   storage,
   acquirer,
   mirrorChannel = true,
-  rechunk = true,
+  rechunk = false,
   watchDir = null,
   feeds = [],
   replicate = false,

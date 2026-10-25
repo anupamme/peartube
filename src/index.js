@@ -766,7 +766,7 @@ export async function createNode ({
         const hasLocalBlobs = blobSlots.some(s => s.core.length > 0 && s.core.core.bitfield.countSet(0, s.core.length) > 0)
         await st.compact(full && !hasLocalBlobs
           ? { exclusive: true, blobGarbageCollectionPolicy: 1, blobGarbageCollectionAgeCutoff: 1.0, bottommostLevelCompaction: 2 }
-          : { exclusive: true, blobGarbageCollectionPolicy: 0, bottommostLevelCompaction: 2 }
+          : { exclusive: false, blobGarbageCollectionPolicy: 0, bottommostLevelCompaction: 1 }
         )
       }
       const afterBytes = dbDiskBytes()
@@ -1005,6 +1005,10 @@ export async function createNode ({
     const parsed = parseUri(uri, 'channel')
     if (parsed.action === 'source') return { action: 'source', source: await addSource(parsed) }
     if (joinSource && parsed.sourceKey) await addSource({ key: parsed.sourceKey, kind: parsed.sourceKind }).catch(() => {})
+    else if (parsed.sourceKey && !dht) {
+      const sk = b4a.from(parsed.sourceKey, 'hex')
+      joinOverlayTopic(`source-swarm:${parsed.sourceKey}`, sk, hypercoreCrypto.discoveryKey(sk))
+    }
     const { entry } = parsed
     const key = `watch/${entry.blobs}:${entry.blob.blockOffset}`
     ephemeralWatches.set(key, { entry, source: parsed.sourceKey || 'direct', sourceKind: 'watch' })
@@ -1141,10 +1145,11 @@ export async function createNode ({
             if (idx >= endIdx) { this.push(null); return cb(null) }
             const batchEnd = Math.min(endIdx, idx + 16)
             const reqs = []
-            while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++))
+            while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++, { wait: false }))
             Promise.all(reqs).then(blocks => {
+              if (blocks.some(b => !b)) return cb(new Error('Missing local block during rechunk'))
               for (const blk of blocks) this.push(blk)
-              setTimeout(() => cb(null), 0)
+              setTimeout(() => cb(null), 5)
             }, cb)
           }
         })
@@ -1370,6 +1375,11 @@ export async function createNode ({
     lanEndpoint: () => lan?.port && lan?.host ? { host: lan.host, port: lan.port, publicKey: b4a.toString(swarm.keyPair.publicKey, 'hex') } : null,
     dialLanPeer: ep => { if (ep?.publicKey && ep?.host && ep?.port) lan?.dialDirect?.(ep.publicKey, ep.host, ep.port) },
     evictBehind,
+    joinSourceSwarm: keyHex => {
+      if (dht || closing || !str(keyHex, HEX64)) return
+      const sk = b4a.from(keyHex, 'hex')
+      joinOverlayTopic(`source-swarm:${keyHex}`, sk, hypercoreCrypto.discoveryKey(sk))
+    },
     tracker,
     localChannel,
     swarm,

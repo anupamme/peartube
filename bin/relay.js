@@ -174,6 +174,7 @@ state.mirror = await createMirrorHost({
   storage,
   acquirer: state.acquirer,
   mirrorChannel,
+  rechunk: Boolean(env.PEARTUBE_RECHUNK === '1' || env.PEARTUBE_RECHUNK === 'true'),
   watchDir: env.PEARTUBE_WATCH_DIR || null,
   feeds: env.PEARTUBE_MIRROR_FEEDS ? env.PEARTUBE_MIRROR_FEEDS.split(',').map(s => s.trim()).filter(Boolean) : [],
   replicate: replicateOpt,
