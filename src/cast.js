@@ -671,7 +671,7 @@ export async function createReceiver ({
           relayThrough: wantRelayThrough,
           privateRouting: wantPrivate,
           lan: wantLan && currentHost
-            ? kp => createLan({ host: currentHost, port: 49796, keyPair: kp, adapter: adapterForHost(currentHost, adapter) })
+            ? kp => createLan({ host: currentHost, keyPair: kp, adapter: adapterForHost(currentHost, adapter) })
             : null
         })
         managedPeerSig = sig

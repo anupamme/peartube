@@ -151,6 +151,14 @@ class AppModel(private val app: Application) {
         scope.launch {
             for (unit in refreshes) refresh()
         }
+        scope.launch {
+            var wasPlaying = false
+            screen.collect { cur ->
+                val playing = cur is Screen.Play
+                if (wasPlaying && !playing) refreshes.trySend(Unit)
+                wasPlaying = playing
+            }
+        }
         if (settings.value.hasSources) starts.trySend(settings.value)
     }
 
@@ -356,11 +364,16 @@ class AppModel(private val app: Application) {
     private suspend fun refresh() {
         if (!settings.value.hasSources) return
         try {
-            coroutineScope {
-                val st = async { worker.status() }
-                val en = async { worker.search() }
-                status.value = st.await()
-                entries.value = en.await()
+            // Keep the worklet's QuickJS thread wide open for block streaming while a video plays.
+            if (screen.value is Screen.Play) {
+                status.value = worker.status()
+            } else {
+                coroutineScope {
+                    val st = async { worker.status() }
+                    val en = async { worker.search() }
+                    status.value = st.await()
+                    entries.value = en.await()
+                }
             }
         } catch (e: Exception) {
             error.value = e.message

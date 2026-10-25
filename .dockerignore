@@ -7,3 +7,8 @@ desktop
 android
 crates
 worklet/vendor
+ios
+web/src
+web/target
+web/Cargo.toml
+web/Cargo.lock

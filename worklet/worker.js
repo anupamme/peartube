@@ -24,9 +24,6 @@ let apiUrl = null
 let cast = null
 let castStorage = null
 let receiverNodeOwned = false
-const DEFAULT_LAN_PORT = 49798 // one below the relay's default, so both fit on one machine
-const RECEIVER_LAN_PORT = 49797 // distinct from relay (49799) and sender app (49798)
-let lanPort = DEFAULT_LAN_PORT
 let lifecycle = Promise.resolve()
 
 // Any peer can publish a title with a lone surrogate, which serde_json rejects.
@@ -107,7 +104,7 @@ async function moveLan () {
     lanHost = host
     lanError = null
     try {
-      await node.setLan(host && (keyPair => createLan({ host, port: lanPort, keyPair, adapter: interfaceAdapter(host) })))
+      await node.setLan(host && (keyPair => createLan({ host, keyPair, adapter: interfaceAdapter(host) })))
     } catch (err) {
       lanError = err.message
     }
@@ -130,7 +127,6 @@ async function ensureCast (storageHint = null) {
       ensureNode: async () => {
         if (node) return node
         receiverNodeOwned = true
-        lanPort = RECEIVER_LAN_PORT
         node = await createNode({ storage: castStorage, onchange: update })
         node.swarm.on('update', update)
         lanWanted = true
@@ -199,7 +195,6 @@ const methods = {
   start: ({ storage, tracker = null, sources = [], relayThrough = null, bootstrap = null, lan = false, privateRouting = false, apiPort = 8174, apiToken = null }) => serial(async () => {
     await close()
     castStorage = storage
-    lanPort = DEFAULT_LAN_PORT
     node = await createNode({
       storage,
       tracker: tracker || null,

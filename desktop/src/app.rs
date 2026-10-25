@@ -560,6 +560,7 @@ impl PearTube {
         }
         self.player_events = None;
         self.show_list(cx);
+        cx.spawn(async move |this, cx| refresh(&this, cx).await).detach();
     }
 
     pub fn detach_casting(&mut self, cx: &mut Context<Self>) {
@@ -648,7 +649,24 @@ async fn follow_urls(this: WeakEntity<PearTube>, mut rx: UnboundedReceiver<Strin
 
 async fn refresh(this: &WeakEntity<PearTube>, cx: &mut AsyncApp) {
     let Ok(w) = worker() else { return };
-    if !this.read_with(cx, |this, _| this.settings.has_sources()).unwrap_or(false) {
+    let (has_sources, playing) = this
+        .read_with(cx, |this, _| (this.settings.has_sources(), matches!(this.screen, Screen::Play(_))))
+        .unwrap_or((false, false));
+    if !has_sources {
+        return;
+    }
+    if playing {
+        let (st, cst) = futures_util::join!(w.status(), w.cast_status());
+        let _ = this.update(cx, |this, cx| {
+            match st {
+                Ok(status) => this.status = Some(status),
+                Err(err) => this.error = Some(err.into()),
+            }
+            if let Ok(cst) = cst {
+                this.cast = cst;
+            }
+            cx.notify();
+        });
         return;
     }
     let result = futures_util::join!(w.status(), w.search(None), w.cast_status());

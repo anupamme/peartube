@@ -1,5 +1,5 @@
 // The worklet's `crypto`: createHash('sha256'), the only part of it that the core
-// (src/index.js) and LAN discovery (@p2plabs/hyperdht-mdns) use. It runs on
+// (src/index.js) and LAN discovery (src/lan.js) use. It runs on
 // sodium-native, which the worklet loads anyway, so the app does not ship
 // bare-crypto's 0.8 MB native library. package.json's `imports` and
 // worklet/imports.json map `node:crypto` and `crypto` here for Bare.

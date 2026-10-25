@@ -317,6 +317,16 @@ module.exports = class HypercoreBlobServer {
   }
 
   async _onrequest (req, res) {
+    // Spread CORS wide on blob streams so browser WASM workers can suck raw Range slices across ports without choking on preflight.
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type')
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges')
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204
+      res.end()
+      return
+    }
     if (req.method !== 'HEAD' && req.method !== 'GET') {
       req.socket.destroy()
       req.statusCode = 400

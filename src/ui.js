@@ -26,8 +26,21 @@ export const page = `<!doctype html>
   .empty { color: var(--dim); padding: 12px 0; }
   input, select { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
   button, a.btn { background: #262b36; color: var(--text); border: 1px solid #363d4d; border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; }
+  button.primary { background: #22498a; border-color: var(--brand); color: #fff; }
   button:hover:not(:disabled), a.btn:hover { background: #323947; }
+  button.primary:hover:not(:disabled) { background: #2d5cb0; }
   button:disabled { opacity: .45; cursor: default; }
+  #playerModal { position: fixed; inset: 0; background: rgba(7, 9, 13, .95); z-index: 100; display: none; flex-direction: column; }
+  #playerModal.open { display: flex; }
+  .p-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; background: rgba(15, 17, 21, .9); border-bottom: 1px solid var(--line); }
+  .p-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; cursor: pointer; }
+  #pVideo, #pCanvas { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; display: none; }
+  #pSubCanvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+  #pSubText { position: absolute; left: 8%; right: 8%; bottom: 28px; text-align: center; font-size: clamp(16px, 2.2vw, 28px); font-weight: 600; color: #fff; text-shadow: 0 2px 6px #000, 0 0 3px #000, 1px 1px 0 #000, -1px -1px 0 #000; white-space: pre-wrap; pointer-events: none; }
+  #pStatus { position: absolute; padding: 8px 14px; border-radius: 8px; background: rgba(15, 17, 21, .82); border: 1px solid var(--line); color: var(--text); font-size: 13px; pointer-events: none; display: none; }
+  .p-bar { padding: 10px 18px 14px; background: rgba(15, 17, 21, .94); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+  #pSeek { width: 100%; accent-color: var(--brand); padding: 0; cursor: pointer; }
+  .clock { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--dim); min-width: 96px; }
 </style>
 </head>
 <body>
@@ -50,6 +63,43 @@ export const page = `<!doctype html>
   <h2>Acquisitions</h2>
   <div id="jobs"></div>
 </main>
+<div id="playerModal">
+  <div class="p-top">
+    <div class="row" style="min-width:0;flex:1">
+      <span class="title" id="pTitle"></span>
+      <span class="badge running" id="pBadge">Loading WASM…</span>
+    </div>
+    <div class="row">
+      <a class="btn" id="pRawLink" target="_blank" rel="noopener">Raw URL</a>
+      <button id="pFsBtn">Fullscreen</button>
+      <button id="pCloseBtn">Close</button>
+    </div>
+  </div>
+  <div class="p-stage" id="pStage">
+    <video id="pVideo" muted playsinline></video>
+    <canvas id="pCanvas"></canvas>
+    <canvas id="pSubCanvas"></canvas>
+    <div id="pSubText"></div>
+    <div id="pStatus"></div>
+  </div>
+  <div class="p-bar">
+    <input type="range" id="pSeek" min="0" max="1000" value="0" step="1">
+    <div class="row">
+      <div class="row">
+        <button class="primary" id="pPlayBtn">Pause</button>
+        <button id="pBackBtn">-10s</button>
+        <button id="pFwdBtn">+10s</button>
+        <span class="clock" id="pClock">0:00 / 0:00</span>
+      </div>
+      <div class="row">
+        <select id="pAudioSel" title="Audio Track"></select>
+        <select id="pSubSel" title="Subtitles"></select>
+        <button id="pMuteBtn">Mute</button>
+        <input type="range" id="pVol" min="0" max="100" value="100" style="width:80px;padding:0;accent-color:var(--brand)" title="Volume">
+      </div>
+    </div>
+  </div>
+</div>
 <script>
 const $ = id => document.getElementById(id)
 const el = (t, c, txt) => { const e = document.createElement(t); if (t === 'button') e.type = 'button'; if (c) e.className = c; if (txt != null) e.textContent = txt; return e }
@@ -194,7 +244,8 @@ async function refresh () {
       const info = el('div')
       info.append(el('div', 'title', e.title), el('div', 'meta', [e.id, size(e.size), e.sourceKind + ':' + e.source.slice(0, 8)].join(' \\u00b7 ')))
       const act = el('span', 'row')
-      const play = el('a', 'btn', 'Stream'); play.href = e.streamUrl; play.target = '_blank'
+      const play = el('button', 'primary', 'Stream')
+      play.onclick = () => openPlayer(e)
       act.append(play, copyBtn('Copy Magnet', e.magnetUrl))
       c.append(info, act)
       return c
@@ -225,6 +276,546 @@ refresh()
 const ev = new EventSource('/v1/events')
 ev.onmessage = refresh
 setInterval(refresh, 5000)
+
+// In-browser peartube-media WebAssembly player: demuxes MKV/AVI/MP4/TS over same-origin HTTP Range,
+// hardware-accelerates H.264/HEVC via fMP4 MSE when supported, falls back to WASM SIMD software video,
+// and decodes surround AC-3/DTS/TrueHD/Opus/MP3 + SRT/ASS/PGS subtitles straight in the browser.
+function fmtClock (s) {
+  if (!Number.isFinite(s) || s < 0) s = 0
+  const t = Math.floor(s)
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), r = String(t % 60).padStart(2, '0')
+  return h > 0 ? h + ':' + String(m).padStart(2, '0') + ':' + r : m + ':' + r
+}
+
+function resolveStreamUrl (rawUrl) {
+  try {
+    const u = new URL(rawUrl, location.href)
+    if (u.searchParams.has('key') && (u.searchParams.has('blob') || u.searchParams.has('pointer'))) {
+      return location.origin + '/v1/blob' + u.search
+    }
+    return u.href
+  } catch {
+    return rawUrl
+  }
+}
+
+let player = null
+
+function closePlayer () {
+  if (!player) return
+  const p = player
+  player = null
+  $('playerModal').classList.remove('open')
+  cancelAnimationFrame(p.raf)
+  try { p.worker?.postMessage({ cmd: 'close' }); p.worker?.terminate() } catch {}
+  for (const s of p.audioNodes) { try { s.node.stop(); s.node.disconnect() } catch {} }
+  try { p.audioCtx?.close() } catch {}
+  const v = $('pVideo')
+  v.pause()
+  v.removeAttribute('src')
+  v.load()
+  if (p.msUrl) { try { URL.revokeObjectURL(p.msUrl) } catch {} }
+  $('pSubText').textContent = ''
+  const sc = $('pSubCanvas')
+  sc.getContext('2d').clearRect(0, 0, sc.width, sc.height)
+}
+
+function openPlayer (entry) {
+  closePlayer()
+  const streamUrl = resolveStreamUrl(entry.streamUrl)
+  $('pTitle').textContent = entry.title || entry.id
+  $('pBadge').textContent = 'Opening WASM…'
+  $('pBadge').className = 'badge running'
+  $('pRawLink').href = streamUrl
+  $('pStatus').style.display = ''
+  $('pStatus').textContent = 'Buffering stream…'
+  $('pSubText').textContent = ''
+  $('pPlayBtn').textContent = 'Pause'
+  $('pSeek').value = '0'
+  $('pClock').textContent = '0:00 / 0:00'
+  $('playerModal').classList.add('open')
+
+  const AudioCtx = window.AudioContext || window.webkitAudioContext
+  const audioCtx = AudioCtx ? new AudioCtx() : null
+  const gainNode = audioCtx ? audioCtx.createGain() : null
+  if (gainNode) {
+    gainNode.gain.value = ($('pMuteBtn').dataset.muted === '1') ? 0 : (Number($('pVol').value) / 100)
+    gainNode.connect(audioCtx.destination)
+  }
+  audioCtx?.resume?.().catch(() => {})
+
+  const p = {
+    entry,
+    streamUrl,
+    worker: new Worker('/web/player-worker.js'),
+    audioCtx,
+    gainNode,
+    audioNodes: [],
+    nextAudioCtxTime: 0,
+    audioBaseMedia: 0,
+    audioBaseCtx: 0,
+    audioStarted: false,
+    freeBaseMedia: 0,
+    freeBasePerf: performance.now(),
+    paused: false,
+    seeking: false,
+    duration: 0,
+    seq: 1,
+    manifest: null,
+    videoStream: -1,
+    audioStream: -1,
+    subStream: -1,
+    useMse: false,
+    ms: null,
+    msUrl: '',
+    sb: null,
+    mseQueue: [],
+    mseReady: false,
+    swFrames: [],
+    drawnFrames: 0,
+    subCues: [],
+    eof: false,
+    raf: 0
+  }
+  player = p
+
+  const canvas = $('pCanvas')
+  const ctx2d = canvas.getContext('2d')
+  const subCanvas = $('pSubCanvas')
+  const subCtx = subCanvas.getContext('2d')
+  const video = $('pVideo')
+
+  function currentMediaTime () {
+    if (p.paused) return p.freeBaseMedia
+    if (p.audioStream >= 0 && p.audioCtx && p.audioStarted) {
+      const t = p.audioBaseMedia + Math.max(0, p.audioCtx.currentTime - p.audioBaseCtx)
+      p.freeBaseMedia = t
+      p.freeBasePerf = performance.now()
+      return t
+    }
+    if (p.useMse && !video.paused && video.readyState >= 2) {
+      p.freeBaseMedia = video.currentTime
+      p.freeBasePerf = performance.now()
+      return video.currentTime
+    }
+    return p.freeBaseMedia + Math.max(0, (performance.now() - p.freeBasePerf) / 1000)
+  }
+
+  function resetMediaOutputs (targetSecs) {
+    for (const s of p.audioNodes) { try { s.node.stop(); s.node.disconnect() } catch {} }
+    p.audioNodes.length = 0
+    p.nextAudioCtxTime = 0
+    p.audioStarted = false
+    p.audioBaseMedia = targetSecs
+    p.freeBaseMedia = targetSecs
+    p.freeBasePerf = performance.now()
+    p.swFrames.length = 0
+    p.subCues.length = 0
+    $('pSubText').textContent = ''
+    subCtx.clearRect(0, 0, subCanvas.width, subCanvas.height)
+    if (p.useMse) setupMse(targetSecs)
+  }
+
+  function setupMse (startAt) {
+    video.pause()
+    if (p.msUrl) { try { URL.revokeObjectURL(p.msUrl) } catch {} p.msUrl = '' }
+    p.mseQueue.length = 0
+    p.sb = null
+    p.mseReady = false
+    const MS = window.MediaSource || window.ManagedMediaSource
+    if (!MS || !p.manifest?.mseCodec) { fallbackSw(startAt); return }
+    const mime = 'video/mp4; codecs="' + p.manifest.mseCodec + '"'
+    if (!MS.isTypeSupported(mime)) { fallbackSw(startAt); return }
+    const ms = new MS()
+    p.ms = ms
+    p.msUrl = URL.createObjectURL(ms)
+    video.style.display = 'block'
+    canvas.style.display = 'none'
+    video.src = p.msUrl
+    ms.addEventListener('sourceopen', () => {
+      if (player !== p || p.ms !== ms) return
+      try {
+        const sb = ms.addSourceBuffer(mime)
+        sb.mode = 'segments'
+        p.sb = sb
+        sb.addEventListener('updateend', () => {
+          if (player !== p || p.sb !== sb) return
+          if (!p.mseReady && sb.buffered.length > 0) {
+            p.mseReady = true
+            const bStart = sb.buffered.start(0)
+            video.currentTime = Math.max(bStart, startAt)
+            $('pStatus').style.display = 'none'
+            if (!p.paused) video.play().catch(() => {})
+          }
+          drainMseQueue()
+        })
+        drainMseQueue()
+      } catch {
+        fallbackSw(currentMediaTime())
+      }
+    }, { once: true })
+  }
+
+  function drainMseQueue () {
+    if (!p.sb || p.sb.updating) return
+    if (p.mseQueue.length > 0) {
+      const buf = p.mseQueue.shift()
+      try { p.sb.appendBuffer(buf) } catch { fallbackSw(currentMediaTime()) }
+      return
+    }
+    const now = currentMediaTime()
+    if (p.sb.buffered.length > 0 && now - p.sb.buffered.start(0) > 20) {
+      try { p.sb.remove(0, now - 12) } catch {}
+    }
+  }
+
+  function fallbackSw (atSecs) {
+    if (!p.useMse && canvas.style.display === 'block') return
+    p.useMse = false
+    p.sb = null
+    p.ms = null
+    p.mseQueue.length = 0
+    p.mseReady = false
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    if (p.msUrl) { try { URL.revokeObjectURL(p.msUrl) } catch {} p.msUrl = '' }
+    video.style.display = 'none'
+    canvas.style.display = 'block'
+    updateBadge()
+    p.seq++
+    resetMediaOutputs(atSecs)
+    p.worker.postMessage({ cmd: 'seek', seq: p.seq, time: atSecs, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: false })
+  }
+
+  video.onerror = () => { if (player === p && p.useMse) fallbackSw(currentMediaTime()) }
+
+  function updateBadge () {
+    if (!p.manifest) return
+    const vt = p.manifest.tracks.find(t => t.stream === p.videoStream)
+    const at = p.manifest.tracks.find(t => t.stream === p.audioStream)
+    const parts = [p.manifest.container]
+    if (vt) parts.push(vt.codec + (p.useMse ? ' (MSE+WASM)' : ' (WASM)'))
+    if (at) parts.push(at.codec)
+    $('pBadge').textContent = parts.join(' \\u00b7 ')
+    $('pBadge').className = 'badge seeder'
+  }
+
+  p.worker.onmessage = ev => {
+    if (player !== p) return
+    const m = ev.data || {}
+    if (m.seq && m.seq !== p.seq) return
+    if (m.type === 'error') {
+      $('pStatus').style.display = ''
+      $('pStatus').textContent = 'Playback error: ' + m.error
+      $('pBadge').textContent = 'Error'
+      $('pBadge').className = 'badge failed'
+      return
+    }
+    if (m.type === 'manifest') {
+      const mf = m.manifest
+      p.manifest = mf
+      p.duration = mf.duration || 0
+      p.videoStream = mf.defaultVideo ?? -1
+      p.audioStream = mf.defaultAudio ?? -1
+      const subs = mf.tracks.filter(t => t.kind === 'subtitle')
+      const auds = mf.tracks.filter(t => t.kind === 'audio')
+      p.subStream = -1
+
+      const aSel = $('pAudioSel')
+      aSel.replaceChildren(...(auds.length ? auds.map((t, i) => {
+        const o = el('option', null, 'Audio ' + (i + 1) + ': ' + [t.codec, t.language, t.channels ? t.channels + 'ch' : ''].filter(Boolean).join(' '))
+        o.value = String(t.stream)
+        if (t.stream === p.audioStream) o.selected = true
+        return o
+      }) : [Object.assign(el('option', null, 'No Audio'), { value: '-1' })]))
+      aSel.disabled = auds.length <= 1
+
+      const sSel = $('pSubSel')
+      const offOpt = el('option', null, 'Subtitles: Off'); offOpt.value = '-1'
+      sSel.replaceChildren(offOpt, ...subs.map((t, i) => {
+        const o = el('option', null, 'Sub ' + (i + 1) + ': ' + [t.codec, t.language].filter(Boolean).join(' '))
+        o.value = String(t.stream)
+        return o
+      }))
+      sSel.disabled = subs.length === 0
+
+      const MS = window.MediaSource || window.ManagedMediaSource
+      p.useMse = Boolean(p.videoStream >= 0 && mf.mseCodec && MS && MS.isTypeSupported('video/mp4; codecs="' + mf.mseCodec + '"'))
+      if (p.useMse) {
+        setupMse(0)
+      } else {
+        video.style.display = 'none'
+        canvas.style.display = p.videoStream >= 0 ? 'block' : 'none'
+        if (mf.width > 0 && mf.height > 0) { canvas.width = mf.width; canvas.height = mf.height }
+      }
+      updateBadge()
+      p.worker.postMessage({ cmd: 'start', seq: p.seq, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: p.useMse })
+    } else if (m.type === 'mseInit' || m.type === 'mseSeg') {
+      p.mseQueue.push(m.buf)
+      drainMseQueue()
+    } else if (m.type === 'videoFrame') {
+      p.swFrames.push(m)
+      p.swFrames.sort((a, b) => a.pts - b.pts)
+      $('pStatus').style.display = 'none'
+    } else if (m.type === 'audioChunk' && p.audioCtx && p.gainNode && m.samples > 0) {
+      const f32 = new Float32Array(m.buf)
+      const ab = p.audioCtx.createBuffer(2, m.samples, m.rate)
+      const ch0 = ab.getChannelData(0), ch1 = ab.getChannelData(1)
+      for (let i = 0, j = 0; i < m.samples; i++, j += 2) {
+        ch0[i] = f32[j]
+        ch1[i] = f32[j + 1]
+      }
+      const node = p.audioCtx.createBufferSource()
+      node.buffer = ab
+      node.connect(p.gainNode)
+      const nowCtx = p.audioCtx.currentTime
+      const startCtx = Math.max(nowCtx + 0.03, p.nextAudioCtxTime || (nowCtx + 0.05))
+      p.nextAudioCtxTime = startCtx + ab.duration
+      if (!p.audioStarted) {
+        p.audioStarted = true
+        p.audioBaseMedia = m.pts
+        p.audioBaseCtx = startCtx
+        $('pStatus').style.display = 'none'
+      }
+      const rec = { node, startCtx, endCtx: startCtx + ab.duration, pts: m.pts }
+      p.audioNodes.push(rec)
+      node.onended = () => {
+        const idx = p.audioNodes.indexOf(rec)
+        if (idx !== -1) p.audioNodes.splice(idx, 1)
+      }
+      node.start(startCtx)
+    } else if (m.type === 'subText') {
+      p.subCues.push({ kind: 'text', start: m.start, end: m.end, text: m.text })
+    } else if (m.type === 'subBitmap') {
+      p.subCues.push({ kind: 'bitmap', start: m.start, end: m.end, x: m.x, y: m.y, w: m.w, h: m.h, cw: m.cw, ch: m.ch, buf: m.buf })
+    } else if (m.type === 'eof') {
+      p.eof = true
+    }
+  }
+
+  let lastClockReport = 0
+  function tick () {
+    if (player !== p) return
+    p.raf = requestAnimationFrame(tick)
+    const now = currentMediaTime()
+
+    if (p.audioCtx && p.audioNodes.length > 0) {
+      const ct = p.audioCtx.currentTime
+      for (const a of p.audioNodes) {
+        if (ct >= a.startCtx && ct <= a.endCtx) {
+          p.audioBaseMedia = a.pts + (ct - a.startCtx)
+          p.audioBaseCtx = ct
+          break
+        }
+      }
+    }
+
+    if (p.useMse && p.mseReady && !p.paused && p.audioStarted) {
+      const drift = video.currentTime - now
+      if (Math.abs(drift) > 0.35) video.currentTime = now
+      else if (drift > 0.08) video.playbackRate = 0.96
+      else if (drift < -0.08) video.playbackRate = 1.04
+      else if (video.playbackRate !== 1) video.playbackRate = 1
+    } else if (!p.useMse && p.swFrames.length > 0 && !p.paused) {
+      let pick = null
+      while (p.swFrames.length > 0 && p.swFrames[0].pts <= now + 0.02) {
+        pick = p.swFrames.shift()
+      }
+      if (!pick && p.drawnFrames === 0) pick = p.swFrames.shift()
+      if (pick) {
+        if (canvas.width !== pick.w || canvas.height !== pick.h) {
+          canvas.width = pick.w
+          canvas.height = pick.h
+        }
+        ctx2d.putImageData(new ImageData(new Uint8ClampedArray(pick.buf), pick.w, pick.h), 0, 0)
+        p.drawnFrames++
+      }
+    }
+
+    if (p.subCues.length > 0) {
+      p.subCues = p.subCues.filter(c => c.end >= now - 2)
+      const activeTexts = []
+      let activeBmp = null
+      for (const c of p.subCues) {
+        if (now >= c.start && now <= c.end) {
+          if (c.kind === 'text') activeTexts.push(c.text)
+          else activeBmp = c
+        }
+      }
+      const joined = activeTexts.join('\\n')
+      if ($('pSubText').textContent !== joined) $('pSubText').textContent = joined
+      if (activeBmp) {
+        if (subCanvas.width !== activeBmp.cw || subCanvas.height !== activeBmp.ch) {
+          subCanvas.width = activeBmp.cw
+          subCanvas.height = activeBmp.ch
+        }
+        subCtx.clearRect(0, 0, subCanvas.width, subCanvas.height)
+        if (activeBmp.w > 0 && activeBmp.h > 0) {
+          subCtx.putImageData(new ImageData(new Uint8ClampedArray(activeBmp.buf), activeBmp.w, activeBmp.h), activeBmp.x, activeBmp.y)
+        }
+      } else {
+        subCtx.clearRect(0, 0, subCanvas.width, subCanvas.height)
+      }
+    }
+
+    if (!p.seeking && p.duration > 0) {
+      $('pSeek').value = String(Math.min(1000, Math.round((now / p.duration) * 1000)))
+    }
+    $('pClock').textContent = fmtClock(now) + ' / ' + fmtClock(p.duration)
+
+    const pf = performance.now()
+    if (pf - lastClockReport > 250) {
+      lastClockReport = pf
+      p.worker.postMessage({ cmd: 'clock', time: now, paused: p.paused })
+    }
+  }
+  p.raf = requestAnimationFrame(tick)
+
+  const extMatch = (entry.streamUrl || '').split('?')[0].split('.').pop() || ''
+  p.worker.postMessage({ cmd: 'open', streamUrl, wasmUrl: location.origin + '/web/peartube_web.wasm', ext: extMatch.length <= 5 ? extMatch : '' })
+  return p
+}
+
+function togglePlay () {
+  if (!player) return
+  const now = (() => {
+    if (player.paused) return player.freeBaseMedia
+    if (player.audioStream >= 0 && player.audioCtx && player.audioStarted) {
+      return player.audioBaseMedia + Math.max(0, player.audioCtx.currentTime - player.audioBaseCtx)
+    }
+    if (player.useMse && !$('pVideo').paused) return $('pVideo').currentTime
+    return player.freeBaseMedia + Math.max(0, (performance.now() - player.freeBasePerf) / 1000)
+  })()
+  player.paused = !player.paused
+  player.freeBaseMedia = now
+  player.freeBasePerf = performance.now()
+  $('pPlayBtn').textContent = player.paused ? 'Play' : 'Pause'
+  if (player.paused) {
+    player.audioCtx?.suspend?.().catch(() => {})
+    if (player.useMse) $('pVideo').pause()
+  } else {
+    if (player.audioCtx) {
+      player.audioCtx.resume().then(() => {
+        if (player) { player.audioBaseMedia = now; player.audioBaseCtx = player.audioCtx.currentTime }
+      }).catch(() => {})
+    }
+    if (player.useMse) $('pVideo').play().catch(() => {})
+  }
+}
+
+function seekTo (targetSecs) {
+  if (!player) return
+  const clamped = Math.max(0, player.duration > 0 ? Math.min(player.duration, targetSecs) : targetSecs)
+  player.seq++
+  player.eof = false
+  $('pStatus').style.display = ''
+  $('pStatus').textContent = 'Seeking…'
+  for (const s of player.audioNodes) { try { s.node.stop(); s.node.disconnect() } catch {} }
+  player.audioNodes.length = 0
+  player.nextAudioCtxTime = 0
+  player.audioStarted = false
+  player.audioBaseMedia = clamped
+  player.freeBaseMedia = clamped
+  player.freeBasePerf = performance.now()
+  player.swFrames.length = 0
+  player.drawnFrames = 0
+  player.subCues.length = 0
+  $('pSubText').textContent = ''
+  $('pSubCanvas').getContext('2d').clearRect(0, 0, $('pSubCanvas').width, $('pSubCanvas').height)
+  if (player.useMse) {
+    const v = $('pVideo')
+    v.pause()
+    if (player.msUrl) { try { URL.revokeObjectURL(player.msUrl) } catch {} player.msUrl = '' }
+    player.mseQueue.length = 0
+    player.sb = null
+    player.mseReady = false
+    const MS = window.MediaSource || window.ManagedMediaSource
+    const mime = 'video/mp4; codecs="' + player.manifest.mseCodec + '"'
+    const ms = new MS()
+    player.ms = ms
+    player.msUrl = URL.createObjectURL(ms)
+    v.src = player.msUrl
+    ms.addEventListener('sourceopen', () => {
+      if (!player || player.ms !== ms) return
+      const sb = ms.addSourceBuffer(mime)
+      sb.mode = 'segments'
+      player.sb = sb
+      sb.addEventListener('updateend', () => {
+        if (!player || player.sb !== sb) return
+        if (!player.mseReady && sb.buffered.length > 0) {
+          player.mseReady = true
+          v.currentTime = Math.max(sb.buffered.start(0), clamped)
+          $('pStatus').style.display = 'none'
+          if (!player.paused) v.play().catch(() => {})
+        }
+        if (!sb.updating && player.mseQueue.length > 0) {
+          try { sb.appendBuffer(player.mseQueue.shift()) } catch {}
+        }
+      })
+      if (player.mseQueue.length > 0) {
+        try { sb.appendBuffer(player.mseQueue.shift()) } catch {}
+      }
+    }, { once: true })
+  }
+  player.worker.postMessage({
+    cmd: 'seek',
+    seq: player.seq,
+    time: clamped,
+    videoStream: player.videoStream,
+    audioStream: player.audioStream,
+    subStream: player.subStream,
+    useMse: player.useMse
+  })
+}
+
+$('pCloseBtn').onclick = closePlayer
+$('pPlayBtn').onclick = togglePlay
+$('pStage').onclick = togglePlay
+$('pStage').ondblclick = () => $('pFsBtn').click()
+$('pBackBtn').onclick = () => player && seekTo((player.freeBaseMedia || 0) - 10)
+$('pFwdBtn').onclick = () => player && seekTo((player.freeBaseMedia || 0) + 10)
+$('pFsBtn').onclick = () => {
+  const m = $('playerModal')
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+  else m.requestFullscreen?.().catch(() => {})
+}
+$('pSeek').onpointerdown = () => { if (player) player.seeking = true }
+$('pSeek').onchange = () => {
+  if (!player) return
+  player.seeking = false
+  if (player.duration > 0) seekTo((Number($('pSeek').value) / 1000) * player.duration)
+}
+$('pAudioSel').onchange = () => {
+  if (!player) return
+  player.audioStream = Number($('pAudioSel').value)
+  seekTo(player.freeBaseMedia || 0)
+}
+$('pSubSel').onchange = () => {
+  if (!player) return
+  player.subStream = Number($('pSubSel').value)
+  seekTo(player.freeBaseMedia || 0)
+}
+$('pMuteBtn').onclick = () => {
+  const muted = $('pMuteBtn').dataset.muted === '1' ? '0' : '1'
+  $('pMuteBtn').dataset.muted = muted
+  $('pMuteBtn').textContent = muted === '1' ? 'Unmute' : 'Mute'
+  if (player?.gainNode) player.gainNode.gain.value = muted === '1' ? 0 : (Number($('pVol').value) / 100)
+}
+$('pVol').oninput = () => {
+  $('pMuteBtn').dataset.muted = '0'
+  $('pMuteBtn').textContent = 'Mute'
+  if (player?.gainNode) player.gainNode.gain.value = Number($('pVol').value) / 100
+}
+addEventListener('keydown', ev => {
+  if (!player) return
+  if (ev.key === 'Escape') { ev.preventDefault(); closePlayer() }
+  else if (ev.key === ' ') { ev.preventDefault(); togglePlay() }
+  else if (ev.key === 'ArrowLeft') { ev.preventDefault(); $('pBackBtn').click() }
+  else if (ev.key === 'ArrowRight') { ev.preventDefault(); $('pFwdBtn').click() }
+  else if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); $('pFsBtn').click() }
+  else if (ev.key === 'm' || ev.key === 'M') { ev.preventDefault(); $('pMuteBtn').click() }
+})
 </script>
 </body>
 </html>

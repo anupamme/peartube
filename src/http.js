@@ -1,4 +1,6 @@
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import b4a from 'b4a'
 import { page } from './ui.js'
 import { receiverPage } from './cast-ui.js'
@@ -6,8 +8,26 @@ import { receiverPage } from './cast-ui.js'
 const MAX_BODY = 64 * 1024
 const CORS = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
-  'access-control-allow-headers': 'content-type, authorization'
+  'access-control-allow-methods': 'GET, HEAD, POST, DELETE, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization, range',
+  'access-control-expose-headers': 'content-length, content-range, accept-ranges'
+}
+
+// Caches compiled WASM player flesh in memory on first lick so browser streams open instantly on relays and daemons.
+const webCache = new Map()
+function readWebAsset (name) {
+  if (webCache.has(name)) return webCache.get(name)
+  const candidates = []
+  try { candidates.push(decodeURIComponent(new URL('../web/assets/' + name, import.meta.url).pathname)) } catch {}
+  candidates.push(join('web', 'assets', name))
+  for (const file of candidates) {
+    try {
+      const buf = readFileSync(file)
+      webCache.set(name, buf)
+      return buf
+    } catch {}
+  }
+  return null
 }
 
 function stremioToPearId (raw) {
@@ -210,6 +230,20 @@ export function createApi (state) {
     if (req.method === 'GET' && url.pathname === '/') {
       res.writeHead(200, { ...CORS, 'content-type': 'text/html; charset=utf-8' })
       res.end(page)
+      return
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && (url.pathname === '/web/peartube_web.wasm' || url.pathname === '/web/player-worker.js')) {
+      const name = url.pathname.slice(5)
+      const asset = readWebAsset(name)
+      if (!asset) { res.writeHead(404, CORS); res.end('not found'); return }
+      const mime = name.endsWith('.wasm') ? 'application/wasm' : 'text/javascript; charset=utf-8'
+      res.writeHead(200, { ...CORS, 'content-type': mime, 'content-length': String(asset.byteLength), 'cache-control': 'no-cache' })
+      res.end(req.method === 'HEAD' ? undefined : asset)
+      return
+    }
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/v1/blob' && state.node?.blobServer) {
+      req.url = '/' + url.search
+      state.node.blobServer._onrequest(req, res)
       return
     }
     if (req.method === 'GET' && (url.pathname === '/tv' || url.pathname === '/cast/receiver') && state.cast) {

@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto'
 import { pipelinePromise, Transform } from 'streamx'
 import { readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { tuneUdxSocket } from './lan.js'
 const ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
 const HEX64 = /^[0-9a-f]{64}$/
 const MAX_TITLE = 300
@@ -144,7 +145,9 @@ export async function createNode ({
   const store = new Corestore(join(storage, 'corestore'))
   const wakeup = new ProtomuxWakeup()
   let onPeersChanged = null
+  let viewEpoch = 1
   const update = () => {
+    viewEpoch++
     if (onchange) queueMicrotask(onchange)
     if (onPeersChanged) queueMicrotask(onPeersChanged)
   }
@@ -193,8 +196,8 @@ export async function createNode ({
   const privateOpts = relay => ({ release: 'alpha', acknowledgeAlpha: true, mode: 'optional', profile: 'spliced', relay })
   const writerSecret = privateRelay ? tracker.local.keyPair?.secretKey : null
   if (privateRelay && !writerSecret) throw new Error('Private relay requires a local writer secret')
-  const dhtRelay = privateRelay ? new HyperDHT({ host, bootstrap, seed: createHash('sha256').update('peartube/private-relay/v1').update(writerSecret).digest(), port: typeof privateRelay === 'number' ? privateRelay : dhtPort, ephemeral: false, firewalled: false, privateRouting: privateOpts(true) }) : null
-  const dht = privateRouting ? new HyperDHT({ host, bootstrap, port: dhtRelay ? 0 : dhtPort, privateRouting: typeof privateRouting === 'object' ? privateRouting : privateOpts(false) }) : null
+  const dhtRelay = privateRelay ? new HyperDHT({ host, bootstrap, seed: createHash('sha256').update('peartube/private-relay/v1').update(writerSecret).digest(), port: typeof privateRelay === 'number' ? privateRelay : (dhtPort || [0, 0]), ephemeral: false, firewalled: false, privateRouting: privateOpts(true) }) : null
+  const dht = privateRouting ? new HyperDHT({ host, bootstrap, port: dhtRelay ? [0, 0] : (dhtPort || [0, 0]), privateRouting: typeof privateRouting === 'object' ? privateRouting : privateOpts(false) }) : null
   let closing = false
   if (host) {
     if (dhtRelay) await dhtRelay.privateRouting.ready()
@@ -239,11 +242,16 @@ export async function createNode ({
   }
 
   let allowedSet = Array.isArray(allowedPeers) && allowedPeers.length ? new Set(allowedPeers.map(k => String(k).toLowerCase())) : null
-  const firewall = remotePublicKey => allowedSet ? !allowedSet.has(b4a.toString(remotePublicKey, 'hex')) : false
+  const lanPeers = new Set()
+  const hasLanPeer = keyBuf => Boolean(keyBuf && [...lanPeers].some(c => !c.destroyed && c.remotePublicKey && b4a.equals(c.remotePublicKey, keyBuf)))
+  const firewall = remotePublicKey => (allowedSet ? !allowedSet.has(b4a.toString(remotePublicKey, 'hex')) : false) || hasLanPeer(remotePublicKey)
   const bucket = () => ({ closedRx: 0, closedTx: 0, prevRx: 0, prevTx: 0, downBps: 0, upBps: 0 })
   const traffic = { private: bucket(), public: bucket(), lan: bucket() }
   let prevRx = 0, prevTx = 0, prevAt = Date.now(), downBps = 0, upBps = 0
+  const tuneDht = inst => inst?.ready?.().then(() => { tuneUdxSocket(inst.io?.serverSocket); tuneUdxSocket(inst.io?.clientSocket) }).catch(() => {})
   const trackConn = (conn, path) => {
+    tuneUdxSocket(conn.rawStream?.socket)
+    tuneUdxSocket(conn.rawStream?.rawStream?.socket)
     conn.once('close', () => {
       path.closedRx += conn.rawBytesRead || conn.rawStream?.bytesReceived || 0
       path.closedTx += conn.rawBytesWritten || conn.rawStream?.bytesTransmitted || 0
@@ -254,17 +262,20 @@ export async function createNode ({
     dht,
     maxParallel: 16,
     bootstrap,
-    port: dhtPort,
+    port: dhtPort || [0, 0],
     firewall,
     relayThrough: relayThrough && (force => force ? relayThrough.map(k => b4a.from(k, 'hex')) : null)
   })
-  const hasLanPeer = keyBuf => Boolean(keyBuf && [...lanPeers].some(c => !c.destroyed && c.remotePublicKey && b4a.equals(c.remotePublicKey, keyBuf)))
-  swarm.on('connection', conn => trackConn(conn, dht ? traffic.private : traffic.public))
-
+  tuneDht(dhtRelay)
+  tuneDht(swarm.dht)
+  swarm.on('connection', conn => {
+    if (hasLanPeer(conn.remotePublicKey)) { conn.destroy(); return }
+    trackConn(conn, dht ? traffic.private : traffic.public)
+  })
   const privateTopic = keyBuf => createHash('sha256').update('peartube/private/v1/').update(keyBuf).update(String(Math.floor(Date.now() / 86_400_000))).digest()
   const discoveries = new Map()
   const lanTopics = new Map()
-  const lanPeers = new Set()
+  // lanPeers declared above so swarm firewall yields to direct LAN sockets
   let lan = null
 
   function joinOverlayTopic (id, keyBuf, discKey) {
@@ -279,8 +290,10 @@ export async function createNode ({
 
   async function leaveOverlayTopic (id) {
     const disc = discoveries.get(id)
+    const discKey = lanTopics.get(id)
     discoveries.delete(id)
     lanTopics.delete(id)
+    if (discKey) lan?.leave?.(discKey)
     if (disc) await swarm.leave(disc.topic).catch(() => {})
   }
 
@@ -455,6 +468,11 @@ export async function createNode ({
     next.on('connection', conn => {
       lanPeers.add(conn)
       conn.once('close', () => lanPeers.delete(conn))
+      if (conn.remotePublicKey) {
+        for (const sc of swarm.connections) {
+          if (!sc.destroyed && sc.remotePublicKey && b4a.equals(sc.remotePublicKey, conn.remotePublicKey)) sc.destroy()
+        }
+      }
       trackConn(conn, traffic.lan)
     })
     try {
@@ -480,6 +498,20 @@ export async function createNode ({
     return server.getLink(b4a.from(entry.blobs, 'hex'), { blob: entry.blob })
   }
 
+  function syncBlockCounter (core) {
+    core._ptBlocks = core.length > 0 ? core.core.bitfield.countSet(0, core.length) : 0
+    core._ptSeq = (core._ptSeq || 0) + 1
+    core._ptSlices?.clear()
+  }
+
+  function ensureBlockCounter (core) {
+    if (core._ptBlocks !== undefined) return
+    core._ptSlices = new Map()
+    syncBlockCounter(core)
+    core.on('download', () => { core._ptBlocks++; core._ptSeq++; core._ptSlices.clear() })
+    core.on('append', () => syncBlockCounter(core))
+  }
+
   async function blobCore (hex) {
     let core = blobCores.get(hex)
     if (!core) {
@@ -488,6 +520,7 @@ export async function createNode ({
       blobCores.set(hex, core)
     }
     if (!core.opened) await core.ready()
+    ensureBlockCounter(core)
     return core
   }
 
@@ -515,8 +548,16 @@ export async function createNode ({
   function entryCachedBytes (core, entry) {
     const { blockOffset, blockLength } = entry.blob
     if (!core?.opened || blockLength <= 0 || core.length <= blockOffset) return 0
+    ensureBlockCounter(core)
+    if (core._ptBlocks === 0) return 0
     const len = Math.min(blockLength, core.length - blockOffset)
-    const blocks = core.core.bitfield.countSet(blockOffset, len)
+    const tag = `${blockOffset}:${len}`
+    let blocks = core._ptSlices.get(tag)
+    if (blocks === undefined) {
+      blocks = core.core.bitfield.countSet(blockOffset, len)
+      if (core._ptSlices.size >= 512) core._ptSlices.clear()
+      core._ptSlices.set(tag, blocks)
+    }
     if (blocks <= 0) return 0
     return blocks >= blockLength ? entry.size : Math.min(entry.size, Math.round((blocks / blockLength) * entry.size))
   }
@@ -592,7 +633,11 @@ export async function createNode ({
     })
   }
 
+  let discoveredCache = null
+  let discoveredAtEpoch = 0
   async function discoveredSources () {
+    if (discoveredCache && discoveredAtEpoch === viewEpoch) return discoveredCache
+    const epochSnap = viewEpoch
     const active = new Set(listSources().map(s => s.key))
     const found = new Map()
     const scan = async (view, via) => {
@@ -609,7 +654,10 @@ export async function createNode ({
       if (s.kind === 'tracker') await s.bee.update()
       await scan(s.kind === 'tracker' ? s.bee.view : s.bee, s.key)
     }
-    return [...found.values()]
+    const list = [...found.values()]
+    discoveredCache = list
+    discoveredAtEpoch = epochSnap
+    return list
   }
 
   async function findEntry (key) {
@@ -711,6 +759,7 @@ export async function createNode ({
       let reclaimedBytes = 0
       if (clearedBytes > 0 && entry.blob.blockLength > 0 && core.length > entry.blob.blockOffset) {
         await core.clear(entry.blob.blockOffset, Math.min(core.length, entry.blob.blockOffset + entry.blob.blockLength))
+        syncBlockCounter(core)
         reclaimedBytes = (await gcStorage({ full: false })).reclaimedBytes
         update()
       }
@@ -722,10 +771,12 @@ export async function createNode ({
     let clearedBytes = 0
     for (const [hex, core] of blobCores) {
       if (blobSlots.some(s => s.key === hex) || !core.opened || core.length === 0) continue
-      const blocks = core.core.bitfield.countSet(0, core.length)
+      ensureBlockCounter(core)
+      const blocks = core._ptBlocks
       if (blocks > 0) {
         clearedBytes += Math.min(core.byteLength, Math.round((blocks / core.length) * core.byteLength))
         await clearDownloadedSpans(core)
+        syncBlockCounter(core)
       }
     }
     const { reclaimedBytes } = await gcStorage({ full: true })
@@ -1014,7 +1065,8 @@ export async function createNode ({
     for (const c of store.cores) inflightBlocks += c.replicator?._inflight?.length || 0
     for (const [k, c] of blobCores) {
       if (!blobSlots.some(s => s.key === k) && c.opened && c.length > 0 && c.byteLength > 0) {
-        const blocks = c.core.bitfield.countSet(0, c.length)
+        ensureBlockCounter(c)
+        const blocks = c._ptBlocks
         if (blocks > 0) {
           cachedBytes += Math.min(coreByteLen(c), Math.round((blocks / c.length) * coreByteLen(c)))
           joinContentSwarm(k)
@@ -1099,6 +1151,7 @@ export async function createNode ({
     clearCache,
     status,
     streamUrl,
+    blobServer: server,
     setLan,
     close,
     get closing () { return closing }

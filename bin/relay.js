@@ -145,7 +145,7 @@ const node = await createNode({
   privateRouting: Boolean(env.PEARTUBE_PRIVATE_ROUTING),
   privateRelay: env.PEARTUBE_PRIVATE_RELAY_PORT ? Number(env.PEARTUBE_PRIVATE_RELAY_PORT) : Boolean(env.PEARTUBE_PRIVATE_RELAY),
   relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
-  lan: env.PEARTUBE_LAN_HOST ? keyPair => createLan({ host: env.PEARTUBE_LAN_HOST, port: Number(env.PEARTUBE_LAN_PORT || 49799), keyPair }) : null,
+  lan: env.PEARTUBE_LAN_HOST ? keyPair => createLan({ host: env.PEARTUBE_LAN_HOST, keyPair }) : null,
   onchange: () => api.notify('update')
 })
 state.node = node

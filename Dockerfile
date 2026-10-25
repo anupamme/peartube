@@ -17,6 +17,7 @@ COPY patches/hypercore/blob-server.js ./node_modules/hypercore-blob-server/index
 COPY patches/hypercore/byte-stream.js ./node_modules/hypercore-byte-stream/index.js
 COPY src ./src
 COPY bin ./bin
+COPY web/assets ./web/assets
 ENV PEARTUBE_STORAGE=/data
 VOLUME /data
 EXPOSE 8174 8175

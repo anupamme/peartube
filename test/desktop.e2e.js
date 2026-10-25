@@ -52,8 +52,7 @@ test('the app worklet streams a relay entry and follows the tracker live', async
 // DHT is reachable at all: both sides bootstrap to a dead address, so every
 // byte must come over LAN discovery. The worklet picks this machine's Wi-Fi or
 // Ethernet address itself; the relay listens on the same address, as
-// PEARTUBE_LAN_HOST would make it. The LAN ports must be free: 49799 for the
-// relay, 49798 for the app, so quit the desktop app and any local relay first.
+// PEARTUBE_LAN_HOST would make it, over ephemeral UDP ports advertised in mDNS.
 test('the app worklet finds a relay on the LAN and streams from it', async t => {
   const host = lanAddress(networkInterfaces())
   if (!host) return t.skip('no Wi-Fi or Ethernet IPv4 on this machine')

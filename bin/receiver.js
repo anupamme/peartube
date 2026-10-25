@@ -260,7 +260,7 @@ if (!thin) {
     bootstrap: bootstrap ? bootstrap.split(',').map(s => s.trim()).filter(Boolean) : undefined,
     privateRouting: Boolean(env.PEARTUBE_PRIVATE_ROUTING),
     relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
-    lan: lanIp ? keyPair => createLan({ host: lanIp, port: Number(env.PEARTUBE_LAN_PORT || 49797), keyPair, adapter: interfaceAdapter(lanIp) }) : null
+    lan: lanIp ? keyPair => createLan({ host: lanIp, keyPair, adapter: interfaceAdapter(lanIp) }) : null
   })
 }
 
@@ -281,7 +281,7 @@ const lanWatcher = setInterval(async () => {
   lanIp = nextIp
   await receiver.setHost(lanIp).catch(() => {})
   if (node) {
-    await node.setLan(lanIp && (keyPair => createLan({ host: lanIp, port: Number(env.PEARTUBE_LAN_PORT || 49797), keyPair, adapter: interfaceAdapter(lanIp) }))).catch(() => {})
+    await node.setLan(lanIp && (keyPair => createLan({ host: lanIp, keyPair, adapter: interfaceAdapter(lanIp) }))).catch(() => {})
   }
 }, 10_000)
 lanWatcher.unref?.()

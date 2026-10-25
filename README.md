@@ -1,10 +1,10 @@
 # PearTube
 
-A decentralized P2P media CDN, debrid acquirer, and native streaming player on the Holepunch stack (`Corestore`, `Autobee`, `Hyperbee`, `Hyperblobs`, `Hyperswarm`, `HyperDHT`, `Bare`).
+PearTube lets you host videos on your own server or NAS and stream them between peers, built with [Holepunch](https://holepunch.to).
 
-Nodes share open multi-writer trackers ([Autobee](https://github.com/holepunchto/autobee)), single-writer channels (`Hyperbee`), source directories, and `peartube://watch/…` magnet links. Files are stored as 512 KiB `Hyperblobs` slices and served over HTTP Range. Blocks come from whichever peers have them, and every reading relay, phone, desktop, or TV keeps what it streams and seeds it from then on.
+Videos are split into small pieces (up to about half a megabyte each) so you can start watching or seek ahead without downloading the whole file first. Relays, phones, desktops, and TVs fetch the pieces they need from whichever peers hold them, cache watched pieces locally, and share them with other viewers while online.
 
-No one grants write access on an open tracker: each entry is filed under its writer's key, and every peer builds its own view locally through `apply` (`fastForward: false`). On a channel, only the secret-key holder can publish, while subscribers replicate and seed both the catalog and the blobs.
+Catalogs come in two forms: **shared Trackers**, where anyone with the tracker key can add listings under their own writer key, and **personal Channels**, where only the channel owner can publish listings while subscribers still help distribute the catalog and video pieces.
 
 ## Run a relay
 
@@ -13,7 +13,7 @@ npm install
 PEARTUBE_TRACKER=<tracker key> npm start
 ```
 
-Leave `PEARTUBE_TRACKER` unset to found a new tracker; the relay prints its `tracker` and `channel` keys on startup (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` for the acquisitions UI, point Stremio at `http://<relay>:8174/manifest.json`, load `http://<relay>:8174/v1/playlist.m3u` in VLC/MPV/IINA/Kodi, or open `http://<relay>:8174/tv` on a Smart TV browser.
+Leave `PEARTUBE_TRACKER` unset to found a new tracker; the relay prints its `tracker` and `channel` keys on startup (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` for the web UI, `http://<relay>:8174/manifest.json` in Stremio, `http://<relay>:8174/v1/playlist.m3u` in VLC/MPV/IINA/Kodi, or `http://<relay>:8174/tv` on a Smart TV browser. Run an unauthenticated relay only on a trusted network (anyone who can reach it can queue downloads unless `PEARTUBE_API_TOKEN` is set).
 
 Prebuilt multi-arch container (`linux/amd64` and `linux/arm64`, published from `main` by CI):
 
@@ -53,20 +53,19 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 | `PEARTUBE_PRIVATE_RELAY_PORT` | `PEARTUBE_DHT_PORT` | Dedicated UDP port for the embedded private-route relay |
 | `PEARTUBE_RELAY_THROUGH` | none | Comma-separated blind relay keys |
 | `PEARTUBE_LAN_HOST` | off | This machine's LAN IPv4; turns on mDNS discovery of relays on the local network |
-| `PEARTUBE_LAN_PORT` | `49799` | UDP port of the LAN DHT |
 | `PEARTUBE_SOURCES` | none | Comma-separated extra channel/tracker keys or `peartube://` URIs to subscribe to |
 | `PEARTUBE_PUBLISH_CHANNEL` | `1` on relays | Mirror existing saved tracker blobs and future acquisitions into this relay's single-writer `Hyperbee` channel (`0` disables) |
-| `PEARTUBE_DIRECTORY` | off | `1`: turn this relay into a directory hub that automatically advertises every subscribed channel/tracker in both its tracker and channel |
-| `PEARTUBE_WATCH_DIR` | none | Optional local folder (e.g. `/data/import`) watched by the `watch-dir` mirror plugin |
-| `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON manifest or peer relay `/v1/entries` URLs polled by `feed-mirror` |
-| `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for drop-in custom mirror plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
+| `PEARTUBE_DIRECTORY` | off | `1`: publish a list of subscribed channels and trackers so other peers can discover them |
+| `PEARTUBE_WATCH_DIR` | none | Optional local folder (e.g. `/data/import`) automatically imported once per file |
+| `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON feed or peer `/v1/entries` URLs to import automatically |
+| `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |
 | `PEARTUBE_API_TOKEN` | none | Optional Bearer token required on mutating `POST`/`DELETE` `/v1/*` routes |
 
 ### Reachability
 
-HyperDHT cannot holepunch between two randomized NATs (it aborts the holepunch). Relays on the same network can still find each other: set `PEARTUBE_LAN_HOST` on each, and they discover one another over mDNS and connect directly on `PEARTUBE_LAN_PORT`, with no internet path or port forward. This works across subnets when the router reflects mDNS and routes UDP between them. For relays on different networks, forward a UDP port and set `PEARTUBE_DHT_PORT`, or use a blind relay via `PEARTUBE_RELAY_THROUGH`.
+HyperDHT cannot holepunch between two randomized NATs (it aborts the holepunch). Relays on the same network can still find each other: set `PEARTUBE_LAN_HOST` on each, and they discover one another over mDNS and connect directly over ephemeral UDP ports, with no internet path or port forward. This works across subnets when the router reflects mDNS and routes UDP between them. For relays on different networks, forward a UDP port and set `PEARTUBE_DHT_PORT`, or use a blind relay via `PEARTUBE_RELAY_THROUGH`.
 
 Private routing is **early alpha and needs real-world WAN testing**. It requires at least four reachable, distinct relay identities, and at least one relay must set both `PEARTUBE_PRIVATE_ROUTING=1` and `PEARTUBE_PRIVATE_RELAY=1` so private-only peers can find an anchor before exchanging their expiring peer keys through the tracker. Upgrade every peer before relying on this property: older builds still announce endpoint IPs directly.
 
@@ -82,36 +81,35 @@ One port serves the acquisitions page at `/`, the `/v1` API, the Stremio v3 addo
 | `POST /v1/acquire` `{id, title, source: {url, headers}}` | Fetch a source, store it, announce it |
 | `GET /v1/jobs`, `GET /v1/jobs/:jobId`, `DELETE /v1/jobs/:jobId` | Acquire jobs (sources are never returned) |
 | `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic |
-| `GET /v1/sources` | Active trackers/channels, this node's single-writer `channel` key, and gossip-discovered sources |
-| `POST /v1/sources` `{uri}` or `{key, kind, alias}`, `DELETE /v1/sources/:key` | Subscribe to or remove an open tracker (`Autobee`) or single-writer channel (`Hyperbee`) |
-| `POST /v1/channel/publish`, `DELETE /v1/channel/sources/:key` | Publish an entry or gossip `{type: "source", sourceKey, kind, title, target}` directory record, or unlist a directory record |
-| `POST /v1/open` `{uri}`, `GET /v1/resolve?uri=…` | Handle `peartube://channel/…`, `peartube://tracker/…`, `peartube://receiver/…` pairing links, or zero-subscription `peartube://watch/…` magnet playback |
-| `POST /v1/cache/clear` `{key?}` | Clear cached blob blocks for one entry or all non-local streams while retaining Merkle tree nodes and compacting RocksDB |
+| `GET /v1/sources` | Followed trackers/channels, this node's `channel` key, and catalogs discovered through peers |
+| `POST /v1/sources` `{uri}` or `{key, kind, alias}`, `DELETE /v1/sources/:key` | Follow or remove a shared tracker or channel |
+| `POST /v1/channel/publish`, `DELETE /v1/channel/sources/:key` | Publish an entry or a link to another catalog (`{type: "source", sourceKey, kind, title, target}`), or remove a catalog link |
+| `POST /v1/open` `{uri}`, `GET /v1/resolve?uri=…` | Open a `peartube://channel/…`, `peartube://tracker/…`, `peartube://receiver/…` pairing link, or direct `peartube://watch/…` video link without subscribing first |
+| `POST /v1/cache/clear` `{key?}` | Clear cached video data for one entry or all non-local streams |
 | `GET /v1/events` | Server-Sent Events (`text/event-stream`) live update stream for external UIs |
-| `GET /manifest.json`, `/catalog/:type/:id.json`, `/stream/:type/:id.json` | Stremio v3 addon bridge (`tt…`, `tt…:S:E`, `imdb:…`) |
-| `GET /v1/plugins`, `POST /v1/plugins/:name/run`, `POST /v1/mirror` | List or run mirror plugins (`http-acquire`, `channel-backfill`, `watch-dir`, `feed-mirror`, plus drop-in `/data/plugins/*.mjs` modules) |
-| `GET /v1/playlist.m3u` | M3U8 playlist across all subscribed channels and trackers (VLC, MPV, IINA, Kodi) |
-| `GET /tv`, `GET /cast/receiver` | Zero-install 10-foot Smart TV Web Receiver (LG webOS, Samsung Tizen, consoles, kiosk browsers) |
-| `GET /v1/cast/status`, `POST /v1/cast/pair`, `DELETE /v1/cast/receivers/:id`, `POST /v1/cast/play`, `POST /v1/cast/attach`, `POST /v1/cast/control`, `POST /v1/cast/stop`, `POST /v1/cast/receiver/start` (`/stop`, `/rotate`) | Discover/pair TV receivers, cast or re-attach remote control over Hybrid HTTP + P2P streams, or manage a local receiver endpoint |
+| `GET /manifest.json`, `/catalog/:type/:id.json`, `/stream/:type/:id.json` | Stremio v3 addon (`tt…`, `tt…:S:E`, `imdb:…`) |
+| `GET /v1/plugins`, `POST /v1/plugins/:name/run`, `POST /v1/mirror` | List or run import plugins (`http-acquire`, `channel-backfill`, `watch-dir`, `feed-mirror`, plus `/data/plugins/*.mjs` modules) |
+| `GET /v1/playlist.m3u` | M3U8 playlist across followed channels and trackers (VLC, MPV, IINA, Kodi) |
+| `GET /tv`, `GET /cast/receiver` | Fullscreen TV page designed for remote controls (open in a TV browser; no install needed) |
+| `GET /v1/cast/status`, `POST /v1/cast/pair`, `DELETE /v1/cast/receivers/:id`, `POST /v1/cast/play`, `POST /v1/cast/attach`, `POST /v1/cast/control`, `POST /v1/cast/stop`, `POST /v1/cast/receiver/start` (`/stop`, `/rotate`) | Pair a TV, start playback, reconnect its remote control, or manage a local receiver |
 
 
-### Trackers vs. Channels, Magnet Links, and Swarm Incentives
+### Shared Trackers and personal Channels
 
-Trackers and channels share the same `Hyperblobs` media swarms underneath, with different write rules:
+Both are public catalogs of videos; the difference is who can add listings:
 
-| | Open Tracker (`peartube://tracker/<key>`) | Channel (`peartube://channel/<key>`) |
+| | Shared Tracker (`peartube://tracker/<key>`) | Personal Channel (`peartube://channel/<key>`) |
 |---|---|---|
-| **Store** | Multi-writer `Autobee` (`optimistic: true`, `fastForward: false`) | Single-writer `Hyperbee` (`hyperbee2` on one Ed25519 `Hypercore`) |
-| **Writers** | Anyone with the tracker key | Only the holder of the channel's secret key (`status.channel`) |
-| **Spam / forgery** | `apply` isolates keys under `${id}/${writer}/…` so nobody can touch another writer's entries, but anyone with the key can append under their own | Subscribers open it read-only (`writable: false`); strangers cannot append at all |
-| **Offline seeding** | Every peer replays writer oplogs locally and seeds fetched blobs | Subscribers mirror the signed tree and cached blobs, so the channel stays up when its owner is offline |
-| **Use** | Shared relay commons where multiple instances post mirrors for the same `imdb:…` id | Curated feeds, personal libraries, and directory hubs (`PEARTUBE_DIRECTORY=1`) |
+| **Who can publish** | Anyone with the tracker key | Only the node holding that channel's local publishing secret (share `status.channel` with subscribers) |
+| **Unwanted listings** | Contributors can add their own listings, not edit someone else's, and there is no moderation yet | Subscribers follow read-only and cannot add listings |
+| **When publisher is offline** | Other online peers continue serving the catalog and any video pieces they hold | Other online subscribers continue serving the catalog and any video pieces they hold |
+| **Typical use** | A shared catalog across several trusted relays | Your own published video library or a directory linking to other catalogs (`PEARTUBE_DIRECTORY=1`) |
 
-Every node has its own writable `channel` alongside its subscribed sources (`sources.json` / `PEARTUBE_SOURCES`; setting `sources` without `PEARTUBE_TRACKER` runs on channels alone). On relays, `PEARTUBE_PUBLISH_CHANNEL=1` (the default) lists local tracker blobs in the relay's channel without copying the underlying `Hyperblobs`. Both trackers and channels can also post `{type: "source", sourceKey, kind, title}` records so subscribers can find other sources (`discoveredSources`).
+Under the hood, trackers use multi-writer [Autobee](https://github.com/holepunchto/autobee) (`fastForward: false`, so every peer verifies writer keys locally through `apply`), channels use single-writer `Hyperbee`, and media pieces live in `Hyperblobs` (up to 512 KiB per block).
 
-Public nodes watching the same blob core across different channels, trackers, or standalone `peartube://watch/…` links join the same `peartube/blob/v1/<blobsKey>` swarm. Inflight block windows scale by reciprocity (`leecher` `[24, 64]`, `peer` `[48, 128]`, `seeder` `[64, 192]`), and opening a stream prefetches the first 4 MiB and last 1 MiB.
-
-The macOS GPUI app, Android Kotlin app, and native iOS SwiftUI development target all expose the same `/v1`, SSE, Stremio, and M3U server on `127.0.0.1` (`status.apiUrl`, defaulting to `127.0.0.1:8174` with automatic ephemeral port fallback), register the `peartube://` URL scheme with the OS, and enable mDNS LAN discovery by default on fresh installs. Subscribed source lists (`sources.json` / `settings.json`) stay in private local files outside the replicated Corestore.
+- **Your own channel**: Every node creates a local channel alongside the catalogs it follows (`sources.json` / `PEARTUBE_SOURCES`; setting `sources` without `PEARTUBE_TRACKER` follows channels alone). On relays, `PEARTUBE_PUBLISH_CHANNEL=1` (default) also lists local tracker imports in the relay's channel without duplicating the stored media.
+- **Directories**: Both trackers and channels can publish links to other catalogs (`discoveredSources`) so followers can find them.
+- **Shared video pieces across catalogs**: Viewers opening the same shared video file through different catalogs or a direct `peartube://watch/…` link join the same peer pool (`peartube/blob/v1/<blobsKey>`) and exchange pieces directly.
 
 
 ### Cast & TV Receivers (`peartube-cast/v1`)
@@ -160,7 +158,9 @@ The Mac release ships `PearTube-<version>-macos-arm64.zip` (and `PearTubeReceive
 xattr -dr com.apple.quarantine /Applications/PearTube.app
 ```
 
-Each app is a full P2P peer, not a thin client of one relay. It runs the same core as a relay (`src/index.js`) inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit): it subscribes to trackers and channels, opens `peartube://` magnet and source links, casts to TV receivers, displays live per-route P2P throughput/RTT/cache telemetry with one-tap cache clearing, and plays entries from the worklet's own blob server on `127.0.0.1`, pulling blocks from whichever peers hold them and seeding them afterwards (it never runs the HTTP acquirer). Playback uses the Rust player from [peartube-media](https://github.com/ayooooo123/peartube-media), in a native view with the controls drawn over it and a fullscreen mode: platform video decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The desktop E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
+The apps connect directly to peers rather than streaming everything through one relay: they follow trackers and channels, open `peartube://` links, cast to TVs, fetch the video pieces needed for playback, and share cached pieces while online (they never run the HTTP acquirer, and cached data can be cleared in the app). They also expose the same `/v1`, SSE, Stremio, and M3U server on `127.0.0.1` (`status.apiUrl`, defaulting to `127.0.0.1:8174` with ephemeral port fallback) and enable local mDNS discovery by default on fresh installs.
+
+Under the hood, each app runs `src/index.js` inside a Bare worklet from [bare-kit](https://github.com/holepunchto/bare-kit) and plays from the worklet's loopback blob server through the Rust player in [peartube-media](https://github.com/ayooooo123/peartube-media): platform hardware decoders (MediaCodec, VideoToolbox) where supported, software decoders otherwise, in a native view with overlay controls and fullscreen. Full VLC-format compatibility is still in development; decoder registration does not establish correct playback for every file. The desktop E2E covers H.264 video and FLAC audio, comparing decoded frames and samples with FFmpeg. The player buffers before starting and pauses its clock during source stalls.
 
 On first launch it asks for a tracker key (a relay's `GET /v1/status` shows it), and optionally blind relay keys, a DHT bootstrap list for a private network, and whether to find relays on this network. With that on, the app finds relays on the local network that run with `PEARTUBE_LAN_HOST` over mDNS, which works where the public DHT cannot connect two randomized NATs. It uses the device's Wi-Fi or Ethernet address and follows it from network to network. A line under the peer count shows what it is doing: the address it uses, or why it has none. Android drops Wi-Fi multicast unless an app holds a multicast lock, so the app holds one while it is open. macOS asks once whether the app may accept incoming connections; allow it, or LAN peers cannot connect. Settings live in the app's data directory. Each tracker's Corestore holds only what peers can serve again, so it lives outside backups: `~/Library/Caches/PearTube` on the Mac, the no-backup files directory on Android.
 
@@ -317,11 +317,11 @@ and a damaged video packet costs only its own picture instead of stopping the
 video. The Android app's native libraries no longer
 carry the build machine's temp-folder path.
 
-Version 0.4.29 coalesces raw TLS/HTTP socket chunks into 512 KiB `Hyperblobs` blocks during `put()`, switches 4-hop `privateRouting` to C-level UDX stream splicing, evicts dead relay and descriptor-storage endpoints so offline DHT records do not stall Kademlia quorum walks or circuit setup, and raises `Hyperswarm` `maxParallel` to 16.
+Version 0.4.29 groups imported streams into larger 512 KiB pieces (`put()`), updates how 4-hop `privateRouting` relays forward streams (`UDX` splicing), and drops stale relay records so offline nodes do not stall connection setup.
 
-Version 0.4.30 fixes mid-file seeks and high-RTT private streaming: Hypercore `_requestSeek` uses bounded O(1) bitfield lookups instead of linear scans, `getByteOffsetBatch` fixes an upstream Merkle-tree `NaN` fallback past ~23 GB so seeks resolve in 1 RTT, `BlobServer` preempts stale prefetches while keeping a rolling 16 MiB read-ahead window alive across concurrent Range probes, and spliced 4-hop UDX streams tune BBR/RACK (`rtprop_stamp` pinning, 50 ms `rttvar` floor, persistent `_wfree`) for multi-hop VPN paths. Both apps, the worklet, and the relay UI add live P2P down/up throughput, in-flight block counts, RTT, cached bytes, and one-tap cache clearing (`POST /v1/cache/clear`) that compacts RocksDB without discarding Merkle tree nodes.
+Version 0.4.30 fixes mid-file seeking in large (23 GB+) files, keeps read-ahead buffering alive across concurrent HTTP Range probes, tunes buffering for high-latency multi-hop routes, and adds live P2P transfer stats plus cache clearing (`POST /v1/cache/clear`) in the apps and relay UI.
 
-Version 0.4.31 removes the fixed `cwnd` cap on spliced private UDX streams, raises UDP socket buffers to 8 MiB with a 512-packet paced fast-start so BBR scales per circuit, and interleaves `_requestRangeBatch` block requests across parallel peer connections.
+Version 0.4.31 adjusts socket buffers, startup pacing, and parallel block requests on private routes.
 
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
@@ -397,18 +397,18 @@ CI runs core and Cast E2E suites and publishes the multi-arch `ghcr.io/ayooooo12
 
 ## Current status
 
-- Most real-world testing so far has been native playback and basic P2P streaming. The Stremio/M3U endpoints, TV casting (`peartube-cast/v1`), mirror plugins (`watch-dir`, `feed-mirror`), and multi-source channels/directories pass E2E tests, but have very little real-world use yet.
-- There is no browser upload UI, and open trackers (`peartube://tracker/…`) have no writer blocklists or moderation yet: anyone holding a tracker key can append entries under their own writer key (and shadow duplicate `imdb:…` cards in client lists). Share `peartube://channel/…` keys publicly and keep open tracker keys to trusted relays for now.
-- Private routing (`PEARTUBE_PRIVATE_ROUTING=1`) is early alpha and needs WAN testing across separate networks. It requires at least four independent reachable relay hops, adds multi-hop latency, still uses direct DHT bootstrap/lookups, and does not protect against traffic correlation.
-- Codec support in `peartube-media` covers common H.264/HEVC/XviD/MKV/MP4/AVI/FLAC/ASS/PGS files, not full VLC compatibility yet.
-- `ios/` is a sideload development target; macOS builds are Apple Silicon (`arm64`) and ad-hoc signed (not notarized, no Windows/Linux desktop builds yet); `/v1` auth is just an optional single Bearer token on `POST`/`DELETE`.
+- Most everyday testing so far has been native playback and basic P2P streaming. Casting (`peartube-cast/v1`), Stremio, M3U playlists, folder/feed import plugins, and multi-catalog directories pass automated end-to-end tests, but have had little real-world use yet.
+- There is no browser upload button, and shared trackers (`peartube://tracker/…`) have no moderation yet: anyone with a tracker key can add duplicate or unwanted listings that crowd out other results. Share `peartube://channel/…` links publicly and keep tracker keys to trusted relays for now.
+- Private routing (`PEARTUBE_PRIVATE_ROUTING=1`) is early alpha and does not make you anonymous. It needs testing across separate internet connections, requires at least four reachable relay hops, adds delay, and still exposes discovery/bootstrap traffic (see [Privacy rule](#privacy-rule)).
+- Common video, audio, and subtitle formats play in `peartube-media`, but compatibility is not yet as broad as VLC's.
+- Platform and access limits: `ios/` is a sideload development target; the Mac app (`arm64`) is not notarized yet, so macOS requires an extra step on first open; Windows and Linux desktop apps are not built yet; `/v1` authentication is just an optional single Bearer token on `POST`/`DELETE`.
 
 ## Goals
 
-- A P2P CDN and debrid network run by community relays, NAS boxes, and viewers without central servers.
-- VLC-grade hardware and Rust software playback across mobile, desktop (macOS, Linux, Windows), and TVs in a ~30 MB app, with no Electron or WebViews.
-- Curated single-writer channels and source directories alongside open trackers, all sharing one underlying blob swarm.
-- Fast, reliable multi-hop private routing and native P2P receivers across TV platforms.
+- Let community relays, NAS boxes, and viewers share hosting load without relying on one central media host.
+- Support more formats and desktop/TV platforms in `peartube-media` while keeping the native apps small (~30 MB).
+- Let people curate channels and directories while viewers still share pieces of the same video across catalogs.
+- Make private routing and TV playback reliable outside local test setups.
 
 ## History
 

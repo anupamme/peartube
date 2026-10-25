@@ -2291,16 +2291,27 @@ module.exports = class Replicator {
     const ref = b.attach(session)
 
     this._queueBlock(b)
-    if (!b._hedgeTimer && this.peers.length > 1) {
-      b._hedgeTimer = setTimeout(() => {
-        b._hedgeTimer = null
-        if (b.resolved || this._blocks.get(index) !== b || b.inflight.length >= 2) return
-        const ranked = this.peers
-          .filter(p => p.isActive() && p._remoteHasBlock(index) && p._canRequest(index, false) && !b.inflight.some(r => r.peer === p))
-          .sort((x, y) => (x.stream.rawStream?.rtt || 9999) - (y.stream.rawStream?.rtt || 9999))
-        if (ranked.length > 0) ranked[0]._requestBlock(b)
-      }, 1800)
-      if (b._hedgeTimer.unref) b._hedgeTimer.unref()
+    if (this.peers.length > 1) {
+      const peerRtt = p => p.stream.rawStream?.rtt || 9999
+      const fastPeers = () => this.peers
+        .filter(p => p.isActive() && p._remoteHasBlock(index) && p._canRequest(index, false) && !b.inflight.some(r => r.peer === p))
+        .sort((x, y) => peerRtt(x) - peerRtt(y))
+      if (b.inflight.length === 1) {
+        const curRtt = peerRtt(b.inflight[0].peer)
+        const cand = fastPeers()[0]
+        if (cand && peerRtt(cand) < 35 && curRtt > peerRtt(cand) * 2) cand._requestBlock(b)
+      }
+      if (!b._hedgeTimer) {
+        const minRtt = this.peers.reduce((m, p) => p.isActive() ? Math.min(m, peerRtt(p)) : m, 9999)
+        const waitMs = minRtt < 40 ? 300 : 1200
+        b._hedgeTimer = setTimeout(() => {
+          b._hedgeTimer = null
+          if (b.resolved || this._blocks.get(index) !== b || b.inflight.length >= 2) return
+          const ranked = fastPeers()
+          if (ranked.length > 0) ranked[0]._requestBlock(b)
+        }, waitMs)
+        if (b._hedgeTimer.unref) b._hedgeTimer.unref()
+      }
     }
     this.queueUpdateAll()
 
