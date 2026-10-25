@@ -603,12 +603,12 @@ class Peer {
 
     let activePeers = 0
     for (const p of this.replicator.peers) {
-      if (p._remoteContiguousLength > 0 || p.remoteBitfield.findFirst(true, 0) !== -1) activePeers++
+      if (p.remoteLength > 0 && p.remoteUploading) activePeers++
     }
-    const scale =
-      stream.rtt <= SCALE_LATENCY
-        ? 1
-        : (stream.rtt / SCALE_LATENCY) * Math.min(1, 2 / (activePeers || 1))
+    if (stream.rtt <= SCALE_LATENCY) {
+      return Math.max(this.inflightRange[0], Math.round(this.inflightRange[1] / Math.max(1, activePeers > 2 ? 2 : 1)))
+    }
+    const scale = (stream.rtt / SCALE_LATENCY) * Math.min(1, 2 / (activePeers || 1))
     return Math.max(
       this.inflightRange[0],
       Math.round(Math.min(this.inflightRange[1], this.inflightRange[0] * scale))

@@ -1021,7 +1021,7 @@ export async function createNode ({
     const next = tier === 'seeder' ? [64, 192] : tier === 'peer' ? [48, 128] : [24, 64]
     if (next[1] !== inflightRange[1]) {
       inflightRange = next
-      for (const c of store.cores) c.replicator?.setInflightRange(next[0], next[1])
+      for (const c of store.cores.values()) c.replicator?.setInflightRange(next[0], next[1])
     }
     const ratio = rxBytes > 0 ? Math.round((txBytes / rxBytes) * 100) / 100 : (txBytes > 0 ? 1 : 0)
     return { tier, seededBytes, contributingPeers, ratio, inflightMax: next[1] }
@@ -1062,7 +1062,7 @@ export async function createNode ({
       prevRx = rxBytes; prevTx = txBytes; prevAt = now
     }
     let inflightBlocks = 0, cachedBytes = 0
-    for (const c of store.cores) inflightBlocks += c.replicator?._inflight?.length || 0
+    for (const c of store.cores.values()) inflightBlocks += c.replicator?._inflight?.length || 0
     for (const [k, c] of blobCores) {
       if (!blobSlots.some(s => s.key === k) && c.opened && c.length > 0 && c.byteLength > 0) {
         ensureBlockCounter(c)
