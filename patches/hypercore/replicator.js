@@ -976,26 +976,27 @@ class Peer {
   async _handleRequests() {
     if (this.receiverBusy || this.replicator.destroyed) return
     this.receiverBusy = true
-    this.protomux.cork()
-    let batched = 0
-
-    while (
-      this.remoteOpened &&
-      this.protomux.drained &&
-      this.receiverQueue.length > 0 &&
-      !this.removed
-    ) {
-      const msg = this.receiverQueue.shift()
-      await this._handleRequest(msg)
-      if (++batched >= 4) {
-        batched = 0
-        this.protomux.uncork()
+    try {
+      while (
+        this.remoteOpened &&
+        this.protomux.drained &&
+        this.receiverQueue.length > 0 &&
+        !this.removed
+      ) {
+        const wave = []
+        while (wave.length < 24 && this.receiverQueue.length > 0) {
+          wave.push(this._handleRequest(this.receiverQueue.shift()))
+        }
         this.protomux.cork()
+        try {
+          await Promise.all(wave)
+        } finally {
+          this.protomux.uncork()
+        }
       }
+    } finally {
+      this.receiverBusy = false
     }
-
-    this.protomux.uncork()
-    this.receiverBusy = false
   }
 
   async push(index) {
