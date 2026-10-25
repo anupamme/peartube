@@ -194,7 +194,8 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs:
             if (ticks++ % 16 == 0 || st.ended) model.recordWatchProgress(entry, st.positionMs, st.durationMs)
             // A seek is done once the player is near it; it may land on an earlier keyframe.
             target?.let {
-                if (!scrubbing && (abs(st.positionMs - it) < 1_500 || SystemClock.uptimeMillis() - seekedAt > 2_000)) target = null
+                val timeoutMs = if (st.buffering) 12_000L else 2_500L
+                if (!scrubbing && ((!st.buffering && abs(st.positionMs - it) < 1_500) || SystemClock.uptimeMillis() - seekedAt > timeoutMs)) target = null
             }
             if (st.ended) {
                 model.screen.value = Screen.List
@@ -295,9 +296,9 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs:
                 Box(Modifier.fillMaxSize().background(Scrim)) {
                     Row(
                         Modifier.align(Alignment.TopStart).fillMaxWidth()
+                            .statusBarsPadding()
                             .windowInsetsPadding(WindowInsets.displayCutout)
                             .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         OverlayButton(BackIcon, "Back", ::leave)
                             Text(
@@ -333,8 +334,10 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs:
                         OverlayButton(ReplayIcon, "Forward 10 seconds", { seekTo(shown + 10_000) }, size = 52.dp, iconSize = 34.dp, badge = "10", mirrored = true)
                     }
                     Column(
-                        Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.displayCutout)
-                            .padding(horizontal = 24.dp, vertical = 16.dp),
+                        Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                            .navigationBarsPadding()
+                            .windowInsetsPadding(WindowInsets.displayCutout)
+                            .padding(horizontal = 24.dp, vertical = 12.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(clockText, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(start = 4.dp))
@@ -352,11 +355,12 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs:
                             onScrub = {
                                 scrubbing = true
                                 controls = true
+                                touches++
                                 target = (it.coerceIn(0f, 1f) * length).toLong()
                             },
-                            onRelease = {
+                            onCommit = {
                                 scrubbing = false
-                                target?.let(::seekTo)
+                                seekTo((it.coerceIn(0f, 1f) * length).toLong())
                             },
                         )
                     }
@@ -691,18 +695,20 @@ private fun OverlayButton(
 
 /** A thin bar, thicker under the finger: tap or drag to seek. [fraction] is the position. */
 @Composable
-private fun SeekBar(fraction: Float, enabled: Boolean, onScrub: (Float) -> Unit, onRelease: () -> Unit) {
+private fun SeekBar(fraction: Float, enabled: Boolean, onScrub: (Float) -> Unit, onCommit: (Float) -> Unit) {
     val scrub by rememberUpdatedState(onScrub)
-    val release by rememberUpdatedState(onRelease)
+    val commit by rememberUpdatedState(onCommit)
     var active by remember { mutableStateOf(false) }
+    var dragFraction by remember { mutableStateOf(0f) }
     Canvas(
-        Modifier.fillMaxWidth().height(28.dp)
+        Modifier.fillMaxWidth().height(44.dp)
             .semantics { contentDescription = "Seek" }
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 detectTapGestures {
-                    scrub(it.x / size.width)
-                    release()
+                    val f = (it.x / size.width).coerceIn(0f, 1f)
+                    scrub(f)
+                    commit(f)
                 }
             }
             .pointerInput(enabled) {
@@ -710,19 +716,21 @@ private fun SeekBar(fraction: Float, enabled: Boolean, onScrub: (Float) -> Unit,
                 detectHorizontalDragGestures(
                     onDragStart = {
                         active = true
-                        scrub(it.x / size.width)
+                        dragFraction = (it.x / size.width).coerceIn(0f, 1f)
+                        scrub(dragFraction)
                     },
                     onDragEnd = {
                         active = false
-                        release()
+                        commit(dragFraction)
                     },
                     onDragCancel = {
                         active = false
-                        release()
+                        commit(dragFraction)
                     },
                 ) { change, _ ->
                     change.consume()
-                    scrub(change.position.x / size.width)
+                    dragFraction = (change.position.x / size.width).coerceIn(0f, 1f)
+                    scrub(dragFraction)
                 }
             },
     ) {
