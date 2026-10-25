@@ -39,16 +39,25 @@ import androidx.compose.ui.unit.sp
 import com.peartube.app.AppModel
 import com.peartube.app.Screen
 import com.peartube.app.Settings
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 
 @Composable
 fun SettingsScreen(model: AppModel) {
     val settings by model.settings.collectAsState()
     var tracker by rememberSaveable { mutableStateOf(settings.tracker) }
+    var sources by rememberSaveable { mutableStateOf(settings.formatSources()) }
     var relays by rememberSaveable { mutableStateOf(settings.relayThrough.joinToString(", ")) }
     var bootstrap by rememberSaveable { mutableStateOf(settings.bootstrap.joinToString(", ")) }
     var lan by rememberSaveable { mutableStateOf(settings.lanDiscovery) }
     var privateRouting by rememberSaveable { mutableStateOf(settings.privateRouting) }
     var problem by remember { mutableStateOf<String?>(null) }
+    var advanced by rememberSaveable { mutableStateOf(false) }
     val bankSelected by model.soundFontSelected.collectAsState()
     val bankBusy by model.soundFontBusy.collectAsState()
     val bankError by model.soundFontError.collectAsState()
@@ -57,10 +66,10 @@ fun SettingsScreen(model: AppModel) {
         uri?.let(model::importSoundFont)
     }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Settings", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.weight(1f))
-            if (settings.tracker.isNotEmpty()) {
+            if (settings.hasSources) {
                 TextButton(onClick = { model.screen.value = Screen.List }) { Text("Cancel", color = Ink) }
             }
         }
@@ -70,9 +79,42 @@ fun SettingsScreen(model: AppModel) {
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             problem?.let { Text(it, color = Danger) }
-            Field("Tracker key", "64 hex characters, from a relay's /v1/status") {
+            Text("Sources & Channels", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Text("A home for everything you love watching.", color = Dim, fontSize = 14.sp)
+            Field("Primary channel or tracker", "Have a 64-character key? Add it here to get started.") {
                 KeyField(tracker, singleLine = true) { tracker = it }
             }
+            settings.sources.forEach { source ->
+                Text(source.alias.ifBlank { "Channel ${source.key.take(8)}" }, color = Ink)
+            }
+            Field("Add channels & links", "One channel link or key per line. Your library brings them together.") {
+                KeyField(sources, singleLine = false) { sources = it }
+            }
+            HorizontalDivider(color = Line)
+            Text("Playback & MIDI", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Field("MIDI SoundFont", "Choose your own SoundFont 2 (.sf2), up to 256 MiB. No bank is bundled. Changes are saved immediately, only on this device.") {
+                bankError?.let { Text(it, color = Danger) }
+                Hint(if (bankSelected) "A SoundFont is selected." else "No SoundFont selected. MIDI needs one to play.")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !bankBusy, onClick = { pickBank.launch(arrayOf("*/*")) }) {
+                        Text(if (bankBusy) "Importing…" else "Choose .sf2 file", color = Ink)
+                    }
+                    if (bankSelected) {
+                        OutlinedButton(enabled = !bankBusy, onClick = model::clearSoundFont) { Text("Remove SoundFont", color = Ink) }
+                    }
+                }
+            }
+            HorizontalDivider(color = Line)
+            Row(
+                Modifier.fillMaxWidth().background(CardBg, RoundedCornerShape(16.dp))
+                    .clickable { advanced = !advanced }.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Advanced Network & Engine", color = Ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Icon(if (advanced) ChevronDownIcon else ChevronRightIcon, null, tint = Dim)
+            }
+            AnimatedVisibility(advanced) {
+                Column(verticalArrangement = Arrangement.spacedBy(20.dp)) {
             Field("Blind relays", "Optional relay keys, for networks where peers cannot connect directly") {
                 KeyField(relays, singleLine = false) { relays = it }
             }
@@ -99,22 +141,12 @@ fun SettingsScreen(model: AppModel) {
                 }
                 Hint("Route peer connections over 4-hop encrypted relay circuits. Every peer you connect to must also run with private routing.")
             }
-            Field("MIDI SoundFont", "Choose your own SoundFont 2 (.sf2), up to 256 MiB. No bank is bundled. Changes are saved immediately, only on this device.") {
-                bankError?.let { Text(it, color = Danger) }
-                Hint(if (bankSelected) "A SoundFont is selected." else "No SoundFont selected. MIDI needs one to play.")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(enabled = !bankBusy, onClick = { pickBank.launch(arrayOf("*/*")) }) {
-                        Text(if (bankBusy) "Importing…" else "Choose .sf2 file", color = Ink)
-                    }
-                    if (bankSelected) {
-                        OutlinedButton(enabled = !bankBusy, onClick = model::clearSoundFont) { Text("Remove SoundFont", color = Ink) }
-                    }
-                }
+            }
             }
             Button(
                 onClick = {
                     problem = try {
-                        model.save(Settings.parse(tracker, relays, bootstrap, lan, privateRouting))
+                        model.save(Settings.parse(tracker, sources, relays, bootstrap, lan, privateRouting))
                         null
                     } catch (e: Exception) {
                         e.message

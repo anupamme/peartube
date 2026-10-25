@@ -10,6 +10,8 @@
 //! worker reports an update. The test publishes and removes the second entry
 //! when it reads each line.
 
+#![forbid(unsafe_code)]
+
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -47,11 +49,57 @@ fn main() {
             std::thread::sleep(Duration::from_millis(250));
         };
         let found_ms = started.elapsed().as_millis();
+        if std::env::var_os("PEARTUBE_BENCH_COLD").is_some() {
+            assert_eq!(entry.cached_bytes, 0, "cold play requires uncached entry");
+            let use_warm = std::env::var("PEARTUBE_WARM").is_ok_and(|v| v == "1");
+            DEADLINE.fetch_add(120, Ordering::SeqCst);
+            let headless = player::Headless::new();
+            let ctx = std::sync::Arc::new(codecs::context());
+            let click_t0 = Instant::now();
+            let warm_handle = use_warm.then(|| {
+                let warm_key = entry.key.clone();
+                std::thread::spawn(move || {
+                    futures_executor::block_on(async move {
+                        let _ = worker.warm(&warm_key).await;
+                    });
+                    click_t0.elapsed().as_millis()
+                })
+            });
+            let p = player::Player::open(&entry.stream_url, headless, ctx, player::PlayerOptions::default(), |_| {});
+            let mut first_picture_ms = None;
+            for _ in 0..4000 {
+                let st = p.state();
+                if st.video_size.is_some() && (!st.buffering || !st.position.is_zero()) {
+                    first_picture_ms = Some(click_t0.elapsed().as_millis());
+                    break;
+                }
+                if let Some(err) = st.error {
+                    panic!("player error: {err}");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let warm_done_ms = warm_handle.and_then(|h| h.join().ok());
+            drop(p);
+            emit(serde_json::json!({
+                "stage": "cold_first_frame",
+                "withWarm": use_warm,
+                "initialCachedBytes": entry.cached_bytes,
+                "foundMs": found_ms,
+                "warmDoneMs": warm_done_ms,
+                "firstPictureMs": first_picture_ms,
+            }));
+            return;
+        }
         let range = ureq::get(&entry.stream_url).header("Range", "bytes=1000000-1065535").call().expect("range read");
         let range_status = range.status().as_u16();
         let range_sha256 = hex(&Sha256::digest(read(range.into_body())));
         let full = read(ureq::get(&entry.stream_url).call().expect("full read").into_body());
         let titles: Vec<String> = worker.search(None).await.expect("list the tracker").into_iter().map(|entry| entry.title).collect();
+        let api_url = status.api_url.clone().expect("loopback /v1 daemon url");
+        let manifest: serde_json::Value = serde_json::from_slice(&read(
+            ureq::get(&format!("{api_url}/manifest.json")).call().expect("stremio manifest").into_body(),
+        ))
+        .expect("manifest json");
         let played = std::env::var_os("PEARTUBE_PLAY").map(|_| {
             DEADLINE.fetch_add(300, Ordering::SeqCst);
             play(&entry.stream_url)
@@ -61,9 +109,12 @@ fn main() {
         emit(serde_json::json!({
             "stage": "streamed",
             "tracker": status.tracker,
+            "channel": status.channel,
+            "apiUrl": api_url,
+            "manifestId": manifest["id"],
             "writer": status.writer,
             "lan": status.lan,
-            "entry": { "key": entry.key, "title": entry.title, "size": entry.size, "sha256": entry.sha256, "local": entry.local },
+            "entry": { "key": entry.key, "title": entry.title, "size": entry.size, "sha256": entry.sha256, "local": entry.local, "magnetUrl": entry.magnet_url },
             "foundMs": found_ms,
             "rangeStatus": range_status,
             "rangeSha256": range_sha256,

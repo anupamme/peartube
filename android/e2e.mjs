@@ -1,10 +1,12 @@
-// End-to-end check of the Android app on a connected phone, against a live relay:
-// a fresh install joins the relay's tracker through the Settings screen, lists its
-// entries, plays the first one through the Rust player, and comes back to the list.
-// With --lan it also turns on LAN discovery and checks that it runs. Writes
-// result.json and screenshots, and exits non-zero when a check fails.
+// End-to-end check of the Android app on a connected phone against an isolated
+// tracker (given by --tracker) or a relay's /v1/status (given by --relay).
+// A fresh dev-app install lists the entry, opens immersive playback immediately,
+// checks both orientations, and returns directly to the library. Engine details
+// live under PearTube → Under the Hood → Engine Room; route bytes live in player Info.
+// With --private-routing and no --lan, assert that uncached playback moved bytes
+// only through private circuits. Writes result.json and screenshots.
 //
-//   node android/e2e.mjs --serial <adb serial> --relay http://<relay>:8174 [--lan] [--apk path] [--out dir]
+//   node android/e2e.mjs --serial <adb serial> (--tracker <hex> | --relay http://<relay>:8174) [--lan] [--private-routing] [--apk path] [--out dir]
 //
 // Taps go through uiautomator's view of the Compose UI (texts and edit fields), so they do
 // not depend on the screen's size. The app is com.peartube.app.dev: the debug build by
@@ -22,12 +24,14 @@ const { values: opts } = parseArgs({
   options: {
     serial: { type: 'string' },
     relay: { type: 'string' },
+    tracker: { type: 'string' },
     lan: { type: 'boolean', default: false },
+    'private-routing': { type: 'boolean', default: false },
     apk: { type: 'string', default: path.join(here, 'app/build/outputs/apk/debug/app-debug.apk') },
     out: { type: 'string', default: path.join(here, 'build/e2e') }
   }
 })
-if (!opts.serial || !opts.relay) throw new Error('--serial and --relay are required')
+if (!opts.serial || (!opts.relay && !opts.tracker)) throw new Error('--serial and --tracker or --relay are required')
 
 const pkg = 'com.peartube.app.dev'
 const activity = `${pkg}/dev.dioxus.main.MainActivity`
@@ -44,7 +48,7 @@ function nodes () {
   const list = [...xml.matchAll(/<node [^>]*>/g)].map(([tag]) => {
     const attr = name => (tag.match(new RegExp(` ${name}="([^"]*)"`)) || [])[1]?.replace(/&amp;/g, '&') ?? ''
     const [l, t, r, b] = attr('bounds').match(/\d+/g).map(Number)
-    return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), x: (l + r) >> 1, y: (t + b) >> 1, w: r - l, h: b - t }
+    return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), checked: attr('checked') === 'true', x: (l + r) >> 1, y: (t + b) >> 1, w: r - l, h: b - t }
   })
   list.rotation = Number(xml.match(/<hierarchy rotation="(\d)"/)?.[1] ?? 0)
   return list
@@ -63,9 +67,12 @@ async function waitFor (what, find, timeout = 120_000) {
 /** Scrolls a form down until [find] matches, for controls below the fold. */
 async function scrollTo (what, find) {
   for (let i = 0; i < 6; i++) {
-    const found = find(nodes())
+    const visible = nodes()
+    const found = find(visible)
     if (found) return found
-    shell('input swipe 540 1800 540 900 300')
+    const root = visible.find(n => n.w > 0 && n.h > 0)
+    const x = Math.round(root.w * (root.w > root.h ? 0.88 : 0.5))
+    shell(`input swipe ${x} ${Math.round(root.h * 0.84)} ${x} ${Math.round(root.h * 0.35)} 300`)
     await sleep(500)
   }
   throw new Error(`Could not scroll to ${what}`)
@@ -73,10 +80,10 @@ async function scrollTo (what, find) {
 
 const tap = node => shell(`input tap ${node.x} ${node.y}`)
 const checks = {}
-const result = { started: new Date().toISOString(), device: shell('getprop ro.product.model').trim(), relay: opts.relay, checks }
+const result = { started: new Date().toISOString(), device: shell('getprop ro.product.model').trim(), relay: opts.relay || null, privateRouting: opts['private-routing'], checks }
 
 try {
-  const tracker = (await (await fetch(new URL('/v1/status', opts.relay))).json()).tracker
+  const tracker = opts.tracker || (await (await fetch(new URL('/v1/status', opts.relay))).json()).tracker
   result.tracker = tracker.slice(0, 8)
   result.apk = { sha256: createHash('sha256').update(fs.readFileSync(opts.apk)).digest('hex') }
 
@@ -91,31 +98,88 @@ try {
   tap(field)
   shell(`input text ${tracker}`)
   shell('input keyevent KEYCODE_BACK') // hides the keyboard
-  if (opts.lan) tap(await scrollTo('the LAN switch', ns => ns.find(n => n.text === 'Find relays on this network')))
+  if (opts.lan || opts['private-routing']) {
+    tap(await scrollTo('advanced network options', ns => ns.find(n => n.text === 'Advanced Network & Engine')))
+    const lanSwitch = await scrollTo('the LAN switch', ns => ns.find(n => n.text === 'Find relays on this network'))
+    if (lanSwitch.checked !== opts.lan) tap(lanSwitch)
+    if (opts['private-routing']) {
+      const privateSwitch = await scrollTo('the private routing switch', ns => ns.find(n => n.text === 'Private DHT routing'))
+      if (!privateSwitch.checked) tap(privateSwitch)
+    }
+  }
   tap(await scrollTo('Save', ns => ns.find(n => n.text === 'Save')))
 
-  const rowPattern = /^(S\d\dE\d\d\d?|Movie)$/
-  const firstRow = await waitFor('entries', ns => ns.find(n => rowPattern.test(n.text)))
+  const rowPattern = /^(S\d\dE\d\d\d?|Movie|(?:Play|Resume) S\d\dE\d\d\d?)$/
+  await waitFor('entries', ns => ns.find(n => rowPattern.test(n.text)))
   const listed = nodes()
-  checks.listed = listed.some(n => /^\d+ peers · /.test(n.text)) && listed.filter(n => rowPattern.test(n.text)).length > 0
-  result.facts = listed.find(n => /^\d+ peers · /.test(n.text))?.text
+  tap(await waitFor('the PearTube menu', ns => ns.find(n => n.text === 'PearTube')))
+  tap(await scrollTo('Engine Room', ns => ns.find(n => n.text === 'Engine Room')))
+  const facts = await waitFor('connection facts', ns => ns.find(n => /^\d+ peers · /.test(n.text)))
+  checks.listed = /^\d+ peers · /.test(facts.text) && listed.filter(n => rowPattern.test(n.text)).length > 0
+  result.facts = facts.text
   if (opts.lan) {
     // "LAN on <address>" once discovery runs; "LAN failed on …" if it threw.
     result.lan = (await waitFor('the LAN line', ns => ns.find(n => n.text.startsWith('LAN ')), 30_000)).text
     checks.lan = result.lan.startsWith('LAN on ')
   }
+  shell('input keyevent KEYCODE_BACK') // dismiss Under the Hood before opening a title
   shot('list.png')
 
-  tap(firstRow)
+  tap(await waitFor('a playable movie or episode', ns => ns.find(n => rowPattern.test(n.text))))
+  await sleep(3000)
+  if (!nodes().some(n => n.pkg === pkg)) {
+    throw new Error('Android fullscreen notice is in front: tap Got it on the phone, then run this again')
+  }
   // The picture's node carries the clock ("Video, 0:13 / 2:26:15"): the controls hide 3 s
   // after the last touch, and a UI dump takes about as long.
   const clockPattern = /^Video, ((\d+:)?\d+:\d\d) \/ (\d+:)?\d+:\d\d$/
   const clockOf = ns => ns.find(n => clockPattern.test(n.desc))
   const seconds = node => node.desc.match(clockPattern)[1].split(':').reduce((s, part) => s * 60 + Number(part), 0)
   const clock1 = await waitFor('the player clock', clockOf, 60_000)
-  const playing = nodes()
-  const meta = playing.findIndex(n => /^(S\d\dE\d\d\d?|Movie) · /.test(n.text))
-  if (meta > 0) result.title = `${playing[meta - 1].text} (${playing[meta].text.split(' · ')[0]})`
+  const immediate = await waitFor('vertical fullscreen playback', ns => ns.rotation === 0 && clockOf(ns) && ns, 15_000)
+  const initialVideo = clockOf(immediate)
+  checks.fullscreen = initialVideo.w >= immediate[0].w * 0.95 && initialVideo.h >= immediate[0].h * 0.95
+  async function playerButton (description) {
+    for (let i = 0; i < 5; i++) {
+      await sleep(3600)
+      tap(clockOf(nodes()))
+      const button = nodes().find(n => n.desc === description)
+      if (button) return button
+    }
+    throw new Error(`No ${description} button`)
+  }
+  async function pressPlayerButton (description) {
+    const button = await playerButton(description)
+    await sleep(3600)
+    tap(button) // reveal the hidden HUD
+    await sleep(500)
+    tap(button)
+  }
+  if (opts['private-routing']) {
+    await pressPlayerButton('Content info')
+    const info = await waitFor('content information', ns => ns.find(n => n.text === 'Decoder'))
+    checks.info = Boolean(info)
+    const metadata = nodes()
+    const meta = metadata.findIndex(n => /^(S\d\dE\d\d\d?|Movie) · /.test(n.text))
+    if (meta > 0) result.title = `${metadata[meta - 1].text} (${metadata[meta].text.split(' · ')[0]})`
+    await scrollTo('private route details', ns => ns.find(n => n.text.includes('Private ↓')))
+    const amount = (line, label) => {
+      const match = line.match(new RegExp(`${label} ↓ ([\\d.]+) (B|KB|MB|GB)`))
+      return match ? Math.round(Number(match[1]) * 1024 ** ({ B: 0, KB: 1, MB: 2, GB: 3 })[match[2]]) : null
+    }
+    const evidence = await waitFor('uncached private-route transfer', ns => ns.find(n => {
+      if (!n.text.includes('Private ↓')) return false
+      return (amount(n.text, 'Private') || 0) >= 256 * 1024
+    }), 120_000)
+    result.routes = {
+      privateRxBytes: amount(evidence.text, 'Private'),
+      publicRxBytes: amount(evidence.text, 'Public DHT'),
+      lanRxBytes: amount(evidence.text, 'LAN')
+    }
+    checks.privateRoute = result.routes.privateRxBytes >= 256 * 1024 &&
+      result.routes.publicRxBytes === 0 && result.routes.lanRxBytes === 0
+    shell('input keyevent KEYCODE_BACK') // close only the information panel
+  }
 
   // Frames on the video SurfaceView over 5 s, from SurfaceFlinger.
   shell('dumpsys SurfaceFlinger --timestats -enable -clear')
@@ -134,60 +198,31 @@ try {
   checks.audio = shell('dumpsys audio').split('\n').some(l => l.includes(`u/pid:${uid}/`) && l.includes('state:started'))
   shot('play.png')
 
-  // Fullscreen: its button turns a wide picture sideways and fills the screen, and back
-  // comes out. The controls hide 3 s after the last touch while playing, so each step
-  // starts from hidden controls: a tap on the picture shows them, and a UI dump right away
-  // finds the button; later, a first tap at its place shows them and a second presses.
-  const video = clockOf(nodes())
-  let button
-  let back
-  for (let i = 0; i < 5 && !button; i++) {
-    await sleep(3600)
-    tap(video)
-    const shown = nodes()
-    button = shown.find(n => n.desc === 'Fullscreen')
-    back = shown.find(n => n.desc === 'Back')
-  }
-  if (!button || !back) throw new Error('No Fullscreen or Back button')
-  await sleep(3600)
-  tap(button)
-  await sleep(500)
-  tap(button)
-  await waitFor('fullscreen', ns => ns.rotation % 2 === 1, 15_000)
-  // Android shows a notice ("Viewing full screen … Got it") the first time an app goes
-  // fullscreen. It is a system window and the user's to answer: send it nothing.
-  await sleep(3000)
-  const sideways = nodes()
-  if (!sideways.some(n => n.pkg === pkg)) {
-    result.fullscreen = 'Android\'s "Viewing full screen" notice is in front: tap Got it on the phone, then run this again'
-    throw new Error(result.fullscreen)
-  }
+  // The player opens vertically edge-to-edge. Exercise the orientation toggle into landscape
+  // and back to vertical via KEYCODE_BACK, retaining full-window and exact HUD-position assertions.
+  const back = await playerButton('Back')
+  await pressPlayerButton('Toggle orientation')
+  const sideways = await waitFor('landscape fullscreen', ns => ns.rotation % 2 === 1 && clockOf(ns) && ns, 15_000)
   shot('fullscreen.png')
   const full = clockOf(sideways)
   result.fullscreen = { video: [full.w, full.h], window: [sideways[0].w, sideways[0].h] }
+  checks.fullscreen = checks.fullscreen && full.w >= sideways[0].w * 0.95 && full.h >= sideways[0].h * 0.95
   shell('input keyevent KEYCODE_BACK')
-  const upright = await waitFor('portrait', ns => ns.rotation === 0, 10_000)
-  checks.fullscreen = Boolean(upright) && full.w >= sideways[0].w * 0.95 && full.h >= sideways[0].h * 0.95
-
-  // Out of fullscreen, the controls sit where they did before it: a cutout inset left over
-  // from fullscreen once pushed the top row down.
-  await sleep(1500)
-  let backAgain
-  for (let i = 0; i < 5 && !backAgain; i++) {
-    backAgain = nodes().find(n => n.desc === 'Back')
-    if (!backAgain) tap(video)
-  }
+  const upright = await waitFor('vertical fullscreen again', ns => ns.rotation === 0 && clockOf(ns) && ns, 10_000)
+  const portraitVideo = clockOf(upright)
+  checks.fullscreen = checks.fullscreen && portraitVideo.w >= upright[0].w * 0.95 && portraitVideo.h >= upright[0].h * 0.95
+  const backAgain = await playerButton('Back')
   shot('after-fullscreen.png')
-  result.back = { before: [back.x, back.y], after: backAgain && [backAgain.x, backAgain.y] }
-  checks.backInPlace = Boolean(backAgain) && Math.abs(backAgain.x - back.x) <= 2 && Math.abs(backAgain.y - back.y) <= 2
-
+  result.back = { before: [back.x, back.y], after: [backAgain.x, backAgain.y] }
+  checks.backInPlace = Math.abs(backAgain.x - back.x) <= 2 && Math.abs(backAgain.y - back.y) <= 2
   shell('input keyevent KEYCODE_BACK')
+  await waitFor('portrait library', ns => ns.rotation === 0, 10_000)
   checks.backToList = Boolean(await waitFor('the list again', ns => ns.find(n => n.text === 'PearTube'), 15_000))
 } catch (err) {
   result.error = String(err?.stack || err)
 }
 
-const expected = ['listed', ...(opts.lan ? ['lan'] : []), 'video', 'clockAdvances', 'audio', 'fullscreen', 'backInPlace', 'backToList']
+const expected = ['listed', ...(opts.lan ? ['lan'] : []), ...(opts['private-routing'] ? ['privateRoute'] : []), 'video', 'clockAdvances', 'audio', 'fullscreen', 'backInPlace', 'backToList']
 result.passed = !result.error && expected.every(name => checks[name] === true)
 result.finished = new Date().toISOString()
 fs.writeFileSync(path.join(opts.out, 'result.json'), JSON.stringify(result, null, 2) + '\n')

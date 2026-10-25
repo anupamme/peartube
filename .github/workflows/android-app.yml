@@ -59,11 +59,16 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle.kts', 'android/gradle/wrapper/gradle-wrapper.properties') }}
-      - name: Build the APK
+      - name: Build Phone & TV Receiver APKs
         working-directory: android
-        run: ./gradlew --console=plain :app:assembleDebug
+        run: ./gradlew --console=plain :app:assembleDebug :tv:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
           name: PearTube-debug-arm64
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PearTubeReceiver-debug-arm64
+          path: android/tv/build/outputs/apk/debug/tv-debug.apk
           if-no-files-found: error

@@ -20,15 +20,73 @@ static BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/worker.bundle")
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RouteTraffic {
+    pub peers: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub down_bps: u64,
+    pub up_bps: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct TrafficRoutes {
+    #[serde(rename = "private")]
+    pub private_route: RouteTraffic,
+    #[serde(rename = "public")]
+    pub public_route: RouteTraffic,
+    pub lan: RouteTraffic,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceInfo {
+    pub key: String,
+    pub kind: String,
+    #[serde(default)]
+    pub alias: String,
+    #[serde(default)]
+    pub primary: bool,
+    #[serde(default)]
+    pub writable: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredSource {
+    pub key: String,
+    pub kind: String,
+    pub title: String,
+    #[serde(default)]
+    pub via: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reciprocity {
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub seeded_bytes: u64,
+    #[serde(default)]
+    pub contributing_peers: u64,
+    #[serde(default)]
+    pub ratio: f64,
+    #[serde(default)]
+    pub inflight_max: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub tracker: String,
+    #[serde(default)]
+    pub channel: String,
     pub writer: String,
     pub blobs: String,
     pub blob_bytes: u64,
     #[serde(default)]
     pub cached_bytes: u64,
     pub peers: u64,
-    /// Peers connected over LAN discovery.
     pub lan_peers: u64,
     #[serde(default)]
     pub down_bps: u64,
@@ -38,18 +96,25 @@ pub struct Status {
     pub rx_bytes: u64,
     #[serde(default)]
     pub tx_bytes: u64,
+    pub routes: TrafficRoutes,
     #[serde(default)]
     pub inflight_blocks: u64,
     #[serde(default)]
     pub rtt: u64,
     #[serde(default)]
     pub retransmits: u64,
-    /// What LAN discovery is doing, for the status line: "on 10.0.0.5",
-    /// "paused", "failed on …" or "found no Wi-Fi address; …". None while off.
     pub lan: Option<String>,
+    #[serde(default)]
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub sources: Vec<SourceInfo>,
+    #[serde(default)]
+    pub discovered_sources: Vec<DiscoveredSource>,
+    #[serde(default)]
+    pub reciprocity: Reciprocity,
 }
 
-/// One tracker entry, the same shape as the relay's `/v1/search` results.
+/// One tracker or channel entry, matching `/v1/search` results.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
@@ -62,18 +127,194 @@ pub struct Entry {
     #[serde(default)]
     pub cached_bytes: u64,
     pub stream_url: String,
+    #[serde(default)]
+    pub magnet_url: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub source_kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenUriResult {
+    pub action: String,
+    #[serde(default)]
+    pub source: Option<SourceInfo>,
+    #[serde(default)]
+    pub entry: Option<Entry>,
+    #[serde(default)]
+    pub receiver: Option<Value>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastReceiver {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub public_key: String,
+    #[serde(default)]
+    pub online: bool,
+    #[serde(default)]
+    pub paired: bool,
+    #[serde(default)]
+    pub p2p: bool,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub auth: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastTrack {
+    pub stream: i32,
+    pub kind: String,
+    #[serde(default)]
+    pub codec: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastEntryMeta {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastPlaybackState {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub entry: Option<CastEntryMeta>,
+    #[serde(default)]
+    pub position_ms: u64,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub playing: bool,
+    #[serde(default)]
+    pub buffering: bool,
+    #[serde(default)]
+    pub ended: bool,
+    #[serde(default)]
+    pub p2p_peers: u64,
+    #[serde(default)]
+    pub cached_bytes: u64,
+    #[serde(default)]
+    pub seeding: bool,
+    #[serde(default)]
+    pub tracks: Vec<CastTrack>,
+    #[serde(default)]
+    pub audio: Option<i32>,
+    #[serde(default)]
+    pub subtitle: Option<i32>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastSession {
+    pub receiver_id: String,
+    pub receiver_name: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub state: CastPlaybackState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverInfo {
+    pub device_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub public_key: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub pair_code: String,
+    #[serde(default)]
+    pub pairing_uri: String,
+    #[serde(default)]
+    pub listen_url: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CastStatus {
+    #[serde(default)]
+    pub web_receiver_url: Option<String>,
+    #[serde(default)]
+    pub receivers: Vec<CastReceiver>,
+    #[serde(default)]
+    pub session: Option<CastSession>,
+    #[serde(default)]
+    pub receiver_mode: Option<ReceiverInfo>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverCommand {
+    #[serde(default)]
+    pub seq: u64,
+    pub action: String,
+    #[serde(default)]
+    pub entry: Option<CastEntryMeta>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub stream_url: Option<String>,
+    #[serde(default)]
+    pub http_stream_url: Option<String>,
+    #[serde(default)]
+    pub start_position_ms: u64,
+    #[serde(default)]
+    pub position_ms: Option<u64>,
+    #[serde(default)]
+    pub delta_ms: Option<i64>,
+    #[serde(default)]
+    pub stream: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    /// The tracker or the peer set changed.
+    /// A tracker, channel, or peer set changed.
     Update,
+    /// Subscribed sources changed through the loopback HTTP daemon.
+    Sources(Vec<SourceInfo>),
+    /// Cast receivers, remote session, or local TV receiver metadata changed.
+    Cast(CastStatus),
+    /// A remote sender pushed a playback command into our local TV Receiver mode.
+    ReceiverCommand(ReceiverCommand),
     /// The worker hit an uncaught error.
     Fatal(String),
     /// The worklet closed its IPC; no more replies will come.
     Exited,
 }
-
 #[repr(C)]
 struct UvBuf {
     base: *const c_char,
@@ -166,10 +407,13 @@ impl Worker {
     }
 
     pub async fn start(&self, settings: &Settings) -> Result<Status, String> {
-        let storage = STORE_DIR.join("trackers").join(&settings.tracker);
+        let folder = if settings.tracker.is_empty() { "default" } else { settings.tracker.as_str() };
+        let storage = STORE_DIR.join("trackers").join(folder);
+        let tracker = if settings.tracker.is_empty() { Value::Null } else { json!(settings.tracker) };
         let params = json!({
             "storage": storage.to_string_lossy(),
-            "tracker": settings.tracker,
+            "tracker": tracker,
+            "sources": settings.sources,
             "relayThrough": non_empty(&settings.relay_through),
             "bootstrap": non_empty(&settings.bootstrap),
             "lan": settings.lan_discovery,
@@ -182,15 +426,100 @@ impl Worker {
         parse(self.call("status", json!({})).await?)
     }
 
-    /// Every entry for `id`, or the whole tracker when `id` is None.
+    /// Every entry for `id`, or the whole subscribed catalog when `id` is None.
     pub async fn search(&self, id: Option<&str>) -> Result<Vec<Entry>, String> {
         parse(self.call("search", json!({ "id": id })).await?)
     }
 
+    pub async fn add_source(&self, key: &str, kind: &str, alias: &str) -> Result<SourceInfo, String> {
+        let res = self.call("addSource", json!({ "key": key, "kind": kind, "alias": alias })).await?;
+        parse(res.get("source").cloned().unwrap_or(Value::Null))
+    }
+
+    pub async fn remove_source(&self, key: &str) -> Result<(), String> {
+        self.call("removeSource", json!({ "key": key })).await.map(drop)
+    }
+
+    pub async fn open_uri(&self, uri: &str) -> Result<OpenUriResult, String> {
+        let storage = STORE_DIR.join("cast").to_string_lossy().to_string();
+        parse(self.call("openUri", json!({ "uri": uri, "storage": storage })).await?)
+    }
+
+
+    pub async fn warm(&self, key: &str) -> Result<(), String> {
+        self.call("warm", json!({ "key": key })).await.map(drop)
+    }
     pub async fn clear_cache(&self, key: Option<&str>) -> Result<(), String> {
         self.call("clearCache", json!({ "key": key })).await.map(drop)
     }
 
+    fn cast_dir() -> String {
+        STORE_DIR.join("cast").to_string_lossy().to_string()
+    }
+
+    pub async fn cast_status(&self) -> Result<CastStatus, String> {
+        parse(self.call("castStatus", json!({ "storage": Self::cast_dir() })).await?)
+    }
+
+    pub async fn cast_pair(&self, params: Value) -> Result<CastStatus, String> {
+        let mut body = params;
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("storage").or_insert_with(|| json!(Self::cast_dir()));
+        }
+        parse(self.call("castPair", body).await?)
+    }
+
+    pub async fn cast_remove(&self, id: &str) -> Result<CastStatus, String> {
+        parse(self.call("castRemove", json!({ "id": id, "storage": Self::cast_dir() })).await?)
+    }
+
+    pub async fn cast_play(&self, receiver_id: &str, key: &str, prefer_mode: &str, start_position_ms: u64) -> Result<CastStatus, String> {
+        parse(
+            self.call(
+                "castPlay",
+                json!({
+                    "storage": Self::cast_dir(),
+                    "receiverId": receiver_id,
+                    "key": key,
+                    "preferMode": prefer_mode,
+                    "startPositionMs": start_position_ms,
+                }),
+            )
+            .await?,
+        )
+    }
+
+    pub async fn cast_attach(&self, receiver_id: &str) -> Result<CastStatus, String> {
+        parse(self.call("castAttach", json!({ "storage": Self::cast_dir(), "receiverId": receiver_id })).await?)
+    }
+
+    pub async fn cast_control(&self, params: Value) -> Result<CastStatus, String> {
+        let mut body = params;
+        if let Some(obj) = body.as_object_mut() {
+            obj.entry("storage").or_insert_with(|| json!(Self::cast_dir()));
+        }
+        parse(self.call("castControl", body).await?)
+    }
+
+    pub async fn cast_stop(&self, stop_playback: bool) -> Result<CastStatus, String> {
+        parse(self.call("castStop", json!({ "storage": Self::cast_dir(), "stopPlayback": stop_playback })).await?)
+    }
+
+    pub async fn receiver_start(&self, name: &str, open_auth: bool) -> Result<ReceiverInfo, String> {
+        parse(self.call("receiverStart", json!({ "storage": Self::cast_dir(), "name": name, "openAuth": open_auth })).await?)
+    }
+
+    pub async fn receiver_stop(&self) -> Result<(), String> {
+        self.call("receiverStop", json!({})).await.map(drop)
+    }
+
+    pub async fn receiver_rotate_code(&self) -> Result<ReceiverInfo, String> {
+        parse(self.call("receiverRotateCode", json!({ "storage": Self::cast_dir() })).await?)
+    }
+
+    pub async fn receiver_report_state(&self, state: Value) -> Result<(), String> {
+        self.call("receiverReportState", json!({ "storage": Self::cast_dir(), "state": state })).await.map(drop)
+    }
     /// Events from the worker, until it exits.
     pub fn subscribe(&self) -> mpsc::UnboundedReceiver<Event> {
         let (tx, rx) = mpsc::unbounded();
@@ -289,6 +618,22 @@ impl Shared {
         } else {
             match msg.get("event").and_then(Value::as_str) {
                 Some("update") => self.broadcast(Event::Update),
+                Some("sources") => {
+                    if let Ok(list) = serde_json::from_value::<Vec<SourceInfo>>(msg.get("sources").cloned().unwrap_or(Value::Null)) {
+                        self.broadcast(Event::Sources(list));
+                    }
+                    self.broadcast(Event::Update);
+                }
+                Some("cast") => {
+                    if let Ok(st) = serde_json::from_value::<CastStatus>(msg.get("cast").cloned().unwrap_or(Value::Null)) {
+                        self.broadcast(Event::Cast(st));
+                    }
+                }
+                Some("receiverCommand") => {
+                    if let Ok(cmd) = serde_json::from_value::<ReceiverCommand>(msg.get("command").cloned().unwrap_or(Value::Null)) {
+                        self.broadcast(Event::ReceiverCommand(cmd));
+                    }
+                }
                 Some("fatal") => self.broadcast(Event::Fatal(msg["error"].as_str().unwrap_or("").to_string())),
                 _ => {}
             }

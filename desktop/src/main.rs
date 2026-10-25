@@ -2,9 +2,13 @@
 //! and peartube-media's player. It joins a tracker, lists its entries grouped
 //! by title, and plays one in the window.
 
+#![forbid(unsafe_code)]
+
 mod app;
+mod cast_screen;
 mod list;
 mod play;
+mod qr;
 mod settings_screen;
 mod theme;
 mod video;
@@ -17,9 +21,11 @@ use gpui_kit::*;
 
 actions!(peartube, [Quit]);
 
-// The player's icons that gpui-component's own set lacks.
-icon_assets!(PlayerIcons, [Captions, Volume2, RotateCcw]);
-
+// Cinema UI & player icons from Lucide.
+icon_assets!(PlayerIcons, [
+    Captions, Volume2, RotateCcw, Cast, Tv, TvMinimalPlay, QrCode, Info,
+    Ellipsis, ChevronDown, ChevronRight, Sparkles, Share2, SlidersHorizontal, Check, Plus, Search
+]);
 /// gpui-component's icons plus the player's.
 struct AppAssets;
 
@@ -39,14 +45,26 @@ impl AssetSource for AppAssets {
 }
 
 fn main() {
-    gpui_kit::application().with_assets(AppAssets).run(|cx: &mut App| {
+    let (url_tx, url_rx) = futures_channel::mpsc::unbounded::<String>();
+    for arg in std::env::args().skip(1) {
+        if arg.starts_with("peartube:") {
+            let _ = url_tx.unbounded_send(arg);
+        }
+    }
+    let app = gpui_kit::application().with_assets(AppAssets);
+    app.on_open_urls(move |urls| {
+        for url in urls {
+            let _ = url_tx.unbounded_send(url);
+        }
+    });
+    let mut url_rx = Some(url_rx);
+    app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         theme::apply(cx);
         play::bind_keys(cx);
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus([Menu { name: "PearTube".into(), items: vec![MenuItem::action("Quit PearTube", Quit)], disabled: false }]);
-        // One window; closing it quits, and with it the worklet.
         cx.on_window_closed(|cx, _| cx.quit()).detach();
 
         let options = WindowOptions {
@@ -56,11 +74,9 @@ fn main() {
             app_id: Some("com.peartube.app".into()),
             ..Default::default()
         };
-        cx.open_window(options, |window, cx| {
-            let view = cx.new(|cx| app::PearTube::new(window, cx));
-            // gpui-component's Root paints the theme's background over the whole
-            // window; the views paint their own, so the play screen can leave
-            // its video slot clear for the picture under it (video.rs).
+        let rx = url_rx.take().unwrap_or_else(|| futures_channel::mpsc::unbounded().1);
+        cx.open_window(options, move |window, cx| {
+            let view = cx.new(|cx| app::PearTube::new(rx, window, cx));
             cx.new(|cx| Root::new(view, window, cx).bg(transparent_black()))
         })
         .expect("open the window");

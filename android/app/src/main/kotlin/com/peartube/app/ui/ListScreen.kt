@@ -1,128 +1,210 @@
 package com.peartube.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.peartube.app.AppModel
-import com.peartube.app.Entry
-import com.peartube.app.Screen
-import com.peartube.app.formatBytes
-import com.peartube.app.label
-import com.peartube.app.p2pSummary
+import com.peartube.app.*
+
+@Composable
+internal fun CinemaIcon(icon: ImageVector, description: String, tint: androidx.compose.ui.graphics.Color = Dim, onClick: () -> Unit) {
+    IconButton(onClick = onClick, modifier = Modifier.size(48.dp)) { Icon(icon, description, tint = tint, modifier = Modifier.size(23.dp)) }
+}
+
 @Composable
 fun ListScreen(model: AppModel) {
     val settings by model.settings.collectAsState()
     val status by model.status.collectAsState()
     val entries by model.entries.collectAsState()
+    val cast by model.cast.collectAsState()
     val query by model.query.collectAsState()
+    val history by model.watchHistory.collectAsState()
+    var hood by remember { mutableStateOf(false) }
+    var scanner by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf("All") }
+    var source by remember { mutableStateOf<String?>(null) }
     val focus = LocalFocusManager.current
-
-    val peers = status?.let { it.peers + it.lanPeers } ?: 0
-    val cached = status?.cachedBytes ?: 0L
-    val tracker = status?.tracker ?: settings.tracker
-    val short = if (tracker.length >= 8) tracker.take(8) + "…" else tracker
-    val facts = buildList {
-        add("$peers peers")
-        add(formatBytes(status?.blobBytes ?: 0))
-        if (cached > 0) add("cached ${formatBytes(cached)}")
-        add(short)
-    }.joinToString(" · ")
-    // Grouped by title: groups in case-insensitive order, episodes by id.
-    val groups = remember(entries, query) { groups(entries, query.lowercase()) }
-
-    Column(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("PearTube", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.weight(1f))
-                if (cached > 0) {
-                    TextButton(onClick = { model.clearCache(null) }) { Text("Clear cache", fontSize = 13.sp, color = Dim) }
+    val peers = status?.let { it.peers + it.lanPeers } ?: 0L
+    val transfer = (status?.downBps ?: 0L) + (status?.upBps ?: 0L) > 0
+    val pulse = rememberInfiniteTransition(label = "Swarm breath")
+    val glow by pulse.animateFloat(.45f, 1f, infiniteRepeatable(tween(1800), RepeatMode.Reverse), label = "Connection glow")
+    val contextual = query.trim().let { it.startsWith("peartube://", true) || Regex("[a-fA-F0-9]{64}").matches(it) }
+    val connect = {
+        if (contextual) { model.openUriOrKey(query); model.query.value = "" }
+        focus.clearFocus()
+    }
+    val rows = remember(entries, query, filter, source, contextual) {
+        entries.distinctBy { it.key }.filter {
+            (contextual || query.isBlank() || "${it.title} ${it.id}".contains(query, true)) &&
+                (source == null || it.source == source) && when (filter) {
+                    "Movies" -> label(it.id) == "Movie"
+                    "Series" -> label(it.id) != "Movie"
+                    "On Device" -> it.local || (it.size > 0 && it.cachedBytes >= it.size)
+                    else -> true
                 }
-                TextButton(onClick = { model.screen.value = Screen.Settings }) { Text("⚙", fontSize = 22.sp, color = Ink) }
+        }.sortedWith(compareBy({ it.title.lowercase() }, { label(it.id) }))
+    }
+    val groups = remember(rows) { rows.groupBy { if (label(it.id) == "Movie") it.id else seriesKey(it) } }
+    Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+        Row(Modifier.fillMaxWidth().statusBarsPadding().height(56.dp).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.weight(1f).clickable { hood = true }, verticalAlignment = Alignment.CenterVertically) {
+                Text("PearTube", color = Ink, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                Box(Modifier.padding(start = 8.dp).size(6.dp).graphicsLayer { alpha = if (transfer) glow else 1f }.background(if (transfer) Brand else if (peers > 0) Accent else Dim, CircleShape))
             }
-            Text(facts, color = Dim, fontSize = 14.sp)
-            p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 13.sp) }
-            status?.lan?.let { Text("LAN $it", color = Dim, fontSize = 14.sp) }
-            OutlinedTextField(
-                value = query,
-                onValueChange = { model.query.value = it },
-                placeholder = { Text("Search title or ID…") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    imeAction = ImeAction.Search,
-                ),
-                keyboardActions = KeyboardActions(onSearch = { focus.clearFocus() }),
-                colors = fieldColors(),
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp, end = 12.dp),
-            )
+            CinemaIcon(if (cast.session != null) CastConnectedIcon else CastIcon, "Cast", if (cast.session != null) Brand else Dim) { model.openCastSheet() }
+            CinemaIcon(SettingsIcon, "Settings") { model.screen.value = Screen.Settings }
         }
-        HorizontalDivider(color = Line)
-        when {
-            groups.isNotEmpty() -> LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 24.dp),
-                modifier = Modifier.fillMaxSize(),
-            ) {
-                // No item keys: entries arrive in batches while the tracker syncs, and keyed
-                // items would scroll to keep the first row seen; by index the list stays put.
-                groups.forEach { (title, rows) ->
-                    item {
-                        Text(title, color = Dim, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.padding(start = 4.dp, top = 16.dp, bottom = 8.dp))
-                    }
-                    item {
-                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(CardBg)
-                            .border(1.dp, Line, RoundedCornerShape(10.dp))) {
-                            rows.forEachIndexed { i, entry ->
-                                if (i > 0) HorizontalDivider(color = Line)
-                                Row(
-                                    entry = entry,
-                                    onClear = if (!entry.local && entry.cachedBytes > 0) ({ model.clearCache(entry.key) }) else null,
-                                    onClick = { model.screen.value = Screen.Play(entry) },
-                                )
-                            }
-                        }
-                    }
+        OutlinedTextField(query, { model.query.value = it }, singleLine = true,
+            placeholder = { Text("Find something to watch…", maxLines = 1, fontSize = 14.sp) },
+            leadingIcon = { Icon(SearchIcon, null, tint = Dim) },
+            trailingIcon = {
+                Row {
+                    if (query.isNotEmpty()) CinemaIcon(CloseIcon, "Clear search") { model.query.value = "" }
+                    CinemaIcon(QrCodeScannerIcon, "Scan QR code") { scanner = true }
+                }
+            },
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false, imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { connect() }), shape = RoundedCornerShape(28.dp), colors = fieldColors(),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
+        AnimatedVisibility(contextual) {
+            Row(Modifier.padding(horizontal = 16.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(CardElevated).padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                val action = when {
+                    query.contains("://receiver/", true) || query.contains("://cast/", true) -> "Connect TV"
+                    query.contains("://watch/", true) || query.contains("://stream/", true) -> "Play Stream"
+                    else -> "Connect Channel"
+                }
+                Text(action, color = Ink, modifier = Modifier.weight(1f))
+                TextButton(onClick = { connect() }) { Text("Let's go", color = Brand) }
+            }
+        }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("All", "Movies", "Series", "On Device").forEach { name ->
+                FilterChip(selected = filter == name, onClick = { filter = name }, label = { Text(name) })
+            }
+            val sources = status?.sources.orEmpty()
+            if (sources.size > 1) sources.forEach { channel ->
+                FilterChip(selected = source == channel.key, onClick = { source = if (source == channel.key) null else channel.key }, label = { Text(channel.alias.ifBlank { "Channel ${channel.key.take(6)}" }) })
+            }
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (groups.isEmpty()) item {
+                Column(Modifier.padding(vertical = 40.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(if (entries.isEmpty()) "Your next cinema moment awaits." else "Nothing here just yet.", color = Ink, fontSize = 19.sp)
+                    Text(if (status == null) "Connecting to your channels…" else if (entries.isEmpty()) "Add a channel from the PearTube menu above." else "Try another search or filter.", color = Dim)
                 }
             }
-            else -> {
-                val message = when {
-                    entries.isNotEmpty() -> "No matching entries."
-                    status == null -> "Joining the tracker…"
-                    else -> "Nothing in this tracker yet. Entries appear as relays announce them."
+            groups.forEach { (key, episodes) ->
+                item(key = key) {
+                    if (label(episodes.first().id) == "Movie") MovieCard(model, episodes.first(), history[episodes.first().key])
+                    else SeriesCard(model, episodes, history, query.isNotBlank() && !contextual)
                 }
-                Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.TopCenter) {
-                    Text(message, color = Dim, fontSize = 15.sp)
+            }
+        }
+        CastRemoteBar(model)
+    }
+    if (hood) UnderTheHood(model, onClose = { hood = false }, onAdd = { hood = false; model.screen.value = Screen.Settings })
+    if (scanner) QrScannerSheet(onScanned = { scanner = false; if (it.startsWith("peartube:", true)) model.openUriOrKey(it) else model.pairCastByUriOrHost(it) }, onClose = { scanner = false })
+}
+
+private fun seriesKey(entry: Entry): String = Regex("(?i)(?:imdb:)?(tt\\d+)").find(entry.id)?.groupValues?.get(1)?.lowercase()
+    ?: entry.title.replace(Regex("(?i)[ ._-]*s\\d+e\\d+.*$"), "").trim()
+
+internal fun episodeOrder(id: String): Int {
+    val code = label(id)
+    return (code.substringAfter('S').substringBefore('E').toIntOrNull() ?: 0) * 10_000 +
+        (code.substringAfter('E', "0").toIntOrNull() ?: 0)
+}
+
+private fun displayTitle(raw: String): Pair<String, String?> {
+    val match = Regex("[ ._-]*\\(?((?:19|20)\\d{2})\\)?$").find(raw.trim())
+    return if (match != null) raw.substring(0, match.range.first).trim() to match.groupValues[1] else raw to null
+}
+
+@Composable
+private fun MovieCard(model: AppModel, entry: Entry, progress: WatchProgress?) {
+    val (title, year) = displayTitle(entry.title)
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CardBg).clickable { model.playEntry(entry) }) {
+        Row(Modifier.padding(start = 18.dp, end = 4.dp, top = 12.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Movie", color = Dim, fontSize = 12.sp)
+                    Text(listOfNotNull(year, formatBytes(entry.size)).joinToString(" · ", prefix = "· "), color = Dim, fontSize = 12.sp)
+                }
+                SavedNote(entry)
+            }
+            EntryActions(model, entry)
+        }
+        EntryProgress(entry, progress)
+    }
+}
+
+@Composable
+private fun SeriesCard(model: AppModel, rows: List<Entry>, history: Map<String, WatchProgress>, searching: Boolean) {
+    val episodes = rows.distinctBy { it.id }.sortedBy { episodeOrder(it.id) }
+    val seasons = episodes.map { label(it.id).substringBefore('E') }.distinct()
+    var expanded by remember(seriesKey(episodes.first())) { mutableStateOf(false) }
+    var season by remember(seasons) { mutableStateOf(seasons.first()) }
+    val latest = episodes.mapNotNull { e -> history[e.key]?.let { e to it } }.maxByOrNull { it.second.updatedAt }
+    val resume = latest?.takeIf { it.second.partial }?.first
+        ?: latest?.let { pair -> episodes.getOrNull(episodes.indexOf(pair.first) + 1) }
+    val next = resume ?: episodes.first()
+    val title = episodes.first().title.replace(Regex("(?i)[ ._-]*s\\d+e\\d+.*$"), "").ifBlank { episodes.first().title }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(CardBg)) {
+        Row(Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(start = 18.dp, top = 14.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Text(title, color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                Text("${episodes.size} episodes · ${seasons.size} ${if (seasons.size == 1) "season" else "seasons"}", color = Dim, fontSize = 12.sp)
+            }
+            CinemaIcon(if (expanded || searching || rows.size <= 2) ChevronDownIcon else ChevronRightIcon, "Expand series") { expanded = !expanded }
+        }
+        TextButton(onClick = { model.playEntry(next) }, modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)) {
+            Icon(PlayIcon, null, tint = Brand, modifier = Modifier.size(18.dp))
+            Text("${if (latest != null && resume != null) "Resume" else "Play"} ${label(next.id)}", color = Brand, modifier = Modifier.padding(start = 4.dp))
+        }
+        AnimatedVisibility(expanded || searching || rows.size <= 2) {
+            Column {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    seasons.forEach { s -> FilterChip(selected = season == s, onClick = { season = s }, label = { Text(s) }) }
+                }
+                episodes.filter { label(it.id).startsWith(season) }.forEach { episode ->
+                    HorizontalDivider(color = Line.copy(alpha = .5f))
+                    Column {
+                        Row(Modifier.fillMaxWidth().clickable { model.playEntry(episode) }.padding(start = 18.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f).padding(vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(label(episode.id), color = Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text(formatBytes(episode.size), color = Dim, fontSize = 12.sp)
+                                SavedNote(episode)
+                            }
+                            EntryActions(model, episode)
+                        }
+                        EntryProgress(episode, history[episode.key])
+                    }
                 }
             }
         }
@@ -130,45 +212,106 @@ fun ListScreen(model: AppModel) {
 }
 
 @Composable
-private fun Row(entry: Entry, onClear: (() -> Unit)?, onClick: () -> Unit) {
-    val where = if (entry.local) "on this device" else "from peers"
-    val cached = if (!entry.local && entry.cachedBytes > 0) " · cached ${formatBytes(entry.cachedBytes)}" else ""
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 14.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label(entry.id), color = Ink, fontSize = 17.sp)
-            Text("${formatBytes(entry.size)} · $where$cached", color = Dim, fontSize = 14.sp)
-        }
-        if (onClear != null) {
-            TextButton(onClick = onClear) { Text("Clear", color = Dim, fontSize = 13.sp) }
+private fun SavedNote(entry: Entry) {
+    if (entry.local || (entry.size > 0 && entry.cachedBytes >= entry.size)) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Box(Modifier.size(4.dp).background(Accent, CircleShape))
+        Text("Saved", color = Accent, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun EntryProgress(entry: Entry, progress: WatchProgress?) {
+    val fraction = when {
+        progress?.partial == true && progress.durationMs > 0 -> progress.positionMs.toFloat() / progress.durationMs
+        !entry.local && entry.size > 0 && entry.cachedBytes in 1 until entry.size -> entry.cachedBytes.toFloat() / entry.size
+        else -> 0f
+    }
+    if (fraction > 0) LinearProgressIndicator(progress = { fraction.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(2.dp), color = if (progress?.partial == true) Brand else Accent, trackColor = Line)
+}
+
+@Composable
+private fun EntryActions(model: AppModel, entry: Entry) {
+    var menu by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    CinemaIcon(CastIcon, "Cast ${entry.title}") { model.castEntryOrSheet(entry, model.watchHistory.value[entry.key]?.takeIf { it.partial }?.positionMs ?: 0L) }
+    Box {
+        CinemaIcon(MoreVertIcon, "More options") { menu = true }
+        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+            DropdownMenuItem(text = { Text("Cast to TV…") }, onClick = { menu = false; model.castEntryOrSheet(entry, model.watchHistory.value[entry.key]?.takeIf { it.partial }?.positionMs ?: 0L) })
+            if (entry.magnetUrl.isNotBlank()) DropdownMenuItem(text = { Text("Copy Magnet Link") }, onClick = { menu = false; clipboard.setText(AnnotatedString(entry.magnetUrl)) })
+            if (!entry.local && entry.cachedBytes > 0) DropdownMenuItem(text = { Text("Free Up Cache") }, onClick = { menu = false; model.clearCache(entry.key) })
         }
     }
 }
 
-private fun groups(entries: List<Entry>, q: String): List<Pair<String, List<Entry>>> {
-    val rows = entries
-        .filter { q.isEmpty() || it.title.lowercase().contains(q) || it.id.lowercase().contains(q) }
-        .distinctBy { it.id }
-        .sortedWith(compareBy<Entry>({ it.title.lowercase() }, { it.title }, { it.id }))
-    val out = mutableListOf<Pair<String, MutableList<Entry>>>()
-    for (entry in rows) {
-        if (out.lastOrNull()?.first == entry.title) out.last().second += entry
-        else out += entry.title to mutableListOf(entry)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun UnderTheHood(model: AppModel, onClose: () -> Unit, onAdd: () -> Unit) {
+    val status by model.status.collectAsState()
+    val settings by model.settings.collectAsState()
+    val clipboard = LocalClipboardManager.current
+    var engine by remember { mutableStateOf(false) }
+    var share by remember { mutableStateOf(false) }
+    val peers = status?.let { it.peers + it.lanPeers } ?: 0L
+    ModalBottomSheet(onDismissRequest = onClose, containerColor = CardBg, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 24.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Under the Hood", color = Ink, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                CinemaIcon(CloseIcon, "Close Under the Hood", onClick = onClose)
+            }
+            Text("A little cinema, anywhere.", color = Dim)
+            Text(if ((status?.lanPeers ?: 0) > 0) "Local Wi-Fi Turbo active" else if (peers > 0) "Connected to $peers peers" else "Finding your people…", color = Accent)
+            HorizontalDivider(color = Line)
+            Text("Channels & Sources", color = Ink, fontWeight = FontWeight.SemiBold)
+            val sources = status?.sources.orEmpty()
+            if (sources.isNotEmpty()) sources.forEach { Text(it.alias.ifBlank { "${it.kind.replaceFirstChar(Char::uppercase)} ${it.key.take(8)}" }, color = Dim) }
+            else {
+                if (settings.tracker.isNotEmpty()) Text("Primary tracker", color = Dim)
+                settings.sources.forEach { Text(it.alias.ifBlank { "Channel ${it.key.take(8)}" }, color = Dim) }
+            }
+            status?.discoveredSources.orEmpty().forEach { found ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(found.title, color = Ink, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { model.subscribeDiscovered(found) }) { Text("+ Follow", color = Brand) }
+                }
+            }
+            TextButton(onClick = onAdd) { Icon(AddIcon, null, tint = Brand); Text("Add Channel or Link", color = Brand) }
+            status?.channel?.takeIf { it.isNotBlank() }?.let { channel ->
+                TextButton(onClick = { share = !share }) { Icon(ShareIcon, null, tint = Brand); Text("Share My Channel", color = Brand) }
+                AnimatedVisibility(share) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        QrCodeView("peartube://channel/$channel", Modifier.size(240.dp))
+                        TextButton(onClick = { clipboard.setText(AnnotatedString("peartube://channel/$channel")) }) { Text("Copy Link", color = Brand) }
+                    }
+                }
+            }
+            HorizontalDivider(color = Line)
+            val savedCache = status?.cachedBytes ?: 0L
+            Text(if (savedCache > 0L) "Storage · ${formatBytes(savedCache)} cached" else "Storage · No cached video", color = Dim)
+            TextButton(onClick = { model.clearCache() }) {
+                Icon(DeleteSweepIcon, null, tint = Dim)
+                Text(if (savedCache > 0L) "Free up downloaded cache" else "Compact storage cache", color = Ink)
+            }
+            HorizontalDivider(color = Line)
+            Row(Modifier.fillMaxWidth().clickable { engine = !engine }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("Engine Room", color = Dim, modifier = Modifier.weight(1f))
+                Icon(if (engine) ChevronDownIcon else ChevronRightIcon, null, tint = Dim)
+            }
+            AnimatedVisibility(engine) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("$peers peers · ${sources.size} sources · ${formatBytes(status?.blobBytes ?: 0L)}", color = Dim, fontSize = 12.sp)
+                    status?.lan?.let { Text("LAN $it", color = Dim, fontSize = 12.sp) }
+                    p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 12.sp) }
+                }
+            }
+        }
     }
-    return out
 }
 
 @Composable
 fun fieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedTextColor = Ink,
-    unfocusedTextColor = Ink,
-    focusedContainerColor = CardBg,
-    unfocusedContainerColor = CardBg,
-    focusedBorderColor = Brand,
-    unfocusedBorderColor = Line,
-    focusedPlaceholderColor = Dim,
-    unfocusedPlaceholderColor = Dim,
-    cursorColor = Brand,
+    focusedTextColor = Ink, unfocusedTextColor = Ink,
+    focusedContainerColor = CardBg, unfocusedContainerColor = CardBg,
+    focusedBorderColor = Brand, unfocusedBorderColor = Line,
+    focusedPlaceholderColor = Dim, unfocusedPlaceholderColor = Dim, cursorColor = Brand,
 )

@@ -4,6 +4,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- The Wi-Fi multicast lock that LAN discovery (mDNS) needs while the app is in front. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:name=".PearTubeApp"
@@ -17,10 +21,10 @@
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:exported="false"
+            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- The launcher entry keeps the Dioxus app's component name, so an update
-             in place keeps existing home-screen icons. -->
+        <!-- Keeps the legacy launcher component name for in-place APK upgrades, plus peartube:// deep links. -->
         <activity-alias
             android:name="dev.dioxus.main.MainActivity"
             android:exported="true"
@@ -29,6 +33,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="peartube" />
+            </intent-filter>
         </activity-alias>
+
     </application>
 </manifest>

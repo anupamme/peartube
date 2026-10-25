@@ -17,16 +17,25 @@ class PearTubeApp : Application() {
         val multicast = getSystemService(WifiManager::class.java)
             .createMulticastLock("PearTube LAN discovery")
             .apply { setReferenceCounted(false) }
-        // The worklet's I/O stops while the app is in the background.
+        val wifiLock = getSystemService(WifiManager::class.java)
+            .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PearTube Cast stream")
+            .apply { setReferenceCounted(false) }
+        // Keep the worklet and LAN BlobServer pumping while casting to a TV even if the phone screen locks.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
+                model.inForeground = true
                 multicast.acquire()
+                wifiLock.acquire()
                 model.worker.resume()
             }
 
             override fun onStop(owner: LifecycleOwner) {
-                model.worker.suspend()
-                multicast.release()
+                model.inForeground = false
+                if (!model.shouldKeepWorkerAwake()) {
+                    model.worker.suspend()
+                    if (wifiLock.isHeld) wifiLock.release()
+                    if (multicast.isHeld) multicast.release()
+                }
             }
         })
     }

@@ -13,45 +13,75 @@ cd "$(dirname "$0")"
 version=$(node -p 'require("../package.json").version')
 host=darwin-$(uname -m | sed 's/x86_64/x64/')
 
-# Panic messages name source files; write this machine's home directory as ~.
-CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$HOME=~" cargo build --release
+receiver=0
+action=""
+for arg in "$@"; do
+  case "$arg" in
+    --receiver) receiver=1 ;;
+    --open|--zip) action="$arg" ;;
+  esac
+done
 
-app=target/release/PearTube.app
+if [ "$receiver" = "1" ]; then
+  exe="PearTubeReceiver"
+  bundle_id="com.peartube.receiver"
+  bundle_name="PearTube Receiver"
+else
+  exe="PearTube"
+  bundle_id="com.peartube.app"
+  bundle_name="PearTube"
+fi
+
+# Panic messages name source files; write this machine's home directory as ~.
+CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=$HOME=~" cargo build --release --bin "$exe"
+
+app="target/release/$exe.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks"
-cp target/release/PearTube "$app/Contents/MacOS/"
+cp "target/release/$exe" "$app/Contents/MacOS/"
 cp -R ../worklet/vendor/bare-kit/darwin/BareKit.framework "target/bare-addons/$host/"*.framework "$app/Contents/Frameworks/"
 # The bundle loads its frameworks from Contents/Frameworks only: drop the
 # build's absolute rpaths, as the binary records them.
-bin="$app/Contents/MacOS/PearTube"
+bin="$app/Contents/MacOS/$exe"
 otool -l "$bin" | sed -n 's/^ *path \(.*\) (offset [0-9]*)$/\1/p' | grep -v '^@' | while IFS= read -r rpath; do
   install_name_tool -delete_rpath "$rpath" "$bin"
 done
 # LSMinimumSystemVersion: the worklet's addon frameworks (rocksdb-native,
 # udx-native, …) are built for macOS 13, so the app cannot load on older ones.
+url_types=""
+if [ "$receiver" = "0" ]; then
+  url_types="  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>com.peartube.uri</string>
+      <key>CFBundleURLSchemes</key><array><string>peartube</string></array>
+    </dict>
+  </array>"
+fi
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>PearTube</string>
-  <key>CFBundleIdentifier</key><string>com.peartube.app</string>
-  <key>CFBundleName</key><string>PearTube</string>
+  <key>CFBundleExecutable</key><string>$exe</string>
+  <key>CFBundleIdentifier</key><string>$bundle_id</string>
+  <key>CFBundleName</key><string>$bundle_name</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$version</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key><string>PearTube connects directly to peers on your network.</string>
+$url_types
 </dict>
 </plist>
 EOF
 codesign --force --sign - --timestamp=none "$app/Contents/Frameworks/"*.framework
 codesign --force --sign - --timestamp=none "$app"
 
-if [ "${1:-}" = "--open" ]; then open "$app"; fi
-if [ "${1:-}" = "--zip" ]; then
-  zip="target/release/PearTube-$version-macos-$(uname -m).zip"
+if [ "$action" = "--open" ]; then open "$app"; fi
+if [ "$action" = "--zip" ]; then
+  zip="target/release/$exe-$version-macos-$(uname -m).zip"
   rm -f "$zip"
   # ditto keeps the bundle's symlinks and signatures, which zip(1) breaks.
   ditto -c -k --keepParent "$app" "$zip"

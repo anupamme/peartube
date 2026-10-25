@@ -11,6 +11,7 @@ import android.view.View
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
@@ -33,6 +34,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -99,16 +102,15 @@ import java.io.File
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material3.FilterChip
+import androidx.compose.runtime.key
 
-/**
- * Plays [entry] through peartube-media's player. The picture is native, in views behind
- * this screen (PlayerHost); the screen leaves its slot clear and draws the controls over
- * it. They hide 3 s after the last touch while playing, and a tap on the picture brings
- * them back. Fullscreen fills the display, sideways for a wide picture; turning the phone
- * sideways enters it too. Leaving the screen (back, or the end of the video) closes it.
- */
+/** An edge-to-edge cinema, with content details tucked behind the info control. */
 @Composable
-fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
+fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs: Long? = null) {
     val context = LocalContext.current
     val activity = remember(context) { context.activity() }
     val view = LocalView.current
@@ -125,9 +127,16 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
     var controls by remember { mutableStateOf(true) }
     var touches by remember { mutableIntStateOf(0) }
     var menuOpen by remember { mutableStateOf(false) }
-    var wantFullscreen by remember { mutableStateOf(false) }
+    var infoOpen by remember { mutableStateOf(false) }
+    val isTv = remember(context) {
+        (context.resources.configuration.uiMode and Configuration.UI_MODE_TYPE_MASK) == Configuration.UI_MODE_TYPE_TELEVISION ||
+            context.packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
+    }
+    var landscapeMode by remember(isTv) { mutableStateOf(isTv) }
     val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val fullscreen = wantFullscreen || landscape
+    val resumePosition = remember(entry.key) { startPositionMs ?: model.watchHistory.value[entry.key]?.takeIf { it.partial }?.positionMs ?: 0L }
+    var resumePending by remember(entry.key) { mutableStateOf(resumePosition > 0) }
+    val latestState by rememberUpdatedState(state)
 
     DisposableEffect(entry.streamUrl) {
         host.open()
@@ -140,6 +149,7 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         }
         handle = opened
         onDispose {
+            model.recordWatchProgress(entry, latestState.positionMs, latestState.durationMs)
             handle = 0L
             host.close()
             if (opened != 0L) NativePlayer.close(opened)
@@ -167,6 +177,7 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         val h = handle
         if (h == 0L) return@LaunchedEffect
         var shape: Pair<Int, Int>? = null
+        var ticks = 0
         while (true) {
             val st = PlayerState.parse(NativePlayer.state(h))
             val w = st.videoWidth
@@ -176,6 +187,11 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
                 host.fit(w.toFloat() / ht)
             }
             state = st
+            if (resumePending && st.durationMs != null) {
+                resumePending = false
+                NativePlayer.seek(h, resumePosition.coerceAtMost(st.durationMs))
+            }
+            if (ticks++ % 16 == 0 || st.ended) model.recordWatchProgress(entry, st.positionMs, st.durationMs)
             // A seek is done once the player is near it; it may land on an earlier keyframe.
             target?.let {
                 if (!scrubbing && (abs(st.positionMs - it) < 1_500 || SystemClock.uptimeMillis() - seekedAt > 2_000)) target = null
@@ -188,31 +204,28 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         }
     }
 
-    LaunchedEffect(controls, state.playing, touches, scrubbing, menuOpen) {
-        if (controls && state.playing && !scrubbing && !menuOpen) {
+    LaunchedEffect(controls, state.playing, touches, scrubbing, menuOpen, infoOpen) {
+        if (controls && state.playing && !scrubbing && !menuOpen && !infoOpen) {
             delay(3_000)
             controls = false
         }
     }
 
-    LaunchedEffect(fullscreen) { activity.immersive(fullscreen, view) }
-    DisposableEffect(activity) {
-        // Leaving fullscreen by hand while sideways locks portrait (setFullscreen); once the
-        // phone is upright again, the sensor chooses again.
-        val upright = object : OrientationEventListener(activity) {
-            override fun onOrientationChanged(degrees: Int) {
-                if (degrees != ORIENTATION_UNKNOWN && (degrees < 20 || degrees > 340) &&
-                    activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-                ) {
-                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-                }
-            }
-        }
-        upright.enable()
+    val exitOrientation = if (isTv) ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    DisposableEffect(activity, exitOrientation) {
+        activity.immersive(true, view)
+        activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
-            upright.disable()
-            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity.requestedOrientation = exitOrientation
             activity.immersive(false, view)
+            activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+    LaunchedEffect(landscapeMode, isTv) {
+        activity.requestedOrientation = when {
+            isTv -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            landscapeMode -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 
@@ -220,21 +233,20 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
     val shown = target ?: state.positionMs
     val error = openError ?: state.error
     val busy = handle != 0L && state.buffering && error == null
-    val wide = state.videoWidth?.let { w -> state.videoHeight?.let { h -> w >= h } } ?: true
 
     fun show() {
         controls = true
         touches++
     }
-    fun setFullscreen(on: Boolean) {
+    fun toggleOrientation() {
         show()
-        wantFullscreen = on
-        activity.requestedOrientation = when {
-            on && wide -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            on -> activity.requestedOrientation
-            landscape -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            else -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
-        }
+        landscapeMode = !landscapeMode
+    }
+    fun leave() {
+        model.recordWatchProgress(entry, state.positionMs, state.durationMs)
+        activity.immersive(false, view)
+        activity.requestedOrientation = exitOrientation
+        model.screen.value = Screen.List
     }
     fun playPause() {
         show()
@@ -250,7 +262,7 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         seekedAt = SystemClock.uptimeMillis()
         NativePlayer.seek(handle, to)
     }
-    BackHandler(enabled = fullscreen) { setFullscreen(false) }
+    BackHandler { if (infoOpen) infoOpen = false else if (!isTv && landscapeMode) landscapeMode = false else leave() }
 
     val audio = state.tracks.filter { it.kind == "audio" }
     val subtitles = state.tracks.filter { it.kind == "subtitle" }
@@ -279,19 +291,15 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
                     }
                 },
         ) {
-            AnimatedVisibility(controls || !state.playing, enter = fadeIn(), exit = fadeOut()) {
+            AnimatedVisibility(controls || !state.playing || infoOpen, enter = fadeIn(), exit = fadeOut()) {
                 Box(Modifier.fillMaxSize().background(Scrim)) {
-                    // Only fullscreen lays out past the cutout. Out of it, the window fits the
-                    // system bars, and a cutout inset left over from fullscreen pushed this row
-                    // down by about the status bar's height.
                     Row(
                         Modifier.align(Alignment.TopStart).fillMaxWidth()
-                            .then(if (fullscreen) Modifier.windowInsetsPadding(WindowInsets.displayCutout) else Modifier)
-                            .padding(horizontal = if (fullscreen) 16.dp else 4.dp, vertical = if (fullscreen) 8.dp else 2.dp),
+                            .windowInsetsPadding(WindowInsets.displayCutout)
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        OverlayButton(BackIcon, "Back", { if (fullscreen) setFullscreen(false) else model.screen.value = Screen.List })
-                        if (fullscreen) {
+                        OverlayButton(BackIcon, "Back", ::leave)
                             Text(
                                 entry.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(start = 8.dp),
@@ -302,11 +310,15 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
                             if (audioOptions.isNotEmpty()) {
                                 TrackPicker(audioOptions, selectAudio, { menuOpen = it }) { open -> OverlayButton(AudioIcon, "Audio", open) }
                             }
-                        }
+                        OverlayButton(InfoIcon, "Content info", { infoOpen = !infoOpen; show() })
+                        OverlayButton(CastIcon, "Cast to TV", {
+                            model.recordWatchProgress(liveEntry, state.positionMs, state.durationMs)
+                            model.castEntryOrSheet(liveEntry, state.positionMs)
+                        })
                     }
                     Row(
                         Modifier.align(Alignment.Center),
-                        horizontalArrangement = Arrangement.spacedBy(if (fullscreen) 56.dp else 36.dp),
+                        horizontalArrangement = Arrangement.spacedBy(if (landscape) 56.dp else 36.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         OverlayButton(ReplayIcon, "Back 10 seconds", { seekTo(shown - 10_000) }, size = 52.dp, iconSize = 34.dp, badge = "10")
@@ -322,16 +334,17 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
                     }
                     Column(
                         Modifier.align(Alignment.BottomCenter).fillMaxWidth().windowInsetsPadding(WindowInsets.displayCutout)
-                            .padding(horizontal = if (fullscreen) 24.dp else 12.dp)
-                            .padding(bottom = if (fullscreen) 16.dp else 2.dp),
+                            .padding(horizontal = 24.dp, vertical = 16.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(clockText, color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f).padding(start = 4.dp))
-                            OverlayButton(
-                                if (fullscreen) FullscreenExitIcon else FullscreenIcon,
-                                if (fullscreen) "Exit fullscreen" else "Fullscreen",
-                                { setFullscreen(!fullscreen) },
-                            )
+                            if (!isTv) {
+                                OverlayButton(
+                                    if (landscape) FullscreenExitIcon else FullscreenIcon,
+                                    "Toggle orientation",
+                                    ::toggleOrientation,
+                                )
+                            }
                         }
                         SeekBar(
                             fraction = if (length > 0) shown.toFloat() / length else 0f,
@@ -355,59 +368,282 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry) {
         }
     }
 
-    if (fullscreen) {
-        Box(Modifier.fillMaxSize()) {
-            Slot(host, Modifier.fillMaxSize())
-            overlay()
+    val hasFirstFrame = state.videoWidth != null && (!state.buffering || state.positionMs > 0L)
+    Box(Modifier.fillMaxSize()) {
+        Slot(host, Modifier.fillMaxSize())
+        AnimatedVisibility(!hasFirstFrame && error == null, enter = fadeIn(tween(0)), exit = fadeOut(tween(180))) {
+            Box(Modifier.fillMaxSize().background(Color.Black))
         }
-    } else {
-        val maxSlot = (LocalConfiguration.current.screenHeightDp * 0.6f).dp
-        Column(Modifier.fillMaxSize()) {
-            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                Box(Modifier.fillMaxWidth().height(min(maxWidth * 9f / 16f, maxSlot))) {
-                    Slot(host, Modifier.fillMaxSize())
-                    overlay()
-                }
+        overlay()
+        if (error != null) Text(error, color = Danger, modifier = Modifier.align(Alignment.Center).padding(24.dp).background(CardBg, RoundedCornerShape(16.dp)).padding(16.dp))
+        if (infoOpen) {
+            PlayerInfoPanel(
+                model = model,
+                entry = liveEntry,
+                state = state,
+                landscape = landscape,
+                onSelectAudio = selectAudio,
+                onClose = { infoOpen = false },
+                onSwitch = { next, preserveTime ->
+                    model.recordWatchProgress(liveEntry, state.positionMs, state.durationMs)
+                    model.screen.value = Screen.Play(next, if (preserveTime) state.positionMs else null)
+                },
+                modifier = Modifier.align(if (landscape) Alignment.CenterEnd else Alignment.BottomCenter),
+            )
+        }
+    }
+}
+
+private fun prettyCodec(raw: String): String = when (raw.lowercase(Locale.ROOT)) {
+    "hevc", "h265" -> "HEVC · H.265"
+    "h264", "avc", "avc1" -> "AVC · H.264"
+    "av1" -> "AV1"
+    "vp9" -> "VP9"
+    "vp8" -> "VP8"
+    "mpeg4", "xvid", "divx" -> "MPEG-4"
+    "mpeg2video", "mpeg2" -> "MPEG-2"
+    "vc1" -> "VC-1"
+    "eac3", "ec-3" -> "Dolby E-AC-3"
+    "ac3" -> "Dolby AC-3"
+    "truehd" -> "Dolby TrueHD"
+    "dts", "dca" -> "DTS"
+    "flac" -> "FLAC Lossless"
+    "alac" -> "ALAC Lossless"
+    "aac" -> "AAC"
+    "opus" -> "Opus"
+    "vorbis" -> "Vorbis"
+    "mp3" -> "MP3"
+    "subrip", "srt" -> "SubRip"
+    "ass", "ssa" -> "ASS"
+    "hdmv_pgs_subtitle", "pgs" -> "PGS"
+    "dvd_subtitle", "vobsub" -> "VobSub"
+    else -> raw.uppercase(Locale.ROOT)
+}
+
+private fun resolutionTier(w: Int?, h: Int?): String? {
+    if (w == null || h == null || w <= 0 || h <= 0) return null
+    return when {
+        w >= 3800 || h >= 2100 -> "4K UHD"
+        w >= 2500 || h >= 1400 -> "1440p QHD"
+        w >= 1900 || h >= 1000 -> "1080p HD"
+        w >= 1200 || h >= 700 -> "720p HD"
+        else -> "SD"
+    }
+}
+
+private fun aspectRatioLabel(w: Int, h: Int): String {
+    if (h <= 0) return "—"
+    val r = w.toDouble() / h.toDouble()
+    return when {
+        abs(r - 16.0 / 9.0) < 0.06 -> "16:9"
+        abs(r - 4.0 / 3.0) < 0.06 -> "4:3"
+        else -> String.format(Locale.ROOT, "%.2f:1", r)
+    }
+}
+
+@Composable
+private fun SpecRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Text(label, color = Dim, fontSize = 12.sp)
+        Text(value, color = Ink, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+@Composable
+private fun PlayerInfoPanel(
+    model: AppModel,
+    entry: Entry,
+    state: PlayerState,
+    landscape: Boolean,
+    onSelectAudio: (Int) -> Unit,
+    onClose: () -> Unit,
+    onSwitch: (Entry, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val entries by model.entries.collectAsState()
+    val status by model.status.collectAsState()
+    val showId = Regex("(?i)(?:imdb:)?(tt\\d+)").find(entry.id)?.groupValues?.get(1)
+    val episodes = remember(entries, entry.id) {
+        if (label(entry.id) == "Movie") emptyList()
+        else entries.filter { candidate ->
+            label(candidate.id) != "Movie" &&
+                (candidate.title == entry.title || (showId != null &&
+                    Regex("(?i)(?:imdb:)?(tt\\d+)").find(candidate.id)?.groupValues?.get(1) == showId))
+        }.distinctBy { it.id }.sortedBy { episodeOrder(it.id) }
+    }
+    val formats = entries.filter { it.id == entry.id }.distinctBy { it.key }
+    val seasons = episodes.map { label(it.id).substringBefore('E') }.distinct()
+    var season by remember(entry.id) { mutableStateOf(label(entry.id).substringBefore('E')) }
+
+    val videoTrack = state.tracks.firstOrNull { it.kind == "video" }
+    val audioTracks = state.tracks.filter { it.kind == "audio" }
+    val subTracks = state.tracks.filter { it.kind == "subtitle" }
+    val activeAudio = audioTracks.firstOrNull { it.stream == state.audio } ?: audioTracks.firstOrNull()
+    val activeSub = subTracks.firstOrNull { it.stream == state.subtitle }
+
+    val resBadge = resolutionTier(state.videoWidth, state.videoHeight)
+    val vBadge = videoTrack?.let { prettyCodec(it.codec) }
+    val aBadge = activeAudio?.let { prettyCodec(it.codec) }
+    val decRaw = state.videoDecoder
+    val isHw = decRaw?.lowercase(Locale.ROOT)?.let { "mediacodec" in it || "hardware" in it || "hw" in it } == true
+
+    val pictureSpec = when {
+        state.videoWidth != null && state.videoHeight != null && vBadge != null ->
+            "${state.videoWidth} × ${state.videoHeight} (${aspectRatioLabel(state.videoWidth, state.videoHeight)}) · $vBadge"
+        state.videoWidth != null && state.videoHeight != null ->
+            "${state.videoWidth} × ${state.videoHeight} (${aspectRatioLabel(state.videoWidth, state.videoHeight)})"
+        vBadge != null -> vBadge
+        else -> "Probing stream…"
+    }
+    val decoderSpec = if (!decRaw.isNullOrBlank()) "$decRaw · ${state.droppedFrames} dropped" else "${state.droppedFrames} dropped frames"
+    val bitrateSpec = state.durationMs?.takeIf { it > 1000L && entry.size > 0L }?.let { durMs ->
+        val mbps = (entry.size.toDouble() * 8.0) / (durMs.toDouble() / 1000.0) / 1_000_000.0
+        String.format(Locale.ROOT, "%.1f Mbps avg · %s", mbps, formatBytes(entry.size))
+    } ?: formatBytes(entry.size)
+    val audioSpec = activeAudio?.let { a ->
+        val lang = (a.language ?: a.title ?: "Default").uppercase(Locale.ROOT)
+        val count = if (audioTracks.size > 1) " (${audioTracks.size} tracks)" else ""
+        "$lang · ${prettyCodec(a.codec)}$count"
+    } ?: "None"
+    val subSpec = when {
+        subTracks.isEmpty() -> "None"
+        activeSub != null -> "${(activeSub.language ?: activeSub.title ?: "Active").uppercase(Locale.ROOT)} · ${prettyCodec(activeSub.codec)} (of ${subTracks.size})"
+        else -> "Off · ${subTracks.size} available (${subTracks.map { prettyCodec(it.codec) }.distinct().joinToString()})"
+    }
+    val sourceSpec = when {
+        entry.local || (entry.size > 0 && entry.cachedBytes >= entry.size) -> "Saved on device · ${formatBytes(entry.size)}"
+        entry.cachedBytes > 0 && entry.size > 0 -> "${formatBytes(entry.cachedBytes)} buffered (${((entry.cachedBytes * 100) / entry.size)}%)"
+        else -> "Live P2P stream"
+    }
+
+    val badges = buildList {
+        resBadge?.let { add(it to Brand) }
+        vBadge?.let { add(it to Ink) }
+        aBadge?.let { add(it to Ink) }
+        decRaw?.takeIf { it.isNotBlank() }?.let { add("${if (isHw) "HW" else "SW"} · $it" to if (isHw) Accent else Dim) }
+    }
+
+    Column(
+        modifier
+            .windowInsetsPadding(WindowInsets.displayCutout)
+            .padding(14.dp)
+            .widthIn(max = 400.dp)
+            .fillMaxWidth()
+            .heightIn(max = if (landscape) 440.dp else 540.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(Color(0xF00F131C))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(22.dp))
+            .verticalScroll(rememberScrollState())
+            .padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(entry.title, color = Ink, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(label(entry.id), color = Dim, fontSize = 12.sp)
             }
-            Column(
-                Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(entry.title, color = Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, lineHeight = 26.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                val cachedNote = if (!liveEntry.local && liveEntry.cachedBytes > 0) " · cached ${formatBytes(liveEntry.cachedBytes)}" else ""
-                Text(
-                    "${label(liveEntry.id)} · ${formatBytes(liveEntry.size)} · ${if (liveEntry.local) "on this device" else "from peers"}$cachedNote",
-                    color = Dim, fontSize = 13.sp,
-                )
-                p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 13.sp) }
-                if (!liveEntry.local && liveEntry.cachedBytes > 0) {
-                    TextButton(onClick = { model.clearCache(liveEntry.key) }, modifier = Modifier.padding(top = 2.dp)) {
-                        Text("Clear cached (${formatBytes(liveEntry.cachedBytes)})", color = Dim, fontSize = 13.sp)
-                    }
-                }
-                if (audioOptions.isNotEmpty() || subtitleOptions.isNotEmpty()) {
-                    Row(Modifier.padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (audioOptions.isNotEmpty()) {
-                            TrackPicker(audioOptions, selectAudio, { menuOpen = it }) { open ->
-                                Chip(AudioIcon, audio.firstOrNull { it.stream == state.audio }?.let(::shortName) ?: "No audio", open)
-                            }
-                        }
-                        if (subtitleOptions.isNotEmpty()) {
-                            TrackPicker(subtitleOptions, selectSubtitle, { menuOpen = it }) { open ->
-                                Chip(SubtitlesIcon, subtitles.firstOrNull { it.stream == state.subtitle }?.let(::shortName) ?: "Off", open)
-                            }
-                        }
-                    }
-                }
-                error?.let {
+            CinemaIcon(CloseIcon, "Close content info", Ink, onClose)
+        }
+        if (badges.isNotEmpty()) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                badges.forEach { (txt, tint) ->
                     Text(
-                        it, color = Danger, fontSize = 14.sp,
-                        modifier = Modifier.padding(top = 14.dp).fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(CardBg).padding(12.dp),
+                        txt,
+                        color = tint,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(Color.White.copy(alpha = 0.07f))
+                            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 9.dp, vertical = 4.dp),
                     )
                 }
-                Text("SHA-256 ${entry.sha256.take(16)}…", color = Dim, fontSize = 11.sp, modifier = Modifier.padding(top = 18.dp))
             }
         }
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color.Black.copy(alpha = 0.36f))
+                .border(1.dp, Line, RoundedCornerShape(14.dp))
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SpecRow("Video", pictureSpec)
+            SpecRow("Decoder", decoderSpec)
+            SpecRow("Bitrate", bitrateSpec)
+            SpecRow("Audio", audioSpec)
+            SpecRow("Subtitles", subSpec)
+            SpecRow("Source", sourceSpec)
+        }
+        if (audioTracks.size > 1) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("AUDIO TRACKS", color = Dim, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    audioTracks.forEach { t ->
+                        val sel = t.stream == activeAudio?.stream
+                        FilterChip(
+                            selected = sel,
+                            onClick = { onSelectAudio(t.stream) },
+                            label = { Text("${(t.language ?: t.title ?: "Track ${t.stream}").uppercase(Locale.ROOT)} · ${prettyCodec(t.codec)}", fontSize = 12.sp) },
+                        )
+                    }
+                }
+            }
+        }
+        if (formats.size > 1) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("VERSIONS", color = Dim, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                formats.forEach { format ->
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (format.key == entry.key) Brand.copy(alpha = .20f) else Color.White.copy(alpha = 0.04f))
+                            .clickable { if (format.key != entry.key) onSwitch(format, true) }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "${formatBytes(format.size)} · ${if (format.local) "Saved" else "Stream"}",
+                            color = if (format.key == entry.key) Brand else Ink,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (format.key == entry.key) Icon(CheckIcon, "Selected format", tint = Brand, modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+        }
+        if (episodes.size > 1) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("EPISODES", color = Dim, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                if (seasons.size > 1) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        seasons.forEach { s -> FilterChip(selected = season == s, onClick = { season = s }, label = { Text(s) }) }
+                    }
+                }
+                Column(Modifier.heightIn(max = 176.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    episodes.filter { seasons.size <= 1 || label(it.id).startsWith(season) }.forEach { episode ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(if (episode.id == entry.id) Brand.copy(alpha = .20f) else Color.White.copy(alpha = 0.04f))
+                                .clickable { if (episode.id != entry.id) onSwitch(episode, false) }
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(label(episode.id), color = if (episode.id == entry.id) Brand else Ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            Text(formatBytes(episode.size), color = Dim, fontSize = 12.sp, modifier = Modifier.padding(end = 8.dp))
+                            if (episode.id == entry.id) Icon(PlayIcon, "Playing", tint = Brand, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                }
+            }
+        }
+        p2pSummary(status)?.let { Text(it, color = Brand, fontSize = 11.sp) }
     }
 }
 
@@ -532,25 +768,8 @@ private fun TrackPicker(options: List<Option>, onSelect: (Int) -> Unit, onOpen: 
     }
 }
 
-@Composable
-private fun Chip(icon: ImageVector, text: String, onClick: () -> Unit) {
-    val shape = RoundedCornerShape(18.dp)
-    Row(
-        Modifier.clip(shape).background(CardBg).border(1.dp, Line, shape).clickable(onClick = onClick)
-            .padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(icon, null, tint = Dim, modifier = Modifier.size(18.dp))
-        Text(text, color = Ink, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp))
-        Icon(ExpandIcon, null, tint = Dim, modifier = Modifier.size(18.dp))
-    }
-}
 
-/** A track's name without its codec: its title, else its language. */
-private fun shortName(track: Track) = track.title ?: track.language?.uppercase(Locale.ROOT) ?: "Track ${track.stream}"
-
-private fun clock(ms: Long): String {
+internal fun clock(ms: Long): String {
     val s = ms.coerceAtLeast(0L) / 1000
     return if (s >= 3600) "%d:%02d:%02d".format(Locale.ROOT, s / 3600, s / 60 % 60, s % 60)
     else "%d:%02d".format(Locale.ROOT, s / 60, s % 60)
@@ -561,13 +780,15 @@ private fun clock(ms: Long): String {
  * cutout: the picture centres on the whole display, and the controls pad themselves clear
  * of the cutout.
  */
-private fun Activity.immersive(on: Boolean, view: View) {
-    WindowCompat.setDecorFitsSystemWindows(window, !on)
+internal fun Activity.immersive(on: Boolean, view: View) {
+    WindowCompat.setDecorFitsSystemWindows(window, false)
     val bars = WindowCompat.getInsetsController(window, view)
     if (on) {
         bars.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         bars.hide(WindowInsetsCompat.Type.systemBars())
     } else {
+        bars.isAppearanceLightStatusBars = false
+        bars.isAppearanceLightNavigationBars = false
         bars.show(WindowInsetsCompat.Type.systemBars())
     }
     window.attributes = window.attributes.apply {
@@ -576,7 +797,7 @@ private fun Activity.immersive(on: Boolean, view: View) {
     }
 }
 
-private tailrec fun Context.activity(): Activity = when (this) {
+internal tailrec fun Context.activity(): Activity = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.activity()
     else -> error("The play screen needs an activity")

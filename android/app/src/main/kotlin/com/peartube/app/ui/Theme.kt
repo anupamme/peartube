@@ -5,12 +5,13 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-// PearTube's palette, shared with the Mac app (desktop/src/theme.rs).
-val Bg = Color(0xFF0F1115)
-val CardBg = Color(0xFF171A21)
-val Line = Color(0xFF262B36)
-val Ink = Color(0xFFE6E8EE)
-val Dim = Color(0xFF8A91A3)
+val Bg = Color(0xFF0A0C10)
+val CardBg = Color(0xFF131720)
+val CardElevated = Color(0xFF1A202C)
+val Line = Color(0xFF232A38)
+val Ink = Color(0xFFF3F5FA)
+val Dim = Color(0xFF8A93A6)
+val Accent = Color(0xFF4ADE80)
 val Brand = Color(0xFF9147FF)
 val Danger = Color(0xFFFF6B6B)
 
@@ -27,8 +28,8 @@ fun PearTubeTheme(content: @Composable () -> Unit) {
             surfaceVariant = CardBg,
             onSurfaceVariant = Dim,
             surfaceContainer = CardBg,
-            surfaceContainerHigh = CardBg,
-            surfaceContainerHighest = CardBg,
+            surfaceContainerHigh = CardElevated,
+            surfaceContainerHighest = CardElevated,
             outline = Line,
             outlineVariant = Line,
             error = Danger,

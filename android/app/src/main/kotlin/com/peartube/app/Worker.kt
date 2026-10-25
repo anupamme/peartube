@@ -25,8 +25,15 @@ class WorkerException(message: String) : Exception(message)
  */
 class Worker(context: Context) {
     sealed interface Event {
-        /** The tracker, the peer set or LAN discovery changed. */
+        /** A tracker, channel, peer set, or LAN discovery changed. */
         data object Update : Event
+
+        /** Subscribed sources changed through the loopback HTTP daemon. */
+        data class Sources(val list: List<SourceInfo>) : Event
+
+
+        /** Cast receivers, active cast session, or local TV receiver state changed. */
+        data class Cast(val status: CastStatus) : Event
 
         /** The worker hit an uncaught error. */
         data class Fatal(val message: String) : Event
@@ -71,9 +78,12 @@ class Worker(context: Context) {
     }
 
     suspend fun start(settings: Settings): Status {
+        val folder = settings.tracker.ifEmpty { "default" }
+        val srcArray = JSONArray().apply { settings.sources.forEach { put(it.toJson()) } }
         val params = JSONObject()
-            .put("storage", File(storeDir, "trackers/${settings.tracker}").path)
-            .put("tracker", settings.tracker)
+            .put("storage", File(storeDir, "trackers/$folder").path)
+            .put("tracker", if (settings.tracker.isEmpty()) JSONObject.NULL else settings.tracker)
+            .put("sources", srcArray)
             .put("relayThrough", if (settings.relayThrough.isEmpty()) JSONObject.NULL else JSONArray(settings.relayThrough))
             .put("bootstrap", if (settings.bootstrap.isEmpty()) JSONObject.NULL else JSONArray(settings.bootstrap))
             .put("lan", settings.lanDiscovery)
@@ -83,15 +93,56 @@ class Worker(context: Context) {
 
     suspend fun status(): Status = Status.from(call("status") as JSONObject)
 
-    /** Every entry in the tracker. */
+    /** Every entry across subscribed trackers and channels. */
     suspend fun search(): List<Entry> {
         val list = call("search", JSONObject().put("id", JSONObject.NULL)) as JSONArray
         return List(list.length()) { Entry.from(list.getJSONObject(it)) }
     }
 
-    suspend fun clearCache(key: String? = null) {
-        call("clearCache", JSONObject().put("key", key ?: JSONObject.NULL))
+    private val castDir: String get() = File(storeDir, "cast").path
+
+    suspend fun openUri(uri: String): OpenUriResult =
+        OpenUriResult.from(call("openUri", JSONObject().put("uri", uri).put("storage", castDir)) as JSONObject)
+
+    suspend fun removeSource(key: String) {
+        call("removeSource", JSONObject().put("key", key))
     }
+
+    suspend fun clearCache(key: String? = null): Pair<Long, Long> {
+        val res = call("clearCache", JSONObject().put("key", key ?: JSONObject.NULL)) as? JSONObject
+        return (res?.optLong("clearedBytes", 0L) ?: 0L) to (res?.optLong("reclaimedBytes", 0L) ?: 0L)
+    }
+
+    suspend fun castStatus(): CastStatus =
+        CastStatus.from(call("castStatus", JSONObject().put("storage", castDir)) as? JSONObject)
+
+    suspend fun castPair(params: JSONObject): CastStatus =
+        CastStatus.from(call("castPair", params.put("storage", castDir)) as? JSONObject)
+
+    suspend fun castRemove(id: String): CastStatus =
+        CastStatus.from(call("castRemove", JSONObject().put("id", id).put("storage", castDir)) as? JSONObject)
+
+    suspend fun castPlay(receiverId: String, key: String, preferMode: String = "auto", startPositionMs: Long = 0L): CastStatus =
+        CastStatus.from(
+            call(
+                "castPlay",
+                JSONObject()
+                    .put("storage", castDir)
+                    .put("receiverId", receiverId)
+                    .put("key", key)
+                    .put("preferMode", preferMode)
+                    .put("startPositionMs", startPositionMs),
+            ) as? JSONObject,
+        )
+
+
+    suspend fun castAttach(receiverId: String): CastStatus =
+        CastStatus.from(call("castAttach", JSONObject().put("storage", castDir).put("receiverId", receiverId)) as? JSONObject)
+    suspend fun castControl(params: JSONObject): CastStatus =
+        CastStatus.from(call("castControl", params.put("storage", castDir)) as? JSONObject)
+
+    suspend fun castStop(stopPlayback: Boolean = true): CastStatus =
+        CastStatus.from(call("castStop", JSONObject().put("storage", castDir).put("stopPlayback", stopPlayback)) as? JSONObject)
 
     /** Stops the worklet's I/O while the app is in the background. */
     fun suspend() = handler.post { worklet?.suspend() }
@@ -184,6 +235,14 @@ class Worker(context: Context) {
         }
         when (msg.optString("event")) {
             "update" -> _events.tryEmit(Event.Update)
+            "sources" -> {
+                val arr = msg.optJSONArray("sources")
+                if (arr != null) {
+                    _events.tryEmit(Event.Sources(List(arr.length()) { SourceInfo.from(arr.getJSONObject(it)) }))
+                }
+                _events.tryEmit(Event.Update)
+            }
+            "cast" -> _events.tryEmit(Event.Cast(CastStatus.from(msg.optJSONObject("cast"))))
             "fatal" -> _events.tryEmit(Event.Fatal(msg.optString("error")))
         }
     }

@@ -62,6 +62,8 @@ data class PlayerState(
     val subtitle: Int? = null,
     val videoWidth: Int? = null,
     val videoHeight: Int? = null,
+    val videoDecoder: String? = null,
+    val droppedFrames: Long = 0,
 ) {
     companion object {
         fun parse(text: String): PlayerState {
@@ -84,6 +86,8 @@ data class PlayerState(
                 subtitle = json.optInteger("subtitle"),
                 videoWidth = json.optInteger("videoWidth"),
                 videoHeight = json.optInteger("videoHeight"),
+                videoDecoder = json.optText("videoDecoder"),
+                droppedFrames = json.optLong("droppedFrames", 0L),
             )
         }
     }

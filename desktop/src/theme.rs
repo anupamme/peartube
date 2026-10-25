@@ -4,14 +4,15 @@
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Hsla, px, rgb};
 
-pub const BG: u32 = 0x0f1115;
-pub const CARD: u32 = 0x171a21;
-pub const LINE: u32 = 0x262b36;
-pub const INK: u32 = 0xe6e8ee;
-pub const DIM: u32 = 0x8a91a3;
+pub const BG: u32 = 0x0a0c10;
+pub const CARD: u32 = 0x131720;
+pub const CARD_ELEVATED: u32 = 0x1a202c;
+pub const LINE: u32 = 0x232a38;
+pub const INK: u32 = 0xf3f5fa;
+pub const DIM: u32 = 0x8a93a6;
 pub const BRAND: u32 = 0x9147ff;
+pub const ACCENT: u32 = 0x4ade80;
 pub const DANGER: u32 = 0xff6b6b;
-
 pub fn apply(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     Theme::update(cx, |theme| {
@@ -21,7 +22,7 @@ pub fn apply(cx: &mut App) {
         theme.muted_foreground = color(DIM);
         theme.border = color(LINE);
         theme.input = color(LINE);
-        theme.popover = color(CARD);
+        theme.popover = color(CARD_ELEVATED);
         let brand = color(BRAND);
         theme.primary = brand;
         theme.primary_foreground = color(0xffffff);
@@ -36,6 +37,6 @@ pub fn apply(cx: &mut App) {
         theme.slider_thumb = color(0xffffff);
         theme.danger = color(DANGER);
         theme.font_size = px(14.);
-        theme.radius = px(8.);
+        theme.radius = px(12.);
     });
 }

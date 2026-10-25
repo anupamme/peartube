@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PearTube"
-include(":app")
+include(":app", ":tv")

@@ -1,11 +1,12 @@
-//! Settings: the tracker to join, optional blind relays and DHT bootstrap,
-//! LAN discovery, and the MIDI SoundFont. Save restarts the worker with them.
+//! Progressive-disclosure Settings: human-first Channels & Playback up front,
+//! Advanced Network & Engine tucked quietly behind an expandable section.
 
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
-use gpui_kit::component::{Disableable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use peartube::settings::Settings;
@@ -13,36 +14,50 @@ use peartube::soundfont;
 
 use crate::app::{PearTube, Screen};
 use crate::list::column;
-use crate::theme::{DANGER, DIM, LINE};
+use crate::theme::{CARD, DANGER, DIM, LINE};
 
 pub struct SettingsForm {
     tracker: Entity<InputState>,
+    sources: Entity<TextareaState>,
     relays: Entity<TextareaState>,
     bootstrap: Entity<TextareaState>,
     lan: bool,
     private_routing: bool,
+    advanced_open: bool,
     error: Option<SharedString>,
 }
 
 impl SettingsForm {
     pub fn new(settings: &Settings, window: &mut Window, cx: &mut Context<PearTube>) -> Self {
+        let advanced_open = !settings.relay_through.is_empty() || !settings.bootstrap.is_empty() || settings.private_routing;
         SettingsForm {
-            tracker: cx.new(|cx| InputState::new(window, cx).default_value(settings.tracker.clone())),
-            relays: cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(settings.relay_through.join(", "))),
-            bootstrap: cx.new(|cx| TextareaState::new(window, cx).rows(3).default_value(settings.bootstrap.join(", "))),
+            tracker: cx.new(|cx| InputState::new(window, cx).placeholder("Paste a 64-character library or channel key…").default_value(settings.tracker.clone())),
+            sources: cx.new(|cx| TextareaState::new(window, cx).rows(4).placeholder("One peartube://channel/… link per line").default_value(settings.format_sources())),
+            relays: cx.new(|cx| TextareaState::new(window, cx).rows(2).default_value(settings.relay_through.join(", "))),
+            bootstrap: cx.new(|cx| TextareaState::new(window, cx).rows(2).default_value(settings.bootstrap.join(", "))),
             lan: settings.lan_discovery,
             private_routing: settings.private_routing,
+            advanced_open,
             error: None,
         }
     }
 }
 
-fn field(label: &'static str, hint: &'static str, input: impl IntoElement) -> Div {
+fn card_section(title: &'static str, subtitle: &'static str, body: impl IntoElement) -> Div {
     v_flex()
-        .gap_1()
-        .child(div().font_weight(FontWeight::SEMIBOLD).child(label))
-        .child(div().text_sm().text_color(rgb(DIM)).child(hint))
-        .child(div().mt_1().child(input))
+        .p_5()
+        .gap_3()
+        .rounded(px(16.))
+        .bg(rgb(CARD))
+        .border_1()
+        .border_color(rgb(LINE))
+        .child(
+            v_flex()
+                .gap_0p5()
+                .child(div().text_base().font_weight(FontWeight::SEMIBOLD).child(title))
+                .child(div().text_xs().text_color(rgb(DIM)).child(subtitle)),
+        )
+        .child(body)
 }
 
 fn inline_error(error: SharedString) -> Div {
@@ -52,17 +67,21 @@ fn inline_error(error: SharedString) -> Div {
 impl PearTube {
     pub fn render_settings(&self, form: &SettingsForm, cx: &mut Context<Self>) -> impl IntoElement {
         let bank = &self.bank;
+        let adv = form.advanced_open;
+        let first_run = !self.settings.has_sources();
+
         v_flex()
             .size_full()
             .child(
                 div().border_b_1().border_color(rgb(LINE)).child(
-                    column().py_3().child(
+                    column().py_3p5().child(
                         h_flex()
                             .justify_between()
+                            .items_center()
                             .min_h(px(32.))
-                            .child(div().text_xl().font_weight(FontWeight::BOLD).child("Settings"))
-                            .when(!self.settings.tracker.is_empty(), |this| {
-                                this.child(Button::new("cancel").ghost().label("Cancel").on_click(cx.listener(|this, _, _, cx| this.show_list(cx))))
+                            .child(div().text_xl().font_weight(FontWeight::BOLD).child(if first_run { "Welcome to PearTube" } else { "Settings" }))
+                            .when(!first_run, |this| {
+                                this.child(Button::new("cancel").ghost().label("Close").on_click(cx.listener(|this, _, _, cx| this.show_list(cx))))
                             }),
                     ),
                 ),
@@ -70,80 +89,142 @@ impl PearTube {
             .child(
                 div().id("settings").flex_1().min_h_0().overflow_y_scrollbar().child(
                     column()
-                        .py_4()
-                        .gap_5()
+                        .py_6()
+                        .gap_4()
                         .when_some(form.error.clone(), |this, error| this.child(inline_error(error)))
-                        .child(field("Tracker key", "64 hex characters, from a relay's /v1/status", Input::new(&form.tracker)))
-                        .child(field("Blind relays", "Optional relay keys, for networks where peers cannot connect directly", Textarea::new(&form.relays)))
-                        .child(field("DHT bootstrap", "Optional host:port list for a private DHT. Empty uses the public DHT.", Textarea::new(&form.bootstrap)))
-                        .child(
+                        .child(card_section(
+                            "Library & Channels",
+                            "Connect your home server key or follow creator channels.",
                             v_flex()
-                                .gap_1()
-                                .child(Checkbox::new("lan").checked(form.lan).label("Find relays on this network").on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    if let Screen::Settings(form) = &mut this.screen {
-                                        form.lan = *checked;
-                                        cx.notify();
-                                    }
-                                })))
-                                .child(div().text_sm().text_color(rgb(DIM)).child(
-                                    "Over mDNS, on this Mac's Wi-Fi or Ethernet, for relays that run with PEARTUBE_LAN_HOST. Turn it on where peers on one network cannot reach each other through the internet.",
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(Checkbox::new("private-routing").checked(form.private_routing).label("Private DHT routing").on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    if let Screen::Settings(form) = &mut this.screen {
-                                        form.private_routing = *checked;
-                                        cx.notify();
-                                    }
-                                })))
-                                .child(div().text_sm().text_color(rgb(DIM)).child(
-                                    "Route peer connections over 4-hop encrypted relay circuits. Every peer you connect to must also run with private routing.",
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().font_weight(FontWeight::SEMIBOLD).child("MIDI SoundFont"))
-                                .child(div().text_sm().text_color(rgb(DIM)).child(
-                                    "Choose your own SoundFont 2 (.sf2), up to 256 MiB. No bank is bundled. Changes are saved immediately, only on this Mac.",
-                                ))
-                                .when_some(bank.error.clone(), |this, error| this.child(inline_error(error)))
-                                .child(div().text_sm().text_color(rgb(DIM)).child(if bank.selected {
-                                    "A SoundFont is selected."
-                                } else {
-                                    "No SoundFont selected. MIDI needs one to play."
-                                }))
+                                .gap_3()
                                 .child(
-                                    h_flex()
-                                        .mt_1()
-                                        .gap_2()
-                                        .child(
-                                            Button::new("choose-soundfont")
-                                                .label(if bank.busy { "Importing…" } else { "Choose .sf2 file" })
-                                                .disabled(bank.busy)
-                                                .on_click(cx.listener(|this, _, _, cx| this.choose_soundfont(cx))),
-                                        )
-                                        .when(bank.selected, |this| {
-                                            this.child(
-                                                Button::new("remove-soundfont")
-                                                    .ghost()
-                                                    .label("Remove SoundFont")
-                                                    .disabled(bank.busy)
-                                                    .on_click(cx.listener(|this, _, _, cx| this.clear_soundfont(cx))),
-                                            )
-                                        }),
+                                    v_flex()
+                                        .gap_1()
+                                        .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(rgb(DIM)).child("Primary Library Key"))
+                                        .child(Input::new(&form.tracker).cleanable(true)),
+                                )
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(rgb(DIM)).child("Followed Channels"))
+                                        .child(Textarea::new(&form.sources)),
                                 ),
+                        ))
+                        .when(!first_run, |this| {
+                            this.child(card_section(
+                                "Playback & MIDI",
+                                "Optional SoundFont 2 (.sf2) bank for MIDI tracks, kept privately on this Mac.",
+                                v_flex()
+                                    .gap_2()
+                                    .when_some(bank.error.clone(), |t, err| t.child(inline_error(err)))
+                                    .child(div().text_xs().text_color(rgb(DIM)).child(if bank.selected { "SoundFont installed." } else { "No SoundFont selected." }))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("choose-soundfont")
+                                                    .small()
+                                                    .label(if bank.busy { "Importing…" } else { "Choose .sf2 File" })
+                                                    .disabled(bank.busy)
+                                                    .on_click(cx.listener(|this, _, _, cx| this.choose_soundfont(cx))),
+                                            )
+                                            .when(bank.selected, |t| {
+                                                t.child(
+                                                    Button::new("remove-soundfont")
+                                                        .ghost()
+                                                        .small()
+                                                        .label("Remove")
+                                                        .disabled(bank.busy)
+                                                        .on_click(cx.listener(|this, _, _, cx| this.clear_soundfont(cx))),
+                                                )
+                                            }),
+                                    ),
+                            ))
+                        })
+                        // Progressive disclosure: Advanced Network & Engine
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(
+                                    h_flex().child(
+                                        Button::new("toggle-advanced-settings")
+                                            .ghost()
+                                            .small()
+                                            .icon(Icon::new(if adv { Lucide::ChevronDown } else { Lucide::ChevronRight }))
+                                            .label("Advanced Network & Engine")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if let Screen::Settings(f) = &mut this.screen {
+                                                    f.advanced_open = !f.advanced_open;
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    ),
+                                )
+                                .when(adv, |this| {
+                                    this.child(
+                                        v_flex()
+                                            .p_5()
+                                            .gap_4()
+                                            .rounded(px(16.))
+                                            .bg(rgb(CARD))
+                                            .border_1()
+                                            .border_color(rgb(LINE))
+                                            .child(
+                                                Checkbox::new("lan")
+                                                    .checked(form.lan)
+                                                    .label("Local Wi-Fi Turbo (mDNS discovery)")
+                                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                                        if let Screen::Settings(form) = &mut this.screen {
+                                                            form.lan = *checked;
+                                                            cx.notify();
+                                                        }
+                                                    })),
+                                            )
+                                            .child(
+                                                Checkbox::new("private-routing")
+                                                    .checked(form.private_routing)
+                                                    .label("4-Hop Private DHT Circuits")
+                                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                                        if let Screen::Settings(form) = &mut this.screen {
+                                                            form.private_routing = *checked;
+                                                            cx.notify();
+                                                        }
+                                                    })),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(rgb(DIM)).child("Blind Relays (optional)"))
+                                                    .child(Textarea::new(&form.relays)),
+                                            )
+                                            .child(
+                                                v_flex()
+                                                    .gap_1()
+                                                    .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(rgb(DIM)).child("Custom DHT Bootstrap (optional)"))
+                                                    .child(Textarea::new(&form.bootstrap)),
+                                            ),
+                                    )
+                                }),
                         )
-                        .child(h_flex().child(Button::new("save").primary().label("Save").on_click(cx.listener(|this, _, _, cx| this.save_settings(cx))))),
+                        .child(
+                            h_flex()
+                                .mt_2()
+                                .child(Button::new("save").primary().label(if first_run { "Connect & Open Cinema" } else { "Save Changes" }).on_click(cx.listener(|this, _, _, cx| this.save_settings(cx)))),
+                        ),
                 ),
             )
     }
 
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Screen::Settings(form) = &mut self.screen else { return };
-        let parsed = Settings::parse(&form.tracker.read(cx).value(), &form.relays.read(cx).value(), &form.bootstrap.read(cx).value(), form.lan, form.private_routing);
+        let parsed = Settings::parse(
+            &form.tracker.read(cx).value(),
+            &form.sources.read(cx).value(),
+            &form.relays.read(cx).value(),
+            &form.bootstrap.read(cx).value(),
+            form.lan,
+            form.private_routing,
+        );
         match parsed.and_then(|new| new.save().map(|()| new)) {
             Err(err) => {
                 form.error = Some(err.into());
@@ -160,8 +241,6 @@ impl PearTube {
     }
 
     fn choose_soundfont(&mut self, cx: &mut Context<Self>) {
-        // No type filter in GPUI's open panel: import refuses anything that is
-        // not a complete SoundFont 2.
         let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Choose".into()) });
         self.bank.busy = true;
         self.bank.error = None;
@@ -172,7 +251,6 @@ impl PearTube {
                     None => Ok(()),
                 },
                 Ok(Err(err)) => Err(err.to_string()),
-                // Cancelled.
                 Ok(Ok(None)) | Err(_) => Ok(()),
             };
             let _ = this.update(cx, |this, cx| {

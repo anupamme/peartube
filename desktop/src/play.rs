@@ -1,11 +1,6 @@
-//! The play screen: peartube-media's Player on an entry's stream URL, its
-//! picture in a native view under the window (video.rs), and the controls
-//! over it: back, ±10 s, play/pause, the clock, a seek bar, fullscreen, and
-//! audio and subtitle menus. They hide 3 s after the mouse last moved while
-//! the video plays. Space plays and pauses, ← and → skip 10 s, F toggles
-//! fullscreen, Esc leaves it and then the screen. A click on the picture plays
-//! or pauses it; a double click toggles fullscreen.
+//! Fullscreen-first cinema player with an unobtrusive translucent Info, Formats & Episodes HUD overlay.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -15,6 +10,7 @@ use futures_util::future::{Either, select};
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{Icon, IconName, Sizable as _, h_flex, v_flex};
@@ -25,18 +21,16 @@ use peartube::soundfont;
 use peartube::worker::Entry;
 use player::{Event, Player, PlayerOptions, State, Track, TrackKind};
 
-use crate::list::{column, format_bytes, label, origin};
-use crate::theme::{BG, BRAND, CARD, DANGER, DIM};
+use crate::list::{format_bytes, label, origin, parse_season_episode, split_title_year};
+use crate::theme::{ACCENT, BG, BRAND, CARD, CARD_ELEVATED, DANGER, DIM, INK, LINE};
 use crate::video::VideoView;
 
 const CONTEXT: &str = "Player";
 const SKIP: Duration = Duration::from_secs(10);
 const SHOW_FOR: Duration = Duration::from_secs(3);
-/// The longest a double click on the picture may take.
-const DOUBLE_CLICK: Duration = Duration::from_secs(2);
+const FULLSCREEN_COOLDOWN: Duration = Duration::from_millis(550);
 
-/// Every container and decoder the player can use, built once.
-static CODECS: LazyLock<Arc<RuntimeContext>> = LazyLock::new(|| Arc::new(codecs::context()));
+pub(crate) static CODECS: LazyLock<Arc<RuntimeContext>> = LazyLock::new(|| Arc::new(codecs::context()));
 
 actions!(player, [TogglePlay, SkipBack, SkipForward, ToggleFullscreen, Back]);
 
@@ -52,29 +46,33 @@ pub fn bind_keys(cx: &mut App) {
 
 pub enum PlayEvent {
     Back,
+    Cast(Entry, u64),
+    DismissCast,
+    SwitchEntry(Entry, u64),
+    Progress(String, String, u64, u64),
 }
 
 pub struct PlayScreen {
     entry: Entry,
-    /// The only strong reference: menus hold weak ones, so Drop below decides
-    /// where the player is dropped.
+    episodes: Vec<Entry>,
+    formats: Vec<Entry>,
+    selected_season: u32,
+    info_open: bool,
+    cast_open: bool,
+    pending_seek_ms: Option<u64>,
+    last_progress_saved: Instant,
     player: Option<Arc<Player>>,
     video: Option<VideoView>,
-    /// Why there is no player.
     open_error: Option<SharedString>,
     state: State,
-    /// The seek bar, made once the duration is known: 0 to the duration, in seconds.
     seek: Option<(Entity<SliderState>, Subscription)>,
-    /// Where the seek bar is while it is dragged, in seconds.
     dragging: Option<f32>,
-    /// The controls show until then, and always while paused.
     controls_until: Instant,
-    /// The video slot's bounds, last given to the native view.
     frame: Option<Bounds<Pixels>>,
-    /// An audio or subtitle menu is open: the controls stay up under it.
+    transparent_applied: bool,
     menu_open: bool,
-    /// When the picture last took a single click, for telling double clicks.
-    clicked_at: Option<Instant>,
+    pending_click: Option<Task<()>>,
+    last_fullscreen_at: Option<Instant>,
     focus: FocusHandle,
     _tick: Task<()>,
 }
@@ -82,9 +80,6 @@ pub struct PlayScreen {
 impl EventEmitter<PlayEvent> for PlayScreen {}
 
 impl Drop for PlayScreen {
-    /// Dropping a Player joins its pipeline thread, which may be waiting on
-    /// the main queue (AppleBackend makes its audio and subtitle sinks there),
-    /// and this runs on the main thread: drop it on its own thread.
     fn drop(&mut self) {
         if let Some(player) = self.player.take() {
             std::thread::spawn(move || drop(player));
@@ -93,7 +88,41 @@ impl Drop for PlayScreen {
 }
 
 impl PlayScreen {
-    pub fn new(entry: Entry, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn has_picture(&self) -> bool {
+        self.state.video_size.is_some() && (!self.state.buffering || !self.state.position.is_zero())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn is_playing(&self) -> bool {
+        self.player.as_ref().is_some_and(|p| p.state().playing)
+    }
+
+    pub fn current_position_ms(&self) -> u64 {
+        self.player
+            .as_ref()
+            .map(|p| p.state().position.as_millis() as u64)
+            .unwrap_or(self.state.position.as_millis() as u64)
+    }
+
+    pub fn entry_key(&self) -> &str {
+        &self.entry.key
+    }
+
+    pub fn set_cast_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.cast_open != open {
+            self.cast_open = open;
+            if open {
+                self.controls_until = Instant::now() + SHOW_FOR;
+            }
+            cx.notify();
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn video_metrics(&self) -> Option<player::WindowSlotMetrics> {
+        self.video.as_ref().and_then(|v| v.metrics())
+    }
+    pub fn new(entry: Entry, start_pos_ms: u64, episodes: Vec<Entry>, formats: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (tx, mut events) = unbounded::<Event>();
         let (player, video, open_error) = match VideoView::open(window) {
             Ok(video) => {
@@ -105,7 +134,6 @@ impl PlayScreen {
             }
             Err(err) => (None, None, Some(err.into())),
         };
-        // Events come on change; the clock needs a steadier beat.
         let tick = cx.spawn_in(window, async move |this, cx| {
             loop {
                 let beat = cx.background_executor().timer(Duration::from_millis(250));
@@ -121,8 +149,16 @@ impl PlayScreen {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let selected_season = parse_season_episode(&entry.id).map(|(s, _)| s).unwrap_or(1);
         PlayScreen {
             entry,
+            episodes,
+            formats,
+            selected_season,
+            info_open: false,
+            cast_open: false,
+            pending_seek_ms: (start_pos_ms > 0).then_some(start_pos_ms),
+            last_progress_saved: Instant::now(),
             player,
             video,
             open_error,
@@ -131,8 +167,10 @@ impl PlayScreen {
             dragging: None,
             controls_until: Instant::now() + SHOW_FOR,
             frame: None,
+            transparent_applied: false,
             menu_open: false,
-            clicked_at: None,
+            pending_click: None,
+            last_fullscreen_at: None,
             focus,
             _tick: tick,
         }
@@ -142,14 +180,20 @@ impl PlayScreen {
         let Some(player) = &self.player else { return };
         self.state = player.state();
         if ended {
+            if let Some(dur) = self.state.duration {
+                cx.emit(PlayEvent::Progress(self.entry.id.clone(), self.entry.key.clone(), dur.as_millis() as u64, dur.as_millis() as u64));
+            }
             return cx.emit(PlayEvent::Back);
+        }
+        if let (Some(ms), Some(_dur)) = (self.pending_seek_ms, self.state.duration) {
+            self.pending_seek_ms = None;
+            player.seek(Duration::from_millis(ms));
         }
         if let (None, Some(duration)) = (&self.seek, self.state.duration) {
             let seek = cx.new(|_| SliderState::new().min(0.).max(duration.as_secs_f32().max(1.)).step(1.));
             let subscription = cx.subscribe_in(&seek, window, Self::on_seek);
             self.seek = Some((seek, subscription));
         }
-        // The seek bar follows the clock, except while it is dragged.
         if let (Some((seek, _)), None) = (&self.seek, self.dragging) {
             let at = self.state.position.as_secs_f32();
             seek.update(cx, |seek, cx| {
@@ -157,6 +201,12 @@ impl PlayScreen {
                     seek.set_value(at, window, cx);
                 }
             });
+        }
+        if self.last_progress_saved.elapsed() >= Duration::from_secs(4)
+            && let Some(dur) = self.state.duration
+        {
+            self.last_progress_saved = Instant::now();
+            cx.emit(PlayEvent::Progress(self.entry.id.clone(), self.entry.key.clone(), self.state.position.as_millis() as u64, dur.as_millis() as u64));
         }
         cx.notify();
     }
@@ -175,7 +225,6 @@ impl PlayScreen {
         cx.notify();
     }
 
-    /// Shows the controls for a while.
     fn poke(&mut self, cx: &mut Context<Self>) {
         let hidden = !self.controls_shown();
         self.controls_until = Instant::now() + SHOW_FOR;
@@ -185,25 +234,50 @@ impl PlayScreen {
     }
 
     fn controls_shown(&self) -> bool {
-        self.menu_open || self.dragging.is_some() || !self.state.playing || Instant::now() < self.controls_until
+        self.info_open || self.cast_open || self.menu_open || self.dragging.is_some() || !self.state.playing || Instant::now() < self.controls_until
     }
 
-    /// A click on the picture plays or pauses it; a double click toggles
-    /// fullscreen and undoes its first click. AppKit counts a double click
-    /// wherever its first click landed (a list row, say), so it counts as one
-    /// here only if the picture took that first click.
-    fn click(&mut self, count: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_fullscreen_smooth(&mut self, window: &mut Window) {
+        if self.last_fullscreen_at.is_some_and(|t| t.elapsed() < FULLSCREEN_COOLDOWN) {
+            return;
+        }
+        self.last_fullscreen_at = Some(Instant::now());
+        window.toggle_fullscreen();
+    }
+
+    pub(crate) fn click(&mut self, count: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
+        if self.cast_open {
+            self.pending_click = None;
+            cx.emit(PlayEvent::DismissCast);
+            return;
+        }
+        if self.info_open {
+            self.pending_click = None;
+            self.info_open = false;
+            cx.notify();
+            return;
+        }
         match count {
             1 => {
-                self.clicked_at = Some(Instant::now());
-                self.toggle_play(cx);
+                // Wait briefly before toggling play/pause so a double-click maximizes/restores
+                // without ever pausing audio, freezing video, or flashing the paused HUD.
+                let wait = VideoView::double_click_interval();
+                self.pending_click = Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = this.update(cx, |this, cx| {
+                        this.pending_click = None;
+                        this.toggle_play(cx);
+                    });
+                }));
             }
-            2 if self.clicked_at.take().is_some_and(|at| at.elapsed() < DOUBLE_CLICK) => {
-                window.toggle_fullscreen();
-                self.toggle_play(cx);
+            2 => {
+                self.pending_click = None;
+                self.toggle_fullscreen_smooth(window);
             }
-            _ => {}
+            _ => {
+                self.pending_click = None;
+            }
         }
     }
 
@@ -222,35 +296,45 @@ impl PlayScreen {
         player.seek(at);
     }
 
-    /// Esc and the back button leave fullscreen first, then the screen.
     fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.is_fullscreen() {
-            window.toggle_fullscreen();
-        } else {
-            cx.emit(PlayEvent::Back);
-        }
-    }
-
-    /// Keeps the native picture under the video slot. The window turns
-    /// transparent only once the picture is there to show through.
-    fn place(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
-        if self.frame == Some(bounds) {
+        if self.cast_open {
+            cx.emit(PlayEvent::DismissCast);
             return;
         }
-        self.frame = Some(bounds);
-        if let Some(video) = &self.video {
-            let [x, y, w, h] = [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height].map(|p| f64::from(f32::from(p)));
-            video.set_frame([x, y, w, h]);
+        if self.info_open {
+            self.info_open = false;
+            cx.notify();
+            return;
+        }
+        if window.is_fullscreen() {
+            self.toggle_fullscreen_smooth(window);
+            return;
+        }
+        if let Some(dur) = self.state.duration {
+            cx.emit(PlayEvent::Progress(self.entry.id.clone(), self.entry.key.clone(), self.state.position.as_millis() as u64, dur.as_millis() as u64));
+        }
+        cx.emit(PlayEvent::Back);
+    }
+
+    pub(crate) fn place(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
+        let pic = self.has_picture();
+        if self.frame != Some(bounds) {
+            self.frame = Some(bounds);
+            if let Some(video) = &self.video {
+                let [x, y, w, h] = [bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height].map(|p| f64::from(f32::from(p)));
+                video.set_frame([x, y, w, h]);
+            }
+        }
+        if pic && !self.transparent_applied {
+            self.transparent_applied = true;
             window.set_background_appearance(WindowBackgroundAppearance::Transparent);
         }
     }
 
-    /// A menu of the audio or subtitle tracks on `button`, when there is a choice.
     fn track_menu(&self, kind: TrackKind, button: Button, anchor: Anchor, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
         let player = Arc::downgrade(self.player.as_ref()?);
         let tracks: Vec<Track> = self.state.tracks.iter().filter(|t| t.kind == kind).cloned().collect();
         let current = if kind == TrackKind::Audio { self.state.audio } else { self.state.subtitle };
-        // One audio track needs no menu; subtitles always have "Off".
         let mut items: Vec<(String, Option<u32>, bool)> = Vec::new();
         match kind {
             TrackKind::Audio if tracks.len() < 2 => return None,
@@ -261,9 +345,9 @@ impl PlayScreen {
         items.extend(tracks.iter().map(|t| (track_label(t), Some(t.stream), current == Some(t.stream))));
         let this = cx.entity().downgrade();
         let menu = button.dropdown_menu(move |menu, _, _| {
-            items.iter().fold(menu, |menu, (label, stream, selected)| {
+            items.iter().fold(menu, |menu, (lbl, stream, selected)| {
                 let (player, stream) = (player.clone(), *stream);
-                menu.item(PopupMenuItem::new(label.clone()).checked(*selected).on_click(move |_, _, _| {
+                menu.item(PopupMenuItem::new(lbl.clone()).checked(*selected).on_click(move |_, _, _| {
                     let Some(player) = player.upgrade() else { return };
                     if kind == TrackKind::Audio { player.select_audio(stream) } else { player.select_subtitle(stream) }
                 }))
@@ -278,10 +362,317 @@ impl PlayScreen {
         }))
     }
 
+    fn render_info_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (clean_title, year) = split_title_year(&self.entry.title);
+        let seasons: Vec<u32> = self
+            .episodes
+            .iter()
+            .filter_map(|e| parse_season_episode(&e.id).map(|(s, _)| s))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let active_season = if seasons.contains(&self.selected_season) {
+            self.selected_season
+        } else {
+            seasons.first().copied().unwrap_or(1)
+        };
+        let visible_eps: Vec<Entry> = self
+            .episodes
+            .iter()
+            .filter(|e| seasons.len() <= 1 || parse_season_episode(&e.id).is_none_or(|(s, _)| s == active_season))
+            .cloned()
+            .collect();
+
+        let video_tracks: Vec<&Track> = self.state.tracks.iter().filter(|t| t.kind == TrackKind::Video).collect();
+        let audio_tracks: Vec<&Track> = self.state.tracks.iter().filter(|t| t.kind == TrackKind::Audio).collect();
+        let sub_tracks: Vec<&Track> = self.state.tracks.iter().filter(|t| t.kind == TrackKind::Subtitle).collect();
+
+        let active_video = self
+            .state
+            .video
+            .and_then(|id| video_tracks.iter().copied().find(|t| t.stream == id))
+            .or_else(|| video_tracks.first().copied());
+        let active_audio = self
+            .state
+            .audio
+            .and_then(|id| audio_tracks.iter().copied().find(|t| t.stream == id))
+            .or_else(|| audio_tracks.first().copied());
+        let active_sub = self.state.subtitle.and_then(|id| sub_tracks.iter().copied().find(|t| t.stream == id));
+
+        let res_badge = self.state.video_size.and_then(|(w, h)| resolution_tier(w, h));
+        let v_codec_badge = active_video.map(|t| pretty_codec(&t.codec));
+        let a_codec_badge = active_audio.map(|t| pretty_codec(&t.codec));
+        let dec_badge = self.state.video_decoder.as_deref().map(pretty_decoder);
+
+        let picture_spec = match (self.state.video_size, &v_codec_badge) {
+            (Some((w, h)), Some(vc)) => format!("{w} × {h} ({}) · {vc}", aspect_label(w, h)),
+            (Some((w, h)), None) => format!("{w} × {h} ({})", aspect_label(w, h)),
+            (None, Some(vc)) => vc.clone(),
+            (None, None) => "Probing stream…".into(),
+        };
+        let decoder_spec = match &self.state.video_decoder {
+            Some(dec) => format!("{dec} · {} dropped", self.state.dropped_frames),
+            None => format!("{} dropped frames", self.state.dropped_frames),
+        };
+        let bitrate_spec = match self.state.duration {
+            Some(dur) if dur.as_secs_f64() > 1.0 && self.entry.size > 0 => {
+                let mbps = (self.entry.size as f64 * 8.0) / dur.as_secs_f64() / 1_000_000.0;
+                format!("{mbps:.1} Mbps avg · {}", format_bytes(self.entry.size))
+            }
+            _ => format_bytes(self.entry.size),
+        };
+        let audio_spec = match active_audio {
+            Some(a) => {
+                let lang = a.language.as_deref().or(a.title.as_deref()).unwrap_or("Default").to_uppercase();
+                let extra = if audio_tracks.len() > 1 { format!(" ({} tracks)", audio_tracks.len()) } else { String::new() };
+                format!("{lang} · {}{extra}", pretty_codec(&a.codec))
+            }
+            None => "None".into(),
+        };
+        let sub_spec = if sub_tracks.is_empty() {
+            "None".into()
+        } else if let Some(s) = active_sub {
+            let lang = s.language.as_deref().or(s.title.as_deref()).unwrap_or("Active").to_uppercase();
+            format!("{lang} · {} (of {})", pretty_codec(&s.codec), sub_tracks.len())
+        } else {
+            let codecs: Vec<String> = sub_tracks.iter().map(|s| pretty_codec(&s.codec)).collect::<BTreeSet<_>>().into_iter().collect();
+            format!("Off · {} available ({})", sub_tracks.len(), codecs.join(", "))
+        };
+        let storage_spec = if self.entry.local || (self.entry.size > 0 && self.entry.cached_bytes >= self.entry.size) {
+            format!("Saved on device · {}", format_bytes(self.entry.size))
+        } else if self.entry.cached_bytes > 0 && self.entry.size > 0 {
+            let pct = ((self.entry.cached_bytes as f64 / self.entry.size as f64) * 100.0).round() as u64;
+            format!("{} buffered ({pct}%)", format_bytes(self.entry.cached_bytes))
+        } else {
+            "Live P2P stream".into()
+        };
+
+        let mut badges: Vec<(String, u32)> = Vec::new();
+        if let Some(r) = res_badge {
+            badges.push((r.into(), BRAND));
+        }
+        if let Some(vc) = v_codec_badge {
+            badges.push((vc, INK));
+        }
+        if let Some(ac) = a_codec_badge {
+            badges.push((ac, INK));
+        }
+        if let Some((dlbl, hw)) = dec_badge {
+            badges.push((dlbl, if hw { ACCENT } else { DIM }));
+        }
+
+        let cur_pos_ms = self.state.position.as_millis() as u64;
+        let current_key = self.entry.key.clone();
+        let current_id = self.entry.id.clone();
+        let player_weak = self.player.as_ref().map(Arc::downgrade);
+
+        fenced(v_flex())
+            .id("hud-info-drawer")
+            .absolute()
+            .top(px(58.))
+            .right(px(20.))
+            .w(px(400.))
+            .rounded(px(20.))
+            .bg(hsla(224. / 360., 0.34, 0.08, 0.95))
+            .border_1()
+            .border_color(hsla(0., 0., 1., 0.14))
+            .shadow_xl()
+            .p_5()
+            .gap_4()
+            .text_color(rgb(INK))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_start()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().text_lg().font_weight(FontWeight::BOLD).child(clean_title))
+                            .child(
+                                div().text_xs().text_color(rgb(DIM)).child(match year {
+                                    Some(y) => format!("{} · {y}", label(&self.entry.id)),
+                                    None => label(&self.entry.id),
+                                }),
+                            ),
+                    )
+                    .child(
+                        Button::new("hud-info-close")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Close)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.info_open = false;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(!badges.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .gap_1p5()
+                        .flex_wrap()
+                        .children(badges.into_iter().map(|(txt, col)| {
+                            div()
+                                .px_2p5()
+                                .py_1()
+                                .rounded(px(8.))
+                                .bg(hsla(0., 0., 1., 0.07))
+                                .border_1()
+                                .border_color(hsla(0., 0., 1., 0.10))
+                                .text_xs()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(col))
+                                .child(txt)
+                        })),
+                )
+            })
+            .child(
+                v_flex()
+                    .p_3p5()
+                    .gap_2()
+                    .rounded(px(14.))
+                    .bg(hsla(0., 0., 0., 0.36))
+                    .border_1()
+                    .border_color(rgb(LINE))
+                    .child(spec_row("Video", picture_spec))
+                    .child(spec_row("Decoder", decoder_spec))
+                    .child(spec_row("Bitrate", bitrate_spec))
+                    .child(spec_row("Audio", audio_spec))
+                    .child(spec_row("Subtitles", sub_spec))
+                    .child(spec_row("Source", storage_spec)),
+            )
+            .when(audio_tracks.len() > 1, |this| {
+                let pw = player_weak.clone();
+                let active_a = self.state.audio;
+                let chips: Vec<_> = audio_tracks
+                    .iter()
+                    .map(|t| {
+                        let stream = t.stream;
+                        let sel = active_a == Some(stream);
+                        let lbl = format!("{} · {}", t.language.as_deref().or(t.title.as_deref()).unwrap_or("Track").to_uppercase(), pretty_codec(&t.codec));
+                        let p = pw.clone();
+                        let btn = Button::new(SharedString::from(format!("insp-aud-{stream}"))).small().label(lbl);
+                        let btn = if sel { btn.primary() } else { btn.ghost() };
+                        btn.on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(pl) = p.as_ref().and_then(|w| w.upgrade()) {
+                                pl.select_audio(Some(stream));
+                                this.controls_until = Instant::now() + SHOW_FOR;
+                                cx.notify();
+                            }
+                        }))
+                    })
+                    .collect();
+                this.child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(DIM)).child("AUDIO TRACKS"))
+                        .child(h_flex().gap_1p5().flex_wrap().children(chips)),
+                )
+            })
+            .when(self.formats.len() > 1, |this| {
+                this.child(
+                    v_flex()
+                        .gap_1p5()
+                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(DIM)).child("VERSIONS"))
+                        .children(self.formats.iter().cloned().map(|fmt| {
+                            let selected = fmt.key == current_key;
+                            let switch_fmt = fmt.clone();
+                            h_flex()
+                                .id(SharedString::from(format!("hud-fmt-{}", fmt.key)))
+                                .justify_between()
+                                .items_center()
+                                .px_3()
+                                .py_2()
+                                .rounded(px(10.))
+                                .bg(if selected { hsla(264. / 360., 0.8, 0.6, 0.22) } else { hsla(0., 0., 1., 0.04) })
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(CARD_ELEVATED)))
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    if !selected {
+                                        cx.emit(PlayEvent::SwitchEntry(switch_fmt.clone(), cur_pos_ms));
+                                    }
+                                }))
+                                .child(div().text_xs().font_weight(FontWeight::MEDIUM).child(format!("{} · {}", format_bytes(fmt.size), origin(&fmt))))
+                                .when(selected, |r| r.child(Icon::new(Lucide::Check).text_color(rgb(BRAND))))
+                        })),
+                )
+            })
+            .when(self.episodes.len() > 1, |this| {
+                this.child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_xs().font_weight(FontWeight::BOLD).text_color(rgb(DIM)).child("EPISODES"))
+                        .when(seasons.len() > 1, |this| {
+                            this.child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .flex_wrap()
+                                    .children(seasons.iter().copied().map(|s| {
+                                        let sel = s == active_season;
+                                        let btn = Button::new(SharedString::from(format!("hud-season-{s}"))).small().label(format!("S{s:02}"));
+                                        let btn = if sel { btn.primary() } else { btn.ghost() };
+                                        btn.on_click(cx.listener(move |this, _, _, cx| {
+                                            this.selected_season = s;
+                                            cx.notify();
+                                        }))
+                                    })),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("hud-ep-scroll")
+                                .max_h(px(176.))
+                                .overflow_y_scrollbar()
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .children(visible_eps.into_iter().map(|ep| {
+                                            let is_current = ep.id == current_id;
+                                            let next_ep = ep.clone();
+                                            let row_bg = if is_current { hsla(264. / 360., 0.8, 0.6, 0.22) } else { hsla(0., 0., 1., 0.04) };
+                                            h_flex()
+                                                .id(SharedString::from(format!("hud-ep-{}", ep.key)))
+                                                .justify_between()
+                                                .items_center()
+                                                .px_3()
+                                                .py_2()
+                                                .rounded(px(10.))
+                                                .bg(row_bg)
+                                                .when(is_current, |r| r.border_1().border_color(rgb(BRAND)))
+                                                .cursor_pointer()
+                                                .hover(|s| s.bg(rgb(CARD_ELEVATED)))
+                                                .on_click(cx.listener(move |_, _, _, cx| {
+                                                    if !is_current {
+                                                        cx.emit(PlayEvent::SwitchEntry(next_ep.clone(), 0));
+                                                    }
+                                                }))
+                                                .child(
+                                                    h_flex()
+                                                        .items_center()
+                                                        .gap_2p5()
+                                                        .child(div().text_xs().font_weight(FontWeight::BOLD).child(label(&ep.id)))
+                                                        .child(div().text_xs().text_color(rgb(DIM)).child(format_bytes(ep.size))),
+                                                )
+                                                .when(is_current, |r| r.child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(BRAND)).child("Playing")))
+                                        })),
+                                ),
+                        ),
+                )
+            })
+    }
+
     fn render_controls(&self, fullscreen: bool, clock: String, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.state.buffering && self.state.error.is_none();
         let shade = |angle: f32, alpha: f32| linear_gradient(angle, linear_color_stop(hsla(0., 0., 0., alpha), 0.), linear_color_stop(hsla(0., 0., 0., 0.), 1.));
         let overlay_button = |id: &'static str, icon: Icon, tooltip: &'static str| Button::new(id).ghost().icon(icon).tooltip(tooltip);
+
+        let subtitles = self.track_menu(TrackKind::Subtitle, overlay_button("cc", Lucide::Captions.into(), "Subtitles"), Anchor::TopRight, cx);
+        let audio = self.track_menu(TrackKind::Audio, overlay_button("audio", Lucide::Volume2.into(), "Audio"), Anchor::TopRight, cx);
+        let ep_tag = parse_season_episode(&self.entry.id).map(|_| format!(" · {}", label(&self.entry.id))).unwrap_or_default();
+
         v_flex()
             .absolute()
             .inset_0()
@@ -290,17 +681,34 @@ impl PlayScreen {
             .child(
                 fenced(h_flex())
                     .w_full()
-                    .gap_1()
-                    .p_2()
-                    .bg(shade(180., 0.6))
+                    .items_center()
+                    .gap_1p5()
+                    .px_3()
+                    .py_2p5()
+                    .bg(shade(180., 0.68))
                     .child(overlay_button("back", IconName::ArrowLeft.into(), "Back").on_click(cx.listener(|this, _, window, cx| this.back(window, cx))))
-                    .when(fullscreen, |this| {
-                        // Up against the right edge: the menus open to the left.
-                        let subtitles = self.track_menu(TrackKind::Subtitle, overlay_button("cc", Lucide::Captions.into(), "Subtitles"), Anchor::TopRight, cx);
-                        let audio = self.track_menu(TrackKind::Audio, overlay_button("audio", Lucide::Volume2.into(), "Audio"), Anchor::TopRight, cx);
-                        this.child(div().flex_1().ml_2().truncate().font_weight(FontWeight::SEMIBOLD).child(self.entry.title.clone()))
-                            .children(subtitles)
-                            .children(audio)
+                    .child(div().flex_1().ml_2().truncate().font_weight(FontWeight::SEMIBOLD).child(format!("{}{ep_tag}", self.entry.title)))
+                    .children(audio)
+                    .children(subtitles)
+                    .child({
+                        let btn = Button::new("hud-cast").icon(Icon::new(Lucide::Cast)).tooltip("Play on TV");
+                        let btn = if self.cast_open { btn.primary().small() } else { btn.ghost() };
+                        btn.on_click(cx.listener(|this, _, _, cx| {
+                            if this.cast_open {
+                                cx.emit(PlayEvent::DismissCast);
+                            } else {
+                                cx.emit(PlayEvent::Cast(this.entry.clone(), this.current_position_ms()));
+                            }
+                        }))
+                    })
+                    .child({
+                        let btn = Button::new("hud-info").icon(Icon::new(Lucide::Info)).tooltip(if self.episodes.len() > 1 { "Episodes & Info" } else { "Stream Info & Versions" });
+                        let btn = if self.info_open { btn.primary().small() } else { btn.ghost() };
+                        btn.on_click(cx.listener(|this, _, _, cx| {
+                            this.info_open = !this.info_open;
+                            this.controls_until = Instant::now() + SHOW_FOR;
+                            cx.notify();
+                        }))
                     }),
             )
             .child(
@@ -313,7 +721,6 @@ impl PlayScreen {
                             .on_click(cx.listener(|this, _, _, cx| this.skip(false, cx))),
                     ))
                     .child(if busy {
-                        // The spinner shows here.
                         div().size(px(60.)).into_any_element()
                     } else {
                         let (icon, tooltip) = if self.state.playing { (IconName::Pause, "Pause") } else { (IconName::Play, "Play") };
@@ -322,7 +729,7 @@ impl PlayScreen {
                                 overlay_button("play", icon.into(), tooltip)
                                     .with_size(px(60.))
                                     .rounded(px(30.))
-                                    .bg(hsla(0., 0., 0., 0.35))
+                                    .bg(hsla(0., 0., 0., 0.42))
                                     .on_click(cx.listener(|this, _, _, cx| this.toggle_play(cx))),
                             )
                             .into_any_element()
@@ -336,60 +743,22 @@ impl PlayScreen {
             .child(
                 fenced(v_flex())
                     .w_full()
-                    .px_3()
-                    .pb_2()
-                    .bg(shade(0., 0.75))
+                    .px_4()
+                    .pb_3()
+                    .bg(shade(0., 0.78))
                     .child(
                         h_flex()
+                            .items_center()
                             .child(div().flex_1().ml_1().text_sm().child(clock))
                             .child(
-                                overlay_button("fullscreen", if fullscreen { IconName::Minimize } else { IconName::Maximize }.into(), if fullscreen { "Exit fullscreen" } else { "Fullscreen" })
-                                    .on_click(cx.listener(|_, _, window, _| window.toggle_fullscreen())),
+                                overlay_button("fullscreen", if fullscreen { IconName::Minimize } else { IconName::Maximize }.into(), if fullscreen { "Windowed" } else { "Fullscreen" })
+                                    .on_click(cx.listener(|this, _, window, _| this.toggle_fullscreen_smooth(window))),
                             ),
                     )
                     .child(div().h(px(20.)).flex().items_center().children(self.seek.as_ref().map(|(seek, _)| {
                         Slider::new(seek).bg(rgb(BRAND)).text_color(white())
                     }))),
             )
-    }
-
-    fn render_details(&self, error: Option<SharedString>, cx: &mut Context<Self>) -> impl IntoElement {
-        let sha = self.entry.sha256.get(..16).unwrap_or(&self.entry.sha256);
-        let cached_note = if !self.entry.local && self.entry.cached_bytes > 0 {
-            format!(" · cached {}", format_bytes(self.entry.cached_bytes))
-        } else {
-            String::new()
-        };
-        div().bg(rgb(BG)).child(
-            column()
-                .py_4()
-                .gap_1()
-                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).truncate().child(self.entry.title.clone()))
-                .child(div().text_sm().text_color(rgb(DIM)).child(format!("{} · {} · {}{cached_note}", label(&self.entry.id), format_bytes(self.entry.size), origin(&self.entry))))
-                .children({
-                    let menus: Vec<_> = [
-                        self.track_menu(TrackKind::Audio, chip("audio-chip", Lucide::Volume2.into(), self.track_name(TrackKind::Audio)), Anchor::TopLeft, cx),
-                        self.track_menu(TrackKind::Subtitle, chip("subtitles-chip", Lucide::Captions.into(), self.track_name(TrackKind::Subtitle)), Anchor::TopLeft, cx),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                    (!menus.is_empty()).then(|| h_flex().mt_3().gap_2().children(menus))
-                })
-                .when_some(error, |this, error| {
-                    this.child(div().mt_3().p_3().rounded_lg().bg(rgb(CARD)).text_sm().text_color(rgb(DANGER)).child(error))
-                })
-                .child(div().mt_4().text_xs().text_color(rgb(DIM)).child(format!("SHA-256 {sha}…"))),
-        )
-    }
-
-    fn track_name(&self, kind: TrackKind) -> String {
-        let current = if kind == TrackKind::Audio { self.state.audio } else { self.state.subtitle };
-        let name = self.state.tracks.iter().find(|t| t.kind == kind && Some(t.stream) == current).map(short_name);
-        match kind {
-            TrackKind::Audio => name.unwrap_or_else(|| "No audio".into()),
-            _ => name.unwrap_or_else(|| "Off".into()),
-        }
     }
 }
 
@@ -407,21 +776,19 @@ impl Render for PlayScreen {
         let error = self.open_error.clone().or_else(|| st.error.clone().map(Into::into));
         let (placer, mover) = (cx.entity().downgrade(), cx.entity().downgrade());
 
+        let has_pic = self.has_picture();
         let slot = div()
             .id("video")
             .relative()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            // Nothing paints here but the controls: the picture is under the window.
+            .size_full()
+            // Keep a velvet black cinema curtain until the decoder actually presents its first frame,
+            // preventing any frozen Library frame or Metal swapchain flash during the transition!
+            .when(!has_pic, |this| this.bg(black()))
             .child(
                 canvas(
                     move |bounds, window, cx| {
                         let _ = placer.update(cx, |this, _| this.place(bounds, window));
                     },
-                    // A move over the picture shows the controls. Listening on
-                    // the window, not the slot, also hears moves over an open
-                    // menu, which keeps the mouse from the elements under it.
                     move |bounds, _, window, _| {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Bubble && bounds.contains(&event.position) {
@@ -434,13 +801,14 @@ impl Render for PlayScreen {
                 .size_full(),
             )
             .on_click(cx.listener(|this, event: &ClickEvent, window, cx| this.click(event.click_count(), window, cx)))
-            .when(busy, |this| this.child(div().absolute().inset_0().flex().items_center().justify_center().child(Spinner::new().large().color(white()))))
-            .when(fullscreen, |this| {
-                this.when_some(error.clone(), |this, error| {
-                    this.child(div().absolute().inset_0().flex().items_center().justify_center().child(div().p_3().rounded_lg().bg(rgb(CARD)).text_color(rgb(DANGER)).child(error)))
-                })
+            .when(busy || (!has_pic && error.is_none()), |this| {
+                this.child(div().absolute().inset_0().flex().items_center().justify_center().child(Spinner::new().large().color(white())))
             })
-            .when(self.controls_shown(), |this| this.child(self.render_controls(fullscreen, clock, cx)));
+            .when_some(error, |this, error| {
+                this.child(div().absolute().inset_0().bg(rgb(BG)).flex().items_center().justify_center().child(div().p_4().rounded(px(14.)).bg(rgb(CARD)).text_color(rgb(DANGER)).child(error)))
+            })
+            .when(self.controls_shown(), |this| this.child(self.render_controls(fullscreen, clock, cx)))
+            .when(self.info_open, |this| this.child(self.render_info_drawer(cx)));
 
         v_flex()
             .size_full()
@@ -449,39 +817,103 @@ impl Render for PlayScreen {
             .on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.toggle_play(cx)))
             .on_action(cx.listener(|this, _: &SkipBack, _, cx| this.skip(false, cx)))
             .on_action(cx.listener(|this, _: &SkipForward, _, cx| this.skip(true, cx)))
-            .on_action(cx.listener(|_, _: &ToggleFullscreen, window, _| window.toggle_fullscreen()))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, window, _| this.toggle_fullscreen_smooth(window)))
             .on_action(cx.listener(|this, _: &Back, window, cx| this.back(window, cx)))
             .child(slot)
-            .when(!fullscreen, |this| this.child(self.render_details(error, cx)))
     }
 }
 
-/// Clicks inside `element` stay there: the picture under the controls plays
-/// and pauses on a click, and gpui-component's buttons and slider let the
-/// mouse-down through.
 fn fenced(element: Div) -> Div {
     element.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
-fn chip(id: &'static str, icon: Icon, text: String) -> Button {
-    Button::new(id).small().icon(icon).label(text)
-}
-
-fn clock(d: Duration) -> String {
+pub(crate) fn clock(d: Duration) -> String {
     let s = d.as_secs();
     if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
 fn track_label(t: &Track) -> String {
     let mut label = t.title.clone().or_else(|| t.language.clone()).unwrap_or_else(|| format!("Track {}", t.stream));
-    if t.title.is_some() {
-        if let Some(lang) = &t.language {
-            label = format!("{label} ({lang})");
-        }
+    if t.title.is_some()
+        && let Some(lang) = &t.language
+    {
+        label = format!("{label} ({lang})");
     }
     format!("{label} · {}", t.codec)
 }
 
-fn short_name(t: &Track) -> String {
-    t.title.clone().or_else(|| t.language.as_ref().map(|l| l.to_uppercase())).unwrap_or_else(|| format!("Track {}", t.stream))
+fn spec_row(k: &'static str, v: String) -> Div {
+    h_flex()
+        .justify_between()
+        .items_baseline()
+        .gap_3()
+        .child(div().text_xs().text_color(rgb(DIM)).flex_shrink_0().child(k))
+        .child(div().text_xs().font_weight(FontWeight::MEDIUM).text_color(rgb(INK)).text_right().truncate().child(v))
+}
+
+fn resolution_tier(w: u32, h: u32) -> Option<&'static str> {
+    if w == 0 || h == 0 {
+        None
+    } else if w >= 3800 || h >= 2100 {
+        Some("4K UHD")
+    } else if w >= 2500 || h >= 1400 {
+        Some("1440p QHD")
+    } else if w >= 1900 || h >= 1000 {
+        Some("1080p HD")
+    } else if w >= 1200 || h >= 700 {
+        Some("720p HD")
+    } else {
+        Some("SD")
+    }
+}
+
+fn aspect_label(w: u32, h: u32) -> String {
+    if h == 0 {
+        return "—".into();
+    }
+    let r = w as f64 / h as f64;
+    if (r - 16.0 / 9.0).abs() < 0.06 {
+        "16:9".into()
+    } else if (r - 4.0 / 3.0).abs() < 0.06 {
+        "4:3".into()
+    } else {
+        format!("{r:.2}:1")
+    }
+}
+
+fn pretty_codec(raw: &str) -> String {
+    match raw.to_lowercase().as_str() {
+        "hevc" | "h265" => "HEVC · H.265".into(),
+        "h264" | "avc" | "avc1" => "AVC · H.264".into(),
+        "av1" => "AV1".into(),
+        "vp9" => "VP9".into(),
+        "vp8" => "VP8".into(),
+        "mpeg4" | "xvid" | "divx" => "MPEG-4".into(),
+        "mpeg2video" | "mpeg2" => "MPEG-2".into(),
+        "mpeg1video" | "mpeg1" => "MPEG-1".into(),
+        "vc1" => "VC-1".into(),
+        "eac3" | "ec-3" => "Dolby E-AC-3".into(),
+        "ac3" => "Dolby AC-3".into(),
+        "truehd" => "Dolby TrueHD".into(),
+        "dts" | "dca" => "DTS".into(),
+        "flac" => "FLAC Lossless".into(),
+        "alac" => "ALAC Lossless".into(),
+        "aac" => "AAC".into(),
+        "opus" => "Opus".into(),
+        "vorbis" => "Vorbis".into(),
+        "mp3" => "MP3".into(),
+        "pcm_s16le" | "pcm_s24le" | "pcm_f32le" | "pcm" => "Linear PCM".into(),
+        "subrip" | "srt" => "SubRip".into(),
+        "ass" | "ssa" => "ASS".into(),
+        "hdmv_pgs_subtitle" | "pgs" => "PGS".into(),
+        "dvd_subtitle" | "vobsub" => "VobSub".into(),
+        "mov_text" | "tx3g" => "TX3G".into(),
+        other => other.to_uppercase(),
+    }
+}
+
+fn pretty_decoder(dec: &str) -> (String, bool) {
+    let lower = dec.to_lowercase();
+    let hw = lower.contains("avplayer") || lower.contains("videotoolbox") || lower.contains("mediacodec") || lower.contains("hardware") || lower.contains("hw");
+    (format!("{} · {dec}", if hw { "HW" } else { "SW" }), hw)
 }
