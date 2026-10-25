@@ -20,6 +20,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:cast
 
   image:
     # Publishes :main, :latest and :sha-<commit>. The live relay now runs the

@@ -80,7 +80,7 @@ const SPLICE_IDLE_POLL_MS = 5000
 const CIRCUIT_STREAM_ID = 0xffffffff
 const STREAM_WINDOW = 512
 const CIRCUIT_WINDOW = 2048
-const STREAM_CREDIT_BATCH = 128
+const STREAM_CREDIT_BATCH = 32
 const CIRCUIT_CREDIT_BATCH = 32
 const CONTROL_RESERVE = 256
 const SEND_BATCH_CELLS = 64
@@ -2984,10 +2984,12 @@ class PrivatePeerController {
 
   _createSpliceStream(peerRaw) {
     if (!peerRaw || !peerRaw.socket || peerRaw.socket.closing) throw unavailable()
-    try {
-      peerRaw.socket.setRecvBufferSize(8388608)
-      peerRaw.socket.setSendBufferSize(8388608)
-    } catch {}
+    for (const sz of [8388608, 4194304]) {
+      try { peerRaw.socket.setRecvBufferSize(sz); break } catch {}
+    }
+    for (const sz of [8388608, 4194304]) {
+      try { peerRaw.socket.setSendBufferSize(sz); break } catch {}
+    }
     const expectedHost = peerRaw.remoteHost
     const expectedPort = peerRaw.remotePort
     let stream = this.dht.createRawStream({
@@ -3016,23 +3018,23 @@ class PrivatePeerController {
           stream._view[139] = 2000
         }
         const srtt = stream._view[139] || 2000
-        stream._view[140] = 900
-        const targetRto = Math.min(8000, Math.max(4500, srtt + 2500))
+        stream._view[140] = 700
+        const targetRto = Math.min(6000, Math.max(2800, srtt + 1200))
         stream._view[141] = targetRto
         stream._handle[201] = 1
-        stream._view[146] = 8000
-        stream._view[150] = 8000
-        stream._view[154] = 8000
-        stream._view[156] = Math.max(3000, srtt + 1200)
+        stream._view[146] = 12000
+        stream._view[150] = 12000
+        stream._view[154] = 12000
+        stream._view[156] = Math.max(3200, srtt + 1200)
         if (stream._view64 && stream._view64[101] > 0n) {
           stream._view64[82] = stream._view64[101] + 86400000n
         }
         if (stream._handle[736] === 3) stream._handle[736] = 2
         stream._handle[755] = 1
-        if (stream._view[198] < 6000) stream._view[198] = 6000
-        if (stream._view[200] > 24000) stream._view[200] = 24000
-        if (stream._view[401] < 512) stream._view[401] = 512
-        if (stream._view[402] < 512) stream._view[402] = 512
+        if (stream._view[198] < 2500) stream._view[198] = 2500
+        if (stream._view[200] > 6000) stream._view[200] = 6000
+        if (stream._view[401] < 320) stream._view[401] = 320
+        if (stream._view[402] < 320) stream._view[402] = 320
       }
       apply()
       stream.once('connect', apply)
@@ -3043,10 +3045,7 @@ class PrivatePeerController {
       const wrapWfree = (arr) => {
         if (arr && !arr._tuned) {
           const origPush = arr.push.bind(arr)
-          arr.push = (id) => {
-            apply()
-            return origPush(id)
-          }
+          arr.push = (id) => { apply(); return origPush(id) }
           arr._tuned = true
         }
         return arr
@@ -3060,10 +3059,7 @@ class PrivatePeerController {
       })
       if (typeof stream._allocWrite === 'function') {
         const origAlloc = stream._allocWrite.bind(stream)
-        stream._allocWrite = (n) => {
-          apply()
-          return origAlloc(n)
-        }
+        stream._allocWrite = (n) => { apply(); return origAlloc(n) }
       }
     }
     return stream

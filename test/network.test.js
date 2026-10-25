@@ -70,6 +70,10 @@ test('a relay acquires a source; another relay finds it and streams exact bytes'
   assert.deepEqual(Buffer.from(await res.arrayBuffer()), bytes.subarray(1000000, 1065536))
   const full = Buffer.from(await (await fetch(hit.streamUrl)).arrayBuffer())
   assert.equal(createHash('sha256').update(full).digest('hex'), hit.sha256)
+  const received = a.status()
+  assert.ok(received.routes.public.rxBytes >= bytes.length, 'the public DHT stream carried the bytes')
+  assert.equal(received.routes.private.rxBytes + received.routes.lan.rxBytes, 0, 'no private or LAN stream carried the bytes')
+  assert.equal(received.rxBytes, received.routes.public.rxBytes, 'the path counters account for all received bytes')
 })
 
 test('a writer cannot remove another writer\'s entry', async t => {
@@ -252,4 +256,34 @@ test('ten relays with private DHT routing sync the tracker and stream exact byte
     assert.equal(n.swarm.dht.privateRouting.exposureReport().directDestinationSends, 0)
     assert.equal(n.swarm.status(n.tracker.discoveryKey), null, 'private routing uses a blinded rotating topic, never tracker.discoveryKey')
   }
+})
+
+test('clearCache flushes RocksDB WAL and BlobDB so on-disk corestore bytes shrink immediately', async t => {
+  const { readdirSync, statSync } = await import('node:fs')
+  const dirBytes = dir => readdirSync(dir, { withFileTypes: true }).reduce((sum, f) => {
+    const p = join(dir, f.name)
+    return sum + (f.isDirectory() ? dirBytes(p) : statSync(p).size)
+  }, 0)
+
+  const testnet = await createTestnet(3)
+  const pubDir = tmp()
+  const viewDir = tmp()
+  const pub = await createNode({ storage: pubDir, bootstrap: testnet.bootstrap })
+  const viewer = await createNode({ storage: viewDir, bootstrap: testnet.bootstrap, tracker: pub.status().tracker })
+  t.after(async () => { await viewer.close(); await pub.close(); await testnet.destroy() })
+
+  const payload = randomBytes(16 * 1024 * 1024)
+  await pub.publish({ id: 'imdb:tt0816692', title: 'Interstellar' }, Readable.from([payload]))
+  const [hit] = await until(async () => (await viewer.search('imdb:tt0816692')).length && viewer.search('imdb:tt0816692'))
+  const downloaded = Buffer.from(await (await fetch(hit.streamUrl)).arrayBuffer())
+  assert.equal(downloaded.byteLength, payload.byteLength)
+
+  const beforeDisk = dirBytes(join(viewDir, 'corestore', 'db'))
+  assert.ok(beforeDisk >= 16 * 1024 * 1024, `expected >= 16 MiB on disk before clearCache, got ${beforeDisk}`)
+
+  const res = await viewer.clearCache()
+  const afterDisk = dirBytes(join(viewDir, 'corestore', 'db'))
+  assert.ok(res.reclaimedBytes >= 14 * 1024 * 1024, `expected >= 14 MiB reclaimed, got ${res.reclaimedBytes}`)
+  assert.ok(afterDisk < 1024 * 1024, `expected < 1 MiB on disk after clearCache compaction, got ${afterDisk}`)
+  assert.equal(viewer.status().cachedBytes, 0)
 })

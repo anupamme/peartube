@@ -5,7 +5,12 @@ import { request as httpsRequest } from 'node:https'
 
 // Jobs hold source URLs and auth headers, so they live in a private file and
 // never in the Corestore: replication serves any stored core a peer can name.
-export function createAcquirer (node, file, { concurrency = Number(process.env.PEARTUBE_ACQUIRE_CONCURRENCY || 4), retryDelay = 15_000 } = {}) {
+export function createAcquirer (node, file, {
+  concurrency = Number(process.env.PEARTUBE_ACQUIRE_CONCURRENCY || 4),
+  retryDelay = 15_000,
+  defaultChannel = Boolean(process.env.PEARTUBE_PUBLISH_CHANNEL),
+  onDone = null
+} = {}) {
   let jobs = []
   try { jobs = JSON.parse(readFileSync(file, 'utf8')) } catch {}
   for (const job of jobs) {
@@ -68,7 +73,9 @@ export function createAcquirer (node, file, { concurrency = Number(process.env.P
         save()
       }
       await node.append(job.announce)
+      if (job.channel ?? defaultChannel) await node.publishChannel?.(job.announce)
       Object.assign(job, { status: 'done', size: job.announce.size, sha256: job.announce.sha256 })
+      onDone?.(view(job), job.announce)
     } catch (err) {
       if (job.status !== 'cancelled') job.status = job.announce ? 'announcing' : 'failed'
       job.error = err.message
@@ -94,9 +101,9 @@ export function createAcquirer (node, file, { concurrency = Number(process.env.P
       run(job)
     }
   }
-  function add ({ id, title, source }) {
+  function add ({ id, title, source, channel = defaultChannel, plugin = 'http-acquire' }) {
     if (typeof source?.url !== 'string' || !/^https?:\/\//.test(source.url)) throw new Error('source.url must be http(s)')
-    const job = { jobId: randomUUID(), id, title, status: 'queued', created: Date.now(), source: { url: source.url, headers: source.headers || {} } }
+    const job = { jobId: randomUUID(), id, title, plugin, channel: Boolean(channel), status: 'queued', created: Date.now(), source: { url: source.url, headers: source.headers || {} } }
     jobs.push(job)
     save()
     next()

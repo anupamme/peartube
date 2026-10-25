@@ -10,6 +10,10 @@
       "bare": "peartube-crypto",
       "default": "node:crypto"
     },
+    "node:child_process": {
+      "bare": "bare-subprocess",
+      "default": "node:child_process"
+    },
     "node:fs": {
       "bare": "bare-fs",
       "default": "node:fs"
@@ -60,13 +64,16 @@
     }
   },
   "bin": {
-    "peartube-relay": "bin/relay.js"
+    "peartube-relay": "bin/relay.js",
+    "peartube-receiver": "bin/receiver.js"
   },
   "scripts": {
     "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ && cp patches/hypercore/hypercore-index.js node_modules/hypercore/index.js && cp patches/hypercore/replicator.js node_modules/hypercore/lib/replicator.js && cp patches/hypercore/merkle-tree.js node_modules/hypercore/lib/merkle-tree.js && cp patches/hypercore/session-state.js node_modules/hypercore/lib/session-state.js && cp patches/hypercore/blob-server.js node_modules/hypercore-blob-server/index.js && cp patches/hypercore/byte-stream.js node_modules/hypercore-byte-stream/index.js || true",
     "start": "bare bin/relay.js",
+    "receiver": "node bin/receiver.js",
     "test": "node --test test/*.test.js",
     "test:desktop": "node --test test/desktop.e2e.js",
+    "test:cast": "node --test test/cast.e2e.js",
     "app": "sh desktop/bundle.sh --open"
   },
   "engines": {

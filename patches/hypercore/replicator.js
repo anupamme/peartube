@@ -1716,6 +1716,7 @@ class Peer {
 
   _maybeWant(index, handle) {
     if (index < this.remoteContiguousLength) return
+    if (this.remoteContiguousLength === 0 && this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength > index)) return
 
     const res = this.wants.add(index, handle)
     if (!res) return
@@ -1746,6 +1747,7 @@ class Peer {
     }
 
     if (start + length <= this.remoteContiguousLength) return
+    if (this.remoteContiguousLength === 0 && this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength >= start + length)) return
 
     const req = this.wants.addAnyRange(start, length, handle)
     if (req) this.wireWant.send(req)
@@ -2289,19 +2291,15 @@ module.exports = class Replicator {
     const ref = b.attach(session)
 
     this._queueBlock(b)
-    const hedge = maxCopies => {
-      if (b.resolved || this._blocks.get(index) !== b || this.peers.length <= 1) return
-      const ranked = this.peers
-        .filter(p => p.isActive() && p.remoteUploading && !b.inflight.some(r => r.peer === p))
-        .sort((x, y) => (x.stream.rawStream?.rtt || 9999) - (y.stream.rawStream?.rtt || 9999))
-      for (const p of ranked) {
-        if (b.inflight.length >= maxCopies) break
-        p._requestBlock(b)
-      }
-    }
-    if (b.inflight.length >= 1) hedge(2)
     if (!b._hedgeTimer && this.peers.length > 1) {
-      b._hedgeTimer = setTimeout(() => { b._hedgeTimer = null; hedge(4) }, 1200)
+      b._hedgeTimer = setTimeout(() => {
+        b._hedgeTimer = null
+        if (b.resolved || this._blocks.get(index) !== b || b.inflight.length >= 2) return
+        const ranked = this.peers
+          .filter(p => p.isActive() && p._remoteHasBlock(index) && p._canRequest(index, false) && !b.inflight.some(r => r.peer === p))
+          .sort((x, y) => (x.stream.rawStream?.rtt || 9999) - (y.stream.rawStream?.rtt || 9999))
+        if (ranked.length > 0) ranked[0]._requestBlock(b)
+      }, 1800)
       if (b._hedgeTimer.unref) b._hedgeTimer.unref()
     }
     this.queueUpdateAll()

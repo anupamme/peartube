@@ -2,6 +2,8 @@
 // The Rust app talks to it over BareKit.IPC in newline-delimited JSON:
 //   app -> worker  {id, method, params}   start | status | search | stop
 //   worker -> app  {id, result} | {id, error} | {event: 'update'} | {event: 'fatal', error}
+// Host events {event, ...} are dispatched on Bare's 'appEvent' channel; iOS
+// uses this for the system Bonjour adapter without raw multicast sockets.
 // 'update' means the tracker, the peer set or LAN discovery changed. start and
 // status return the core's status plus `lan` (see lanNote). Stream URLs point
 // at the core's blob server on 127.0.0.1, which the app plays.
@@ -11,17 +13,33 @@ import 'bare-process/global'
 import b4a from 'b4a'
 import os from 'bare-os'
 import { createNode } from '../src/index.js'
+import { createApi } from '../src/http.js'
 import { createLan, interfaceAdapter, lanAddress } from '../src/lan.js'
+import { createCastController } from '../src/cast.js'
 
 const ipc = BareKit.IPC
 let node = null
+let api = null
+let apiUrl = null
+let cast = null
+let castStorage = null
+let receiverNodeOwned = false
+const DEFAULT_LAN_PORT = 49798 // one below the relay's default, so both fit on one machine
+const RECEIVER_LAN_PORT = 49797 // distinct from relay (49799) and sender app (49798)
+let lanPort = DEFAULT_LAN_PORT
 let lifecycle = Promise.resolve()
 
 // Any peer can publish a title with a lone surrogate, which serde_json rejects.
 const wellFormed = (key, value) => typeof value === 'string' ? value.toWellFormed() : value
 const send = msg => ipc.write(JSON.stringify(msg, wellFormed) + '\n')
-const update = () => send({ event: 'update' })
-
+const update = () => {
+  api?.notify('update')
+  send({ event: 'update' })
+}
+const sendCast = () => {
+  api?.notify('cast')
+  if (cast) send({ event: 'cast', cast: cast.status() })
+}
 // start, stop and LAN moves run one at a time, so a quick settings change
 // cannot leave two nodes open on the same storage.
 function serial (fn) {
@@ -34,10 +52,21 @@ function serial (fn) {
 // A closed tracker stops calling onchange on its own.
 async function close () {
   const open = node
+  const openApi = api
+  const openCast = cast
   node = null
+  api = null
+  apiUrl = null
+  cast = null
+  receiverNodeOwned = false
   lanHost = null
   lanError = null
   lanNote = null
+  if (openCast) await openCast.close().catch(() => {})
+  if (openApi) await new Promise(resolve => {
+    openApi.close(() => resolve())
+    openApi.closeAllConnections()
+  }).catch(() => {})
   if (!open) return
   open.swarm.off('update', update)
   await open.close()
@@ -50,16 +79,21 @@ async function close () {
 // few seconds, inside serial. lanNote tells the status line what it is doing:
 // on <address>, paused, failed on <address>, or found no Wi-Fi address (with
 // the addresses it did see). It is null while LAN discovery is off.
-const LAN_PORT = 49798 // one below the relay's default, so both fit on one machine
 let lanWanted = false
 let lanHost = null
 let lanError = null
 let lanNote = null
 let suspended = false
 
+function currentDeviceIp () {
+  if (suspended) return null
+  try { return lanAddress(os.networkInterfaces()) } catch { return null }
+}
+
 async function moveLan () {
   let host = null
   let seen = ''
+  const liveIp = currentDeviceIp()
   if (node && lanWanted && !suspended) {
     try {
       const interfaces = os.networkInterfaces()
@@ -73,16 +107,43 @@ async function moveLan () {
     lanHost = host
     lanError = null
     try {
-      await node.setLan(host && (keyPair => createLan({ host, port: LAN_PORT, keyPair, adapter: interfaceAdapter(host) })))
+      await node.setLan(host && (keyPair => createLan({ host, port: lanPort, keyPair, adapter: interfaceAdapter(host) })))
     } catch (err) {
       lanError = err.message
     }
   }
+  if (cast) await cast.setLanHost(liveIp).catch(() => {})
   const note = noteFor(seen)
   if (note !== lanNote) {
     lanNote = note
     update()
   }
+}
+
+async function ensureCast (storageHint = null) {
+  if (storageHint) castStorage = storageHint
+  if (!castStorage) throw new Error('Storage path required before initializing Cast')
+  if (!cast) {
+    cast = createCastController({
+      storage: castStorage,
+      getNode: () => node,
+      ensureNode: async () => {
+        if (node) return node
+        receiverNodeOwned = true
+        lanPort = RECEIVER_LAN_PORT
+        node = await createNode({ storage: castStorage, onchange: update })
+        node.swarm.on('update', update)
+        lanWanted = true
+        await moveLan()
+        return node
+      },
+      getLanHost: currentDeviceIp,
+      onchange: sendCast
+    })
+    await cast.initHub().catch(() => {})
+    await cast.setLanHost(currentDeviceIp()).catch(() => {})
+  }
+  return cast
 }
 
 function noteFor (seen) {
@@ -99,7 +160,7 @@ function ipv4s (interfaces) {
     .join(', ')
 }
 
-const report = () => ({ ...node.status(), lan: lanNote })
+const report = () => ({ ...node.status(), lan: lanNote, apiUrl })
 
 // Reads wait for a queued start or stop, so they never see the node being replaced.
 async function current () {
@@ -113,13 +174,36 @@ function hostPort (address) {
   return { host: address.slice(0, i), port: Number(address.slice(i + 1)) }
 }
 
+function listenLoopback (srv, preferredPort) {
+  return new Promise(resolve => {
+    const tryBind = port => {
+      const onError = () => {
+        srv.removeListener('listening', onListen)
+        if (port !== 0) tryBind(0)
+        else resolve(null)
+      }
+      const onListen = () => {
+        srv.removeListener('error', onError)
+        const addr = srv.address()
+        resolve(addr?.port ? `http://127.0.0.1:${addr.port}` : null)
+      }
+      srv.once('error', onError)
+      srv.once('listening', onListen)
+      srv.listen(port, '127.0.0.1')
+    }
+    tryBind(preferredPort)
+  })
+}
+
 const methods = {
-  // lan: whether to find relays on this device's network over mDNS.
-  start: ({ storage, tracker, relayThrough = null, bootstrap = null, lan = false, privateRouting = false }) => serial(async () => {
+  start: ({ storage, tracker = null, sources = [], relayThrough = null, bootstrap = null, lan = false, privateRouting = false, apiPort = 8174, apiToken = null }) => serial(async () => {
     await close()
+    castStorage = storage
+    lanPort = DEFAULT_LAN_PORT
     node = await createNode({
       storage,
-      tracker,
+      tracker: tracker || null,
+      sources,
       relayThrough,
       bootstrap: bootstrap ? bootstrap.map(hostPort) : undefined,
       privateRouting,
@@ -128,11 +212,94 @@ const methods = {
     node.swarm.on('update', update)
     lanWanted = lan
     await moveLan()
-    return report()
+    if (apiPort !== false) {
+      const srv = createApi({
+        node,
+        acquirer: null,
+        get cast () { return cast },
+        apiToken,
+        extraStatus: () => ({ lan: lanNote, apiUrl }),
+        onSourcesChanged: list => send({ event: 'sources', sources: list })
+      })
+      apiUrl = await listenLoopback(srv, Number(apiPort) || 8174)
+      api = apiUrl ? srv : null
+    }
+    const discovered = await node.discoveredSources()
+    return { ...report(), discoveredSources: discovered }
   }),
-  status: async () => { await current(); return report() },
-  search: async ({ id = null }) => (await current()).search(id),
+  status: async () => {
+    const n = await current()
+    return { ...report(), discoveredSources: await n.discoveredSources() }
+  },
+  search: async ({ id = null, source = null } = {}) => (await current()).search(id, { source }),
+  warm: async ({ key }) => {
+    const n = await current()
+    const entry = await n.findEntry(key)
+    if (entry) await n.warm(entry)
+    return { ok: Boolean(entry) }
+  },
+  sources: async () => {
+    const n = await current()
+    return { sources: n.listSources(), discovered: await n.discoveredSources(), channel: n.status().channel }
+  },
+  addSource: async params => {
+    const n = await current()
+    const source = await n.addSource(params)
+    return { source, sources: n.listSources(), discovered: await n.discoveredSources() }
+  },
+  removeSource: async ({ key }) => {
+    const n = await current()
+    const res = await n.removeSource(key)
+    return { ...res, sources: n.listSources(), discovered: await n.discoveredSources() }
+  },
+  openUri: async ({ uri, storage = null }) => {
+    if (typeof uri === 'string' && /^peartube:(?:\/\/)?(?:receiver|cast)\//i.test(uri.trim())) {
+      const c = await ensureCast(storage)
+      const receiver = await c.pairReceiver({ uri: uri.trim() })
+      return { action: 'receiver', receiver }
+    }
+    return (await current()).openUri(uri)
+  },
+  publishSource: async params => (await current()).publishSource(params, { target: params.target || 'channel' }),
   clearCache: async ({ key = null } = {}) => { const res = await (await current()).clearCache(key); update(); return res },
+  castStatus: async ({ storage = null } = {}) => (await ensureCast(storage)).status(),
+  castPair: async params => { const c = await ensureCast(params.storage); await c.pairReceiver(params); return c.status() },
+  castRemove: async ({ id, storage = null }) => { const c = await ensureCast(storage); c.removeReceiver(id); return c.status() },
+  castPlay: async params => {
+    const c = await ensureCast(params.storage)
+    if (node && !node.privateRouting && !lanWanted) {
+      lanWanted = true
+      await serial(moveLan).catch(() => {})
+    } else {
+      await c.setLanHost(currentDeviceIp()).catch(() => {})
+    }
+    return c.castPlay(params)
+  },
+  castAttach: async params => (await ensureCast(params.storage)).castAttach(params),
+  castControl: async params => (await ensureCast(params.storage)).castControl(params),
+  castStop: async params => (await ensureCast(params.storage)).castStop(params),
+  receiverStart: ({ storage = null, name = 'PearTube TV', port = 8176, openAuth = false } = {}) => serial(async () => {
+    const c = await ensureCast(storage)
+    return c.startLocalReceiver({
+      name,
+      port,
+      openAuth,
+      onCommand: async command => { send({ event: 'receiverCommand', command }) }
+    })
+  }),
+  receiverStop: () => serial(async () => {
+    if (cast) await cast.stopLocalReceiver()
+    if (receiverNodeOwned && node) {
+      const open = node
+      node = null
+      receiverNodeOwned = false
+      open.swarm.off('update', update)
+      await open.close().catch(() => {})
+    }
+    return cast ? cast.status() : null
+  }),
+  receiverRotateCode: async ({ storage = null } = {}) => (await ensureCast(storage)).rotateLocalReceiverCode(),
+  receiverReportState: async params => (await ensureCast(params.storage)).reportLocalReceiverState(params.state || params),
   stop: () => serial(close)
 }
 
@@ -140,6 +307,10 @@ async function handle (line) {
   let msg
   try { msg = JSON.parse(line) } catch { return send({ event: 'fatal', error: 'Malformed message from app' }) }
   try {
+    if (typeof msg.event === 'string') {
+      Bare.emit('appEvent', msg)
+      return
+    }
     const method = methods[msg.method]
     if (!method) throw new Error(`Unknown method ${msg.method}`)
     send({ id: msg.id, result: (await method(msg.params || {})) ?? null })

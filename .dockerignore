@@ -3,3 +3,7 @@ packages
 peartube-data
 test
 .git
+desktop
+android
+crates
+worklet/vendor

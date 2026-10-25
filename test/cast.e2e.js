@@ -1,0 +1,407 @@
+// End-to-end verification of PearTube Cast & TV Receivers (peartube-cast/v1):
+//   1. Thin Portable Receiver Daemon (Bare subprocess `bin/receiver.js --thin --player headless`):
+//      PIN rejection, 6-char TV code pairing, token-gated LAN HTTP 206 Range streaming, SSE state sync,
+//      and seek/pause/stop remote control.
+//   2. Native P2P mDNS Receiver with mid-stream initiator loss:
+//      streams directly from its local 1-hop P2P BlobServer (`mode: 'p2p'`), survives mid-stream initiator
+//      shutdown with zero byte drop, and seeds cached blocks to a 3rd peer as a normal peer.
+//   3. Cross-subnet Noise P2P Keypair Pairing (`peartube://receiver/<64-hex-pubkey>?token=...`):
+//      with zero LAN HTTP path given, pairs and casts over HyperDHT Noise encryption and streams directly
+//      from the P2P swarm.
+// Writes repeatable verification evidence to `desktop/target/e2e/cast-result.json`.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { createHash, randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createInterface } from 'node:readline'
+import { Readable } from 'node:stream'
+import createTestnet from 'hyperdht/testnet.js'
+import { createNode } from '../src/index.js'
+import { createCastController, createReceiver, formatReceiverUri, parseReceiverUri } from '../src/cast.js'
+import { mdnsBus } from './mdns.js'
+
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
+const tmp = name => mkdtempSync(join(tmpdir(), `peartube-cast-${name}-`))
+
+function fetchRange (url, rangeHeader = null) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(url, { headers: rangeHeader ? { range: rangeHeader } : {} }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.once('end', () => {
+        const body = Buffer.concat(chunks)
+        resolve({ status: res.statusCode, body, sha256: sha256(body), contentRange: res.headers['content-range'] || null })
+      })
+      res.once('error', reject)
+    })
+    req.once('error', reject)
+    req.end()
+  })
+}
+
+async function waitFor (fn, label, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const val = await fn()
+    if (val) return val
+    await new Promise(resolve => setTimeout(resolve, 150))
+  }
+  throw new Error(`Timed out waiting for ${label}`)
+}
+
+const evidence = { ranAt: new Date().toISOString(), scenarios: {} }
+
+test('thin portable receiver daemon pairs by 6-char TV code, streams 206 HTTP Range bytes, and obeys remote control', async t => {
+  const testnet = await createTestnet(3)
+  const sender = await createNode({ storage: tmp('sender-thin'), bootstrap: testnet.bootstrap })
+  const recDir = tmp('daemon-thin')
+  const daemon = spawn(
+    process.execPath,
+    ['bin/receiver.js', '--thin', '--player', 'headless', '--port', '0', '--name', 'Bedroom Roku TV', '--storage', recDir],
+    { env: { ...process.env, PEARTUBE_LAN_HOST: '127.0.0.1' }, stdio: ['ignore', 'pipe', 'inherit'] }
+  )
+  t.after(async () => {
+    daemon.kill('SIGTERM')
+    await sender.close()
+    await testnet.destroy()
+  })
+
+  const rl = createInterface({ input: daemon.stdout })
+  const boot = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Receiver daemon did not print ready JSON')), 15_000)
+    rl.once('line', line => { clearTimeout(timer); resolve(JSON.parse(line)) })
+  })
+  assert.equal(boot.msg, 'receiver ready')
+  assert.equal(boot.thin, true)
+  assert.equal(boot.capabilities.p2p, false, 'thin network-stack receiver runs without a P2P node')
+  assert.equal(boot.pairCode.length, 6)
+
+  const cast = createCastController({
+    storage: tmp('sender-cast-thin'),
+    getNode: () => sender,
+    getLanHost: () => '127.0.0.1'
+  })
+  t.after(() => cast.close())
+
+  const bytes = randomBytes(2 * 1024 * 1024 + 333)
+  const published = await sender.publish({ id: 'imdb:tt0133093', title: 'Thin Receiver Matrix' }, Readable.from([bytes]))
+  const entries = await sender.search('imdb:tt0133093')
+  const entryKey = entries[0].key
+
+  // Wrong TV PIN must be rejected cleanly before pairing succeeds.
+  await assert.rejects(
+    () => cast.pairReceiver({ host: '127.0.0.1', port: boot.port, code: '000000' }),
+    /Invalid TV pairing code/i
+  )
+
+  const paired = await cast.pairReceiver({ host: '127.0.0.1', port: boot.port, code: boot.pairCode })
+  assert.equal(paired.name, 'Bedroom Roku TV')
+  assert.ok(paired.token.length >= 16)
+
+  const playing = await cast.castPlay({ receiverId: paired.id, key: entryKey, preferMode: 'auto', startPositionMs: 5000 })
+  assert.equal(playing.session.receiverName, 'Bedroom Roku TV')
+  assert.equal(playing.session.state.mode, 'http')
+
+  const artifactPath = join(recDir, 'last-playback.json')
+  const playback = await waitFor(() => existsSync(artifactPath) && JSON.parse(readFileSync(artifactPath, 'utf8')), 'thin daemon stream verification')
+  assert.equal(playback.rangeStatus, 206)
+  assert.equal(playback.rangeBytes, 4096)
+  assert.equal(playback.fullBytes, bytes.length)
+  assert.equal(playback.fullSha256, sha256(bytes))
+
+  await cast.castControl({ action: 'seek', positionMs: 24_000 })
+  await waitFor(() => cast.status().session?.state?.positionMs >= 24_000, 'SSE seek sync')
+  await cast.castControl({ action: 'pause' })
+  await waitFor(() => cast.status().session?.state?.playing === false, 'SSE pause sync')
+  await cast.castStop({ stopPlayback: true })
+  assert.equal(cast.status().session, null)
+
+  evidence.scenarios.thinDaemon = { boot, playback }
+})
+
+test('native P2P mDNS receiver streams from local BlobServer across mid-stream initiator loss and seeds to a 3rd peer', { timeout: 180_000 }, async t => {
+  const testnet = await createTestnet(3)
+  const bus = mdnsBus()
+  const relay = await createNode({ storage: tmp('hybrid-relay'), bootstrap: testnet.bootstrap })
+  const sender = await createNode({ storage: tmp('hybrid-sender'), tracker: relay.status().tracker, bootstrap: testnet.bootstrap })
+  const receiverNode = await createNode({ storage: tmp('hybrid-tv-node'), bootstrap: testnet.bootstrap })
+  let thirdPeer = null
+
+  let receivedCmd = null
+  const tv = await createReceiver({
+    storage: tmp('hybrid-tv-cast'),
+    name: 'Living Room Shield TV',
+    port: 0,
+    lanHost: '127.0.0.1',
+    node: receiverNode,
+    adapter: bus(),
+    onCommand: async (cmd, ctx) => {
+      receivedCmd = cmd
+      if (cmd.action === 'load') {
+        ctx.updateState({ status: 'playing', playing: true, buffering: false, positionMs: cmd.startPositionMs || 0, durationMs: 90_000 })
+      }
+    }
+  })
+  const cast = createCastController({
+    storage: tmp('hybrid-sender-cast'),
+    getNode: () => sender,
+    getLanHost: () => '127.0.0.1',
+    adapter: bus()
+  })
+  await cast.setLanHost('127.0.0.1')
+
+  t.after(async () => {
+    await cast.close()
+    await thirdPeer?.close()
+    await tv.close()
+    await receiverNode.close()
+    await sender.close()
+    await relay.close()
+    await testnet.destroy()
+  })
+
+  const bytes = randomBytes(2560 * 1024 + 19)
+  await relay.publish({ id: 'imdb:tt0111161', title: 'Hybrid Swarm Survival' }, Readable.from([bytes]))
+
+  const entry = await waitFor(async () => (await sender.search('imdb:tt0111161'))[0], 'sender synced tracker entry', 60_000)
+  const discoveredTv = await waitFor(() => cast.listReceivers().find(r => r.name === 'Living Room Shield TV'), 'mDNS discovered Shield TV')
+  assert.equal(discoveredTv.p2p, true)
+
+  await cast.pairReceiver({ id: discoveredTv.id, code: tv.info().pairCode })
+  await cast.castPlay({ receiverId: discoveredTv.id, key: entry.key, preferMode: 'auto' })
+  assert.ok(receivedCmd?.streamUrl?.startsWith('http://127.0.0.1:'), 'native P2P receiver streams directly from local 1-hop BlobServer')
+
+  // Open ONE single continuous HTTP stream (just as OxideAV ReadAheadSource does),
+  // then kill the cast initiator mid-flight after the first 128 KiB arrives!
+  const midStreamContinuous = await new Promise((resolve, reject) => {
+    let killedInitiator = false
+    let readSoFar = 0
+    const chunks = []
+    const req = httpRequest(receivedCmd.streamUrl, { headers: { range: 'bytes=0-' } }, res => {
+      res.on('data', chunk => {
+        chunks.push(chunk)
+        readSoFar += chunk.length
+        if (!killedInitiator && readSoFar >= 128 * 1024) {
+          killedInitiator = true
+          res.pause()
+          Promise.all([cast.close(), sender.close()]).then(() => res.resume()).catch(reject)
+        }
+      })
+      res.once('end', () => {
+        const full = Buffer.concat(chunks)
+        resolve({ status: res.statusCode, length: full.length, sha256: sha256(full) })
+      })
+      res.once('error', reject)
+    })
+    req.once('error', reject)
+    req.end()
+  })
+
+  assert.equal(midStreamContinuous.status, 206)
+  assert.equal(midStreamContinuous.length, bytes.length, 'single open player stream completed 100% of bytes across mid-stream initiator death')
+  assert.equal(midStreamContinuous.sha256, sha256(bytes))
+  assert.equal(tv.state().mode, 'p2p', 'receiver upgraded stream mode to p2p swarm')
+
+  // Wait for TV receiver's retained linear download to hold 100% of the blob, then kill the original relay too
+  // so the TV receiver is the ONLY peer on earth holding the movie!
+  await waitFor(() => (tv.peerStatus()?.cachedBytes || 0) >= bytes.length, 'TV cached 100% of blob for seeding', 60_000)
+  await relay.close()
+
+  // A brand-new 3rd peer joins and downloads the entire movie directly from the TV receiver!
+  thirdPeer = await createNode({ storage: tmp('third-public-peer'), bootstrap: testnet.bootstrap })
+  const openedOnThird = await thirdPeer.openUri(entry.magnetUrl)
+  const fromTvOnly = await fetchRange(openedOnThird.entry.streamUrl)
+  assert.equal(fromTvOnly.status, 200)
+  assert.equal(fromTvOnly.body.length, bytes.length)
+  assert.equal(fromTvOnly.sha256, sha256(bytes), '3rd peer streamed exact video bytes solely from the TV receiver')
+  assert.ok((tv.peerStatus()?.txBytes || 0) >= bytes.length, 'TV receiver transmitted the full video as a normal P2P seeder')
+
+  evidence.scenarios.hybridFailoverAndSeeding = {
+    tvPublicKey: tv.publicKey,
+    finalMode: tv.state().mode,
+    midStreamSpliceBytes: midStreamContinuous.length,
+    seededByTvTxBytes: tv.peerStatus()?.txBytes,
+    verifiedSha256: fromTvOnly.sha256
+  }
+})
+
+test('cross-subnet Noise P2P keypair pairing casts and controls a remote receiver with no LAN HTTP path', async t => {
+  const testnet = await createTestnet(3)
+  const sender = await createNode({ storage: tmp('noise-sender'), bootstrap: testnet.bootstrap })
+  const tvNode = await createNode({ storage: tmp('noise-tv-node'), bootstrap: testnet.bootstrap })
+
+  let loadedUrl = null
+  const tv = await createReceiver({
+    storage: tmp('noise-tv-cast'),
+    name: 'Remote Mountain Apple TV',
+    port: 0,
+    lanHost: null,
+    node: tvNode,
+    onCommand: async (cmd, ctx) => {
+      if (cmd.action === 'load') {
+        loadedUrl = cmd.streamUrl
+        ctx.updateState({ status: 'playing', playing: true, buffering: false, positionMs: 0, durationMs: 120_000 })
+      }
+    }
+  })
+
+  const cast = createCastController({
+    storage: tmp('noise-sender-cast'),
+    getNode: () => sender,
+    getLanHost: () => null // No LAN IPv4 / cross-subnet: forces pure Noise P2P control + P2P swarm media!
+  })
+
+  t.after(async () => {
+    await cast.close()
+    await tv.close()
+    await tvNode.close()
+    await sender.close()
+    await testnet.destroy()
+  })
+
+  const bytes = randomBytes(1024 * 1024 + 77)
+  await sender.publish({ id: 'imdb:tt0088763', title: 'Noise Encrypted Cast' }, Readable.from([bytes]))
+  const [entry] = await sender.search('imdb:tt0088763')
+
+  // Pair strictly via publicKey + token URI (zero host/port metadata!).
+  const { token: pairToken } = parseReceiverUri(tv.info().pairingUri)
+  const remoteUri = formatReceiverUri({
+    publicKey: tv.publicKey,
+    deviceId: tv.deviceId,
+    name: 'Remote Mountain Apple TV',
+    token: pairToken,
+    p2p: true
+  })
+  const paired = await cast.pairReceiver({ uri: remoteUri })
+  assert.equal(paired.host, '')
+  assert.equal(paired.publicKey, tv.publicKey)
+
+  const st = await cast.castPlay({ receiverId: paired.id, key: entry.key, preferMode: 'p2p' })
+  assert.equal(st.session.transport, 'p2p', 'control plane runs over HyperDHT Noise SecretStream')
+  assert.equal(st.session.state.mode, 'p2p', 'media plane runs over P2P Hyperblobs swarm')
+  assert.ok(loadedUrl?.startsWith('http://127.0.0.1:'), 'remote TV streams from its own local P2P BlobServer')
+
+  const streamed = await fetchRange(loadedUrl)
+  assert.equal(streamed.body.length, bytes.length)
+  assert.equal(streamed.sha256, sha256(bytes))
+
+  await cast.castControl({ action: 'seek', positionMs: 42_000 })
+  await waitFor(() => cast.status().session?.state?.positionMs === 42_000, 'Noise push state update after seek')
+  tv.reportState({ idle: true, playing: false, buffering: false, ended: true, positionMs: 0 })
+  assert.equal(tv.state().status, 'idle')
+  assert.equal(tv.state().entry, null)
+  await waitFor(() => cast.status().session?.state?.status === 'idle', 'Noise push sync after local TV stop')
+  await cast.castStop({ stopPlayback: false })
+
+  evidence.scenarios.noiseP2P = {
+    publicKey: tv.publicKey,
+    transport: 'p2p',
+    verifiedBytes: streamed.body.length,
+    verifiedSha256: streamed.sha256
+  }
+})
+
+test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop private P2P peer and seeds privately', { timeout: 240_000 }, async t => {
+  const testnet = await createTestnet(3)
+  const bus = mdnsBus()
+  const privateNodes = []
+  t.after(async () => {
+    await Promise.allSettled(privateNodes.map(n => n.close()))
+    await testnet.destroy()
+  })
+
+  // 4 private-routing relays form the 4-hop circuit mesh on the local testnet.
+  const anchor = await createNode({ storage: tmp('priv-anchor-0'), bootstrap: testnet.bootstrap, privateRouting: true, privateRelay: true })
+  privateNodes.push(anchor)
+  const tracker = anchor.status().tracker
+  for (let i = 1; i < 4; i++) {
+    const r = await createNode({ storage: tmp(`priv-anchor-${i}`), bootstrap: testnet.bootstrap, tracker, privateRouting: true, privateRelay: true })
+    privateNodes.push(r)
+  }
+
+  const seeder = await createNode({ storage: tmp('priv-seeder'), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
+  privateNodes.push(seeder)
+  const initiator = await createNode({ storage: tmp('priv-initiator'), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
+  privateNodes.push(initiator)
+
+  // Start TV receiver with NO pre-configured private node (simulating an out-of-the-box TV on home Wi-Fi!).
+  let tvLoadedUrl = null
+  const tv = await createReceiver({
+    storage: tmp('priv-tv'),
+    name: 'Private Bedroom TV',
+    port: 0,
+    lanHost: '127.0.0.1',
+    allowPeerNode: true,
+    adapter: bus(),
+    onCommand: async (cmd, ctx) => {
+      if (cmd.action === 'load') {
+        tvLoadedUrl = cmd.streamUrl
+        ctx.updateState({ status: 'playing', playing: true, buffering: false, positionMs: 0, durationMs: 60_000 })
+      }
+    }
+  })
+  t.after(() => tv.close())
+
+  const cast = createCastController({
+    storage: tmp('priv-initiator-cast'),
+    getNode: () => initiator,
+    getLanHost: () => '127.0.0.1',
+    adapter: bus()
+  })
+  await cast.setLanHost('127.0.0.1')
+  t.after(() => cast.close())
+
+  const bytes = randomBytes(1024 * 1024 + 55)
+  await seeder.publish({ id: 'imdb:tt0100001', title: 'Private 4-Hop Cast' }, Readable.from([bytes]))
+  const entry = await waitFor(async () => (await initiator.search('imdb:tt0100001'))[0], 'private initiator synced tracker', 90_000)
+
+  const discoveredTv = await waitFor(() => cast.listReceivers().find(r => r.name === 'Private Bedroom TV'), 'discovered TV')
+  await cast.pairReceiver({ id: discoveredTv.id, code: tv.info().pairCode })
+  await cast.castPlay({ receiverId: discoveredTv.id, key: entry.key, preferMode: 'auto' })
+  assert.equal(tv.state().mode, 'private-p2p', 'TV receiver matched initiator privateRouting and entered 4-hop private-p2p mode')
+
+  // Shut down the cast initiator BEFORE the TV even starts reading the video!
+  await cast.close()
+  await initiator.close()
+
+  // TV streams 100% of the video over 4-hop encrypted private circuits with ZERO public or LAN bytes!
+  const tvStreamed = await fetchRange(tvLoadedUrl)
+  assert.equal(tvStreamed.status, 200)
+  assert.equal(tvStreamed.body.length, bytes.length)
+  assert.equal(tvStreamed.sha256, sha256(bytes))
+
+  const tvPeerSt = tv.peerStatus()
+  assert.ok(tvPeerSt.routes.private.rxBytes >= bytes.length, 'TV received video bytes over 4-hop private circuits')
+  assert.equal(tvPeerSt.routes.public.rxBytes, 0, 'zero public DHT bytes on private cast receiver')
+  assert.equal(tvPeerSt.routes.lan.rxBytes, 0, 'zero cleartext LAN bytes when initiator had LAN off')
+
+  // Now shut down the original seeder too — leaving ONLY the TV receiver seeding privately on the tracker!
+  await waitFor(() => (tv.peerStatus()?.cachedBytes || 0) >= bytes.length, 'TV cached 100% of private blob', 60_000)
+  await seeder.close()
+
+  const latePrivateReader = await createNode({ storage: tmp('priv-late-reader'), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
+  privateNodes.push(latePrivateReader)
+  const lateEntry = await waitFor(async () => (await latePrivateReader.search('imdb:tt0100001'))[0], 'late private reader synced tracker', 90_000)
+  const fromTvPrivately = await fetchRange(lateEntry.streamUrl)
+  assert.equal(fromTvPrivately.status, 200)
+  assert.equal(fromTvPrivately.body.length, bytes.length)
+  assert.equal(fromTvPrivately.sha256, sha256(bytes), 'late private peer streamed exact bytes privately from the TV receiver')
+  assert.ok((tv.peerStatus()?.routes.private.txBytes || 0) >= bytes.length, 'TV receiver seeded full video over 4-hop private circuits')
+  assert.equal(tv.peerStatus()?.routes.public.txBytes || 0, 0, 'TV receiver leaked zero public bytes while seeding privately')
+
+  evidence.scenarios.privateP2PAutonomousSeeding = {
+    mode: tv.state().mode,
+    tvPrivateRxBytes: tv.peerStatus()?.routes.private.rxBytes,
+    tvPrivateTxBytes: tv.peerStatus()?.routes.private.txBytes,
+    publicBytes: (tv.peerStatus()?.routes.public.rxBytes || 0) + (tv.peerStatus()?.routes.public.txBytes || 0),
+    verifiedSha256: fromTvPrivately.sha256
+  }
+
+  const outDir = join(process.cwd(), 'desktop/target/e2e')
+  mkdirSync(outDir, { recursive: true })
+  writeFileSync(join(outDir, 'cast-result.json'), JSON.stringify(evidence, null, 2))
+})

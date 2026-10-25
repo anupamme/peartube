@@ -72,6 +72,8 @@ test('the app worklet finds a relay on the LAN and streams from it', async t => 
   assert.equal(stages.streamed.relay.peers, 0, 'no DHT connection')
   assert.ok(stages.streamed.relay.lanPeers >= 1, 'the app reached the relay over LAN discovery')
   assert.equal(stages.streamed.lan, `on ${host}`, 'the status line names the address LAN discovery uses')
+  assert.ok(stages.streamed.relay.routes.lan.txBytes >= bytes.length, 'the file traveled over LAN')
+  assert.equal(stages.streamed.relay.routes.public.txBytes + stages.streamed.relay.routes.private.txBytes, 0, 'no DHT stream carried it')
   save('lan-result.json', { test: 'app worklet finds a relay on the LAN and streams from it', host, published, relay, stages })
 })
 
@@ -107,6 +109,8 @@ async function drive (t, relay, published, settings, env = {}) {
 function verify (stages, relay, published, bytes, secondKey) {
   const app = stages.streamed
   assert.equal(app.tracker, relay.status().tracker)
+  assert.equal(app.manifestId, 'org.peartube.p2p', 'the QuickJS worklet serves the loopback Stremio manifest')
+  assert.ok(app.entry.magnetUrl.startsWith('peartube://watch/'), 'every entry carries a zero-subscription magnet URI')
   assert.notEqual(app.writer, relay.status().writer, 'the app is a peer of its own')
   assert.equal(app.entry.sha256, published.sha256)
   assert.equal(app.entry.local, false, 'the bytes come from the relay')

@@ -67,8 +67,11 @@ module.exports = class BlobReadStream extends Readable {
     if (this._prefetch) {
       const avg = this.id.blockLength > 0 ? Math.max(1024, this.id.byteLength / this.id.blockLength) : 65536
       const span = Math.min(this.id.blockLength, Math.max(2, Math.ceil(this._length / avg) + 4))
-      const win = Math.max(16, Math.ceil((16 * 1024 * 1024) / avg))
-      this._win = Math.min(span, win)
+      this._maxWin = Math.min(span, Math.max(32, Math.ceil((32 * 1024 * 1024) / avg)))
+      const initWin = Math.min(this._maxWin, Math.max(8, Math.ceil((2 * 1024 * 1024) / avg)))
+      this._win = initWin
+      this._bytesRead = 0
+      this._rangeStart = start
       this._rangeEnd = Math.min(this._blockEnd, start + this._win)
       this._range = this.core.download({ start, end: this._rangeEnd, linear: true })
     }
@@ -96,10 +99,16 @@ module.exports = class BlobReadStream extends Readable {
     const approxBlock = this.id.byteLength > 0
       ? Math.min(maxBlock - 1, minBlock + Math.floor((this._start / this.id.byteLength) * this.id.blockLength))
       : minBlock
-
-    const result = await this.core.seek(bytes, { minBlock, maxBlock, approxBlock })
-    if (!result) throw BLOCK_NOT_AVAILABLE()
-
+    const shared = this.core.core
+    const cacheKey = `${minBlock}:${bytes}`
+    let result = shared._seekCache?.get(cacheKey)
+    if (!result) {
+      result = await this.core.seek(bytes, { minBlock, maxBlock, approxBlock })
+      if (!result) throw BLOCK_NOT_AVAILABLE()
+      if (!shared._seekCache) shared._seekCache = new Map()
+      if (shared._seekCache.size >= 64) shared._seekCache.clear()
+      shared._seekCache.set(cacheKey, result)
+    }
     this._index = result[0]
     this._relativeOffset = result[1]
 
@@ -136,17 +145,26 @@ module.exports = class BlobReadStream extends Readable {
 
     this._index++
     this._length -= block.byteLength
+    this._bytesRead = (this._bytesRead || 0) + block.byteLength
+    if (this._maxWin && this._bytesRead >= 327680 && this._win < this._maxWin) {
+      this._win = this._maxWin
+    }
 
     if (this._range && this._length > 0 && this._rangeEnd < this._blockEnd && this._rangeEnd - this._index <= (this._win >> 1)) {
       const rem = Math.max(2, Math.ceil(this._length / Math.max(1024, block.byteLength)) + 2)
-      this._rangeEnd = Math.min(this._blockEnd, Math.max(this._rangeEnd, this._index + Math.min(this._win, rem)))
-      const r = this._range.request && this._range.request.context
-      if (r && r.end !== -1 && this._rangeEnd > r.end) {
-        r.userEnd = r.end = this._rangeEnd
-        r.replicator.queueUpdateAll()
+      const nextEnd = Math.min(this._blockEnd, Math.max(this._rangeEnd, this._index + Math.min(this._win, rem)))
+      if (nextEnd > this._rangeEnd) {
+        this._rangeEnd = nextEnd
+        const r = this._range.request && this._range.request.context
+        if (r && r.end !== -1 && nextEnd > r.end) {
+          r.userEnd = r.end = nextEnd
+          r.replicator.queueUpdateAll()
+        } else {
+          this._range.destroy()
+          this._range = this.core.download({ start: this._index, end: this._rangeEnd, linear: true })
+        }
       }
     }
-
     this.push(block)
     if (this._length === 0 || this._index >= this._blockEnd) this.push(null)
     cb(null)
@@ -167,12 +185,37 @@ module.exports = class BlobReadStream extends Readable {
   }
 
   _teardown () {
-    if (this._range !== null) {
-      this._range.destroy()
-      this._range = null
+    const range = this._range
+    const core = this.core
+    this._range = null
+    this.core = null
+    if (range !== null && core !== null && this._length > 0 && !core.closing && core.core && !core.core.closing) {
+      const shared = core.core
+      if (!shared._warmRanges) shared._warmRanges = []
+      while (shared._warmRanges.length >= 2) {
+        const old = shared._warmRanges.shift()
+        clearTimeout(old.timer)
+        old.range.destroy()
+        old.core.close().catch(noop)
+      }
+      const entry = {
+        start: this._rangeStart || 0,
+        end: this._rangeEnd || 0,
+        range,
+        core,
+        timer: setTimeout(() => {
+          const idx = shared._warmRanges ? shared._warmRanges.indexOf(entry) : -1
+          if (idx !== -1) shared._warmRanges.splice(idx, 1)
+          range.destroy()
+          core.close().catch(noop)
+        }, 4000)
+      }
+      entry.timer.unref?.()
+      shared._warmRanges.push(entry)
+      return Promise.resolve()
     }
-
-    if (this.core !== null) return this.core.close()
+    if (range !== null) range.destroy()
+    if (core !== null) return core.close()
     return Promise.resolve()
   }
 

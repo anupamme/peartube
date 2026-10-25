@@ -31,3 +31,10 @@ exports.randomUUID = function randomUUID () {
   const h = b4a.toString(buf, 'hex')
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
 }
+
+// Fresh entropy wet from sodium's belly so cast tokens and receiver seeds never pull bare-crypto.
+exports.randomBytes = function randomBytes (size) {
+  const buf = b4a.alloc(size)
+  sodium.randombytes_buf(buf)
+  return buf
+}
