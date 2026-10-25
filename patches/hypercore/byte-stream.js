@@ -80,7 +80,7 @@ module.exports = class BlobReadStream extends Readable {
       const avg = this.id.blockLength > 0 ? Math.max(1024, this.id.byteLength / this.id.blockLength) : 65536
       const span = Math.min(this.id.blockLength, Math.max(2, Math.ceil(this._length / avg) + 4))
       this._avgBlock = avg
-      this._maxWin = Math.min(span, Math.max(24, Math.ceil((16 * 1024 * 1024) / avg)))
+      this._maxWin = Math.min(span, Math.max(32, Math.ceil((64 * 1024 * 1024) / avg)))
       const initWin = Math.min(this._maxWin, Math.max(4, Math.ceil((1536 * 1024) / avg)))
       this._win = initWin
       this._bytesRead = 0
@@ -160,13 +160,13 @@ module.exports = class BlobReadStream extends Readable {
     this._length -= block.byteLength
     this._bytesRead = (this._bytesRead || 0) + block.byteLength
     if (this._maxWin && this._win < this._maxWin) {
-      const targetBytes = this._bytesRead >= 8 * 1048576 ? 16 * 1048576 : this._bytesRead >= 2 * 1048576 ? 8 * 1048576 : this._bytesRead >= 524288 ? 4 * 1048576 : 0
+      const targetBytes = this._bytesRead >= 16 * 1048576 ? 64 * 1048576 : this._bytesRead >= 6 * 1048576 ? 32 * 1048576 : this._bytesRead >= 2 * 1048576 ? 12 * 1048576 : this._bytesRead >= 524288 ? 4 * 1048576 : 0
       if (targetBytes > 0) {
         this._win = Math.min(this._maxWin, Math.max(this._win, Math.ceil(targetBytes / (this._avgBlock || 65536))))
       }
     }
 
-    if (this._range && this._length > 0 && this._rangeEnd < this._blockEnd && this._rangeEnd - this._index <= (this._win >> 1)) {
+    if (this._range && this._length > 0 && this._rangeEnd < this._blockEnd && this._rangeEnd - this._index <= ((this._win * 3) >> 2)) {
       const rem = Math.max(2, Math.ceil(this._length / Math.max(1024, block.byteLength)) + 2)
       const nextEnd = Math.min(this._blockEnd, Math.max(this._rangeEnd, this._index + Math.min(this._win, rem)))
       if (nextEnd > this._rangeEnd) {

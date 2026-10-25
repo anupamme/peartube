@@ -606,7 +606,7 @@ class Peer {
       if (p.remoteLength > 0 && p.remoteUploading) activePeers++
     }
     if (stream.rtt <= SCALE_LATENCY) {
-      return Math.max(this.inflightRange[0], Math.round(this.inflightRange[1] / Math.max(1, activePeers > 2 ? 2 : 1)))
+      return Math.max(this.inflightRange[1], 320)
     }
     const scale = (stream.rtt / SCALE_LATENCY) * Math.min(1, 2 / (activePeers || 1))
     return Math.max(
@@ -1879,7 +1879,7 @@ class Peer {
   _requestRange(r) {
     const { WANT_BATCH } = w
     if (this.syncsProcessing > 0) return false
-    if (this._remoteContiguousLength <= r.start && this.replicator.peers.some(p => p.isActive() && p._remoteContiguousLength > r.start)) {
+    if (!this._remoteHasBlock(r.start) && this.replicator.peers.some(p => p.isActive() && p._remoteHasBlock(r.start))) {
       return false
     }
     const { length, fork } = this.core.state
