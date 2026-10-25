@@ -15,7 +15,7 @@ import os from 'bare-os'
 import { createNode } from '../src/index.js'
 import { createApi } from '../src/http.js'
 import { createLan, interfaceAdapter, lanAddress } from '../src/lan.js'
-import { createCastController } from '../src/cast.js'
+import { createCastController, reclaimLowDiskReceiverStorage, resolvePeerStorage } from '../src/cast.js'
 
 const ipc = BareKit.IPC
 let node = null
@@ -23,6 +23,7 @@ let api = null
 let apiUrl = null
 let cast = null
 let castStorage = null
+let castPeerStorage = null
 let receiverNodeOwned = false
 let lifecycle = Promise.resolve()
 
@@ -117,8 +118,9 @@ async function moveLan () {
   }
 }
 
-async function ensureCast (storageHint = null) {
+async function ensureCast (storageHint = null, peerStorageHint = null) {
   if (storageHint) castStorage = storageHint
+  if (peerStorageHint) castPeerStorage = peerStorageHint
   if (!castStorage) throw new Error('Storage path required before initializing Cast')
   if (!cast) {
     cast = createCastController({
@@ -127,7 +129,9 @@ async function ensureCast (storageHint = null) {
       ensureNode: async () => {
         if (node) return node
         receiverNodeOwned = true
-        node = await createNode({ storage: castStorage, onchange: update })
+        const peerDir = await resolvePeerStorage(castPeerStorage, castStorage)
+        reclaimLowDiskReceiverStorage(peerDir)
+        node = await createNode({ storage: peerDir, onchange: update })
         node.swarm.on('update', update)
         lanWanted = true
         await moveLan()
@@ -273,12 +277,18 @@ const methods = {
   castAttach: async params => (await ensureCast(params.storage)).castAttach(params),
   castControl: async params => (await ensureCast(params.storage)).castControl(params),
   castStop: async params => (await ensureCast(params.storage)).castStop(params),
-  receiverStart: ({ storage = null, name = 'PearTube TV', port = 8176, openAuth = false } = {}) => serial(async () => {
-    const c = await ensureCast(storage)
+  receiverStart: ({ storage = null, peerStorage = null, name = 'PearTube TV', port = 8176, openAuth = false } = {}) => serial(async () => {
+    const nextPeer = peerStorage || castPeerStorage
+    if (cast && nextPeer && nextPeer !== castPeerStorage && receiverNodeOwned && cast.status().receiverMode?.state?.status === 'idle') {
+      await close()
+    }
+    if (nextPeer) castPeerStorage = nextPeer
+    const c = await ensureCast(storage, castPeerStorage)
     return c.startLocalReceiver({
       name,
       port,
       openAuth,
+      peerStorage: castPeerStorage,
       onCommand: async command => { send({ event: 'receiverCommand', command }) }
     })
   }),

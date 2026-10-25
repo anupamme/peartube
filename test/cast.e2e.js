@@ -330,8 +330,11 @@ test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop p
 
   // Start TV receiver with NO pre-configured private node (simulating an out-of-the-box TV on home Wi-Fi!).
   let tvLoadedUrl = null
+  const tvMetaDir = tmp('priv-tv-meta')
+  const tvExternalSsd = tmp('priv-tv-ssd')
   const tv = await createReceiver({
-    storage: tmp('priv-tv'),
+    storage: tvMetaDir,
+    peerStorage: tvExternalSsd,
     name: 'Private Bedroom TV',
     port: 0,
     lanHost: '127.0.0.1',
@@ -345,6 +348,10 @@ test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop p
     }
   })
   t.after(() => tv.close())
+  assert.equal(tv.info().externalStorage, true, 'receiver adopts external SSD volume for P2P peer seed storage')
+  assert.ok(tv.info().storageFreeBytes > 0)
+  assert.equal(existsSync(join(tvMetaDir, 'receiver.json')), true, 'private pairing identity stays on internal storage')
+  assert.equal(existsSync(join(tvExternalSsd, 'receiver.json')), false, 'private pairing tokens never touch removable SSD')
 
   const cast = createCastController({
     storage: tmp('priv-initiator-cast'),

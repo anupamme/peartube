@@ -5,6 +5,8 @@ import android.content.Intent
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.PowerManager
+import android.os.Environment
+import android.os.StatFs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +32,8 @@ data class TvReceiverInfo(
     val listenUrl: String = "",
     val mode: String? = null,
     val p2pPeers: Long = 0L,
+    val storageFreeBytes: Long = 0L,
+    val externalStorage: Boolean = false,
 ) {
     companion object {
         fun from(json: JSONObject): TvReceiverInfo {
@@ -44,6 +48,8 @@ data class TvReceiverInfo(
                 listenUrl = json.optString("listenUrl"),
                 mode = st?.optString("mode")?.takeUnless { st.isNull("mode") || it.isEmpty() },
                 p2pPeers = st?.optLong("p2pPeers") ?: 0L,
+                storageFreeBytes = json.optLong("storageFreeBytes", 0L),
+                externalStorage = json.optBoolean("externalStorage", false),
             )
         }
     }
@@ -95,6 +101,7 @@ class ReceiverWorker(private val appContext: Context) {
     @Volatile var activityResumed: Boolean = false
     @Volatile var lastHandledSeq: Long = 0L
     private val startLock = Mutex()
+    private var activePeerDir: String = ""
     private var worklet: Worklet? = null
     private var ipc: IPC? = null
     private val outgoing = ArrayDeque<ByteBuffer>()
@@ -121,10 +128,39 @@ class ReceiverWorker(private val appContext: Context) {
         }
     }
 
-    suspend fun ensureStarted(name: String, openAuth: Boolean = true): TvReceiverInfo = startLock.withLock {
-        info.value?.let { return@withLock it }
+    /** Picks the mounted external SSD / expanded volume with the most free space for P2P seed storage. */
+    fun pickPeerStorageDir(): File {
+        val internal = File(appContext.noBackupFilesDir, "cast").apply { mkdirs() }
+        var bestDir = internal
+        var bestAvail = runCatching { StatFs(internal.path).availableBytes }.getOrDefault(0L)
+        val candidates = buildList {
+            runCatching { appContext.getExternalFilesDirs(null) }.getOrNull()?.filterNotNull()?.let(::addAll)
+            runCatching { appContext.externalMediaDirs }.getOrNull()?.filterNotNull()?.let(::addAll)
+        }
+        for (base in candidates) {
+            val state = runCatching { Environment.getExternalStorageState(base) }.getOrDefault("")
+            if (state != Environment.MEDIA_MOUNTED) continue
+            val dir = File(base, "peer-seed")
+            if (!runCatching { dir.mkdirs(); dir.isDirectory && dir.canWrite() }.getOrDefault(false)) continue
+            val avail = runCatching { StatFs(dir.path).availableBytes }.getOrDefault(0L)
+            if (avail > bestAvail + (4L shl 30)) {
+                bestAvail = avail
+                bestDir = dir
+            }
+        }
+        return bestDir
+    }
+
+    suspend fun ensureStarted(name: String, openAuth: Boolean = true, forceRefreshStorage: Boolean = false): TvReceiverInfo = startLock.withLock {
+        val chosenPeer = pickPeerStorageDir().path
+        val existing = info.value
+        if (existing != null && (!forceRefreshStorage || chosenPeer == activePeerDir || isStreaming)) {
+            return@withLock existing
+        }
+        activePeerDir = chosenPeer
         val params = JSONObject()
             .put("storage", castDir)
+            .put("peerStorage", chosenPeer)
             .put("name", name)
             .put("openAuth", openAuth)
         val res = TvReceiverInfo.from(call("receiverStart", params) as JSONObject)

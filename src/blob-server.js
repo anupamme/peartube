@@ -220,9 +220,12 @@ export class BlobServer {
     this.sessions.add(core)
     let aborted = false
     let wakeDrain = null
+    let prefetch = null
+    let prefetchEnd = 0
     const cleanup = () => {
       if (aborted) return
       aborted = true
+      if (prefetch) { prefetch.destroy(); prefetch = null }
       this.sessions.delete(core)
       core.close().catch(noop)
       if (wakeDrain) { const fn = wakeDrain; wakeDrain = null; fn() }
@@ -235,6 +238,12 @@ export class BlobServer {
       if (aborted) return
 
       const bs = uniformBlockSize(blob)
+      const avgBs = bs > 0 ? bs : Math.max(4096, Math.round(blob.byteLength / Math.max(1, blob.blockLength)))
+      const scale = Math.max(1, Math.min(8, Math.round(524288 / avgBs)))
+      if (core.core && (core.core._ptBlockScale || 0) < scale) {
+        core.core._ptBlockScale = scale
+        core.core.replicator?.setInflightRange(128 * scale, 384 * scale)
+      }
       let blockIdx
       let relOffset
       let endBlockExcl
@@ -249,6 +258,10 @@ export class BlobServer {
         relOffset = start % bs
         endBlockExcl = blob.blockOffset + Math.min(blob.blockLength, Math.floor(end / bs) + 1)
       } else {
+        // Pre-seed the 26-level Merkle subtree & bitfield page in 1 RTT so stock core.seek() never scans 59M sparse blocks.
+        const estIdx = blob.blockOffset + Math.min(blob.blockLength - 1, Math.floor((start / blob.byteLength) * blob.blockLength))
+        await core.get(estIdx).catch(noop)
+        if (aborted) return
         const sought = await core.seek(blob.byteOffset + start)
         if (aborted || !sought) { if (!aborted) res.destroy(); return }
         blockIdx = sought[0]
@@ -261,8 +274,20 @@ export class BlobServer {
       let sent = 0
       let remaining = contentLength
 
+      // Linear RangeRequest keeps up to 32 MiB streaming strictly in order without RandomIterator shuffling _queued.
+      const windowBlocks = Math.max(16, Math.ceil((32 * 1048576) / avgBs))
+      const stepBlocks = Math.max(8, windowBlocks >> 1)
+      const advancePrefetch = () => {
+        if (aborted || blockIdx >= endBlockExcl) return
+        if (prefetch && prefetchEnd >= Math.min(endBlockExcl, blockIdx + stepBlocks)) return
+        const prev = prefetch
+        prefetchEnd = Math.min(endBlockExcl, blockIdx + windowBlocks)
+        prefetch = core.download({ start: blockIdx, end: prefetchEnd, linear: true })
+        if (prev) prev.destroy()
+      }
       const fillLookahead = () => {
-        const win = sent >= 8 * 1048576 ? 32 : sent >= 2 * 1048576 ? 16 : sent >= 524288 ? 8 : 4
+        advancePrefetch()
+        const win = sent >= 1048576 ? 8 : 4
         while (!aborted && queue.size < win && nextFetch < endBlockExcl) {
           const idx = nextFetch++
           const p = core.get(idx)
@@ -286,6 +311,7 @@ export class BlobServer {
           res.destroy()
           return
         }
+        if (core.core) core.core._ptLastReadBlock = blockIdx
         const avail = block.byteLength - relOffset
         const take = Math.min(avail, remaining)
         const slice = relOffset === 0 && take === block.byteLength

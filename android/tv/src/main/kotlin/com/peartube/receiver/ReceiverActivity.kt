@@ -189,6 +189,14 @@ private fun formatClock(ms: Long): String {
     else "%d:%02d".format(Locale.ROOT, s / 60, s % 60)
 }
 
+private fun formatStorageFree(bytes: Long, external: Boolean): String? {
+    if (bytes <= 0L) return null
+    val gb = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+    val sizeTxt = if (gb >= 950.0) String.format(Locale.US, "%.2f TB", gb / 1024.0)
+    else String.format(Locale.US, "%.1f GB", gb)
+    return if (external) "$sizeTxt external seed drive ready" else "$sizeTxt storage free"
+}
+
 private fun prettyCodec(raw: String): String = when (raw.lowercase(Locale.ROOT)) {
     "h264", "avc", "avc1" -> "H.264"
     "h265", "hevc", "hev1", "hvc1" -> "HEVC"
@@ -478,7 +486,7 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
         activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val tvName = Build.MODEL?.takeIf { it.isNotBlank() }?.let { "PearTube TV · $it" } ?: "PearTube TV"
         scope.launch {
-            runCatching { worker.ensureStarted(tvName, openAuth = true) }
+            runCatching { worker.ensureStarted(tvName, openAuth = true, forceRefreshStorage = true) }
                 .onFailure { openError = it.message }
         }
         onDispose {
@@ -666,8 +674,16 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
                         fontSize = 15.sp,
                         lineHeight = 22.sp,
                     )
-                    info?.listenUrl?.takeIf { it.isNotEmpty() }?.let { url ->
-                        Text(url, color = TvDim, fontSize = 13.sp)
+                    val netAndDisk = listOfNotNull(
+                        info?.listenUrl?.takeIf { it.isNotEmpty() },
+                        info?.let { formatStorageFree(it.storageFreeBytes, it.externalStorage) },
+                    ).joinToString("  ·  ")
+                    if (netAndDisk.isNotEmpty()) {
+                        Text(
+                            netAndDisk,
+                            color = if (info?.externalStorage == true) TvAccent else TvDim,
+                            fontSize = 13.sp,
+                        )
                     }
                     (openError ?: workerErr)?.let { err ->
                         Text(err, color = TvDanger, fontSize = 13.sp)
@@ -1074,6 +1090,9 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
                                 InfoRow("Audio", shortTrackBadge(activeAudio))
                                 InfoRow("Subtitles", activeSub?.let(::shortTrackBadge) ?: "Off")
                                 InfoRow("Network", "$badgeTxt · ${info?.p2pPeers ?: 0} P2P peers")
+                                info?.let { formatStorageFree(it.storageFreeBytes, it.externalStorage) }?.let { diskTxt ->
+                                    InfoRow("Seed Storage", diskTxt)
+                                }
                             }
                         }
                     }

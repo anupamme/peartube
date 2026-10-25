@@ -276,6 +276,7 @@ class LanDiscovery extends EventEmitter {
     this._peerShards = new Map()
     this._peers = new Map()
     this._active = new Map()
+    this._directPeers = new Set()
     this._pending = new Map()
     this._timers = new Map()
     this._ads = []
@@ -440,6 +441,19 @@ class LanDiscovery extends EventEmitter {
     }
   }
 
+  // Mounts a known LAN peer straight by IP:port when Wi-Fi multicast gags on mDNS.
+  dialDirect (publicKey, host, port) {
+    if (this.destroyed || this.suspended || !isIPv4(String(host || '')) || !(port > 0)) return
+    const pubBuf = typeof publicKey === 'string' ? b4a.from(publicKey, 'hex') : publicKey
+    if (!pubBuf || pubBuf.byteLength !== 32) return
+    const id = b4a.toString(pubBuf, 'hex')
+    if (id === this.peerKeyHex) return
+    this._directPeers.add(id)
+    const open = this._active.get(id)
+    if ((open && !open.destroyed) || this._pending.has(id)) return
+    this._dial({ id, publicKey: pubBuf, host, port: Number(port), tokens: [] })
+  }
+
   _dial (peer) {
     const relayAddresses = [{ host: peer.host, port: peer.port }]
     const socket = this.dht.connect(peer.publicKey, { keyPair: this.keyPair, relayAddresses })
@@ -463,13 +477,17 @@ class LanDiscovery extends EventEmitter {
   _onIncoming (socket) {
     socket.on('error', () => {})
     const pub = socket.remotePublicKey
-    if (this.destroyed || !pub || !this._topics.size) {
+    if (this.destroyed || !pub) {
       socket.destroy()
       return
     }
     const id = b4a.toString(pub, 'hex')
+    if (!this._topics.size && !this._directPeers.has(id)) {
+      socket.destroy()
+      return
+    }
     const peer = this._peers.get(id)
-    if (peer && !this._sharesTopic(peer.tokens)) {
+    if (peer && !this._directPeers.has(id) && !this._sharesTopic(peer.tokens)) {
       socket.destroy()
       return
     }

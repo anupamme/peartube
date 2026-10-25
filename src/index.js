@@ -5,6 +5,7 @@ import Corestore from 'corestore'
 import Hyperswarm from 'hyperswarm'
 import HyperDHT from 'hyperdht'
 import Hyperblobs from 'hyperblobs'
+import hypercoreCrypto from 'hypercore-crypto'
 import { BlobServer } from './blob-server.js'
 import b4a from 'b4a'
 import { createHash } from 'node:crypto'
@@ -312,21 +313,29 @@ export async function createNode ({
   if (usePrimaryTracker) joinOverlayTopic(`tracker:${primaryKey}`, tracker.key, tracker.discoveryKey)
   if (localChannel.core.length > 0) joinOverlayTopic(`channel:${channelKey}`, localChannel.core.key, localChannel.core.discoveryKey)
 
-  // Public content-swarm merging: peers watching the same blobs core across different channels find each other directly.
+  // Spreads both PearTube's merged blob topic and stock Hypercore discoveryKey wide on public swarms so supplemental HiveRelays find every wet 512 KiB block.
   const contentTopics = new Map()
   function joinContentSwarm (blobsHex) {
     if (dht || closing || !str(blobsHex, HEX64) || contentTopics.has(blobsHex)) return
     if (contentTopics.size >= MAX_CONTENT_TOPICS) {
       const oldest = contentTopics.keys().next().value
-      const oldTopic = contentTopics.get(oldest)
+      const oldTopics = contentTopics.get(oldest)
       contentTopics.delete(oldest)
-      swarm.leave(oldTopic).catch(() => {})
-      lan?.leave?.(oldTopic)
+      for (const t of oldTopics) {
+        swarm.leave(t).catch(() => {})
+        lan?.leave?.(t)
+      }
     }
-    const topic = createHash('sha256').update('peartube/blob/v1/').update(b4a.from(blobsHex, 'hex')).digest()
-    contentTopics.set(blobsHex, topic)
-    swarm.join(topic, { server: true, client: true })
-    lan?.join(topic)
+    const keyBuf = b4a.from(blobsHex, 'hex')
+    const topics = [
+      createHash('sha256').update('peartube/blob/v1/').update(keyBuf).digest(),
+      hypercoreCrypto.discoveryKey(keyBuf)
+    ]
+    contentTopics.set(blobsHex, topics)
+    for (const t of topics) {
+      swarm.join(t, { server: true, client: true })
+      lan?.join(t)
+    }
   }
   for (const s of blobSlots) if (s.core.length > 0) joinContentSwarm(s.key)
 
@@ -498,12 +507,17 @@ export async function createNode ({
       return
     }
     for (const discKey of lanTopics.values()) next.join(discKey)
-    if (!dht) for (const topic of contentTopics.values()) next.join(topic)
+    if (!dht) for (const topics of contentTopics.values()) for (const t of topics) next.join(t)
     lan = next
   }
   await setLan(createLan)
 
-  const server = new BlobServer(store, { host: streamHost, port: streamPort, token: null })
+  const server = new BlobServer(store, {
+    host: streamHost,
+    port: streamPort,
+    token: null,
+    resolve: (key, info) => { if (info?.keyHex) joinContentSwarm(info.keyHex); return { key } }
+  })
   await server.listen()
 
   function streamUrl (entry) {
@@ -549,11 +563,17 @@ export async function createNode ({
       for (const r of warmRanges.get(oldest)) r.destroy()
       warmRanges.delete(oldest)
     }
-    const { blockOffset, blockLength } = entry.blob
+    const { blockOffset, blockLength, byteLength } = entry.blob
+    const avgBs = Math.max(4096, Math.round((byteLength || BLOB_BLOCK_SIZE) / Math.max(1, blockLength)))
+    const scale = Math.max(1, Math.min(4, Math.round(BLOB_BLOCK_SIZE / avgBs)))
+    if (core.core && (core.core._ptBlockScale || 0) < scale) {
+      core.core._ptBlockScale = scale
+      core.core.replicator?.setInflightRange(96 * scale, 256 * scale)
+    }
     const endBlock = blockOffset + blockLength
-    const headEnd = Math.min(endBlock, blockOffset + 8)
+    const headEnd = Math.min(endBlock, blockOffset + 8 * scale)
     const ranges = [core.download({ start: blockOffset, end: headEnd, linear: true })]
-    if (endBlock > headEnd) ranges.push(core.download({ start: Math.max(headEnd, endBlock - 2), end: endBlock, linear: true }))
+    if (endBlock > headEnd) ranges.push(core.download({ start: Math.max(headEnd, endBlock - 2 * scale), end: endBlock, linear: true }))
     warmRanges.set(tag, ranges)
   }
 
@@ -760,7 +780,25 @@ export async function createNode ({
     }
   }
 
-  async function clearCache (key = null) {
+  // Drains spent blocks behind the playhead so tiny TV disks swallow 100 GB remuxes without choking on ENOSPC.
+  async function evictBehind (blobsHex, blob, keepBehindBytes = 64 * 1024 * 1024) {
+    const core = blobCores.get(blobsHex)
+    if (!core?.opened || !blob || blob.blockLength <= 16 || blobSlots.some(s => s.key === blobsHex)) return 0
+    const playhead = core.core?._ptLastReadBlock || 0
+    const bs = Math.max(65536, Math.round((blob.byteLength || BLOB_BLOCK_SIZE) / blob.blockLength))
+    const keepBlocks = Math.max(16, Math.ceil(keepBehindBytes / bs))
+    const headGuard = blob.blockOffset + Math.max(8, Math.ceil((4 * 1024 * 1024) / bs))
+    const tailGuard = blob.blockOffset + blob.blockLength - Math.max(4, Math.ceil((2 * 1024 * 1024) / bs))
+    const clearTo = Math.min(tailGuard, playhead - keepBlocks)
+    if (clearTo <= headGuard) return 0
+    const first = core.core.bitfield.firstSet(headGuard)
+    if (first < 0 || first >= clearTo) return 0
+    await core.clear(first, clearTo)
+    syncBlockCounter(core)
+    return (await gcStorage({ full: true })).reclaimedBytes
+  }
+
+  async function clearCache (key = null, { keepBlobsHex = null } = {}) {
     if (key) {
       const entry = await findEntry(key)
       if (!entry || blobSlots.some(s => s.key === entry.blobs)) return { clearedBytes: 0, reclaimedBytes: 0 }
@@ -780,12 +818,15 @@ export async function createNode ({
       }
       return { clearedBytes, reclaimedBytes }
     }
-    for (const ranges of warmRanges.values()) for (const r of ranges) r.destroy()
-    warmRanges.clear()
+    for (const [tag, ranges] of warmRanges) {
+      if (keepBlobsHex && tag.startsWith(`${keepBlobsHex}:`)) continue
+      for (const r of ranges) r.destroy()
+      warmRanges.delete(tag)
+    }
     await search('').catch(() => {})
     let clearedBytes = 0
     for (const [hex, core] of blobCores) {
-      if (blobSlots.some(s => s.key === hex) || !core.opened || core.length === 0) continue
+      if (hex === keepBlobsHex || blobSlots.some(s => s.key === hex) || !core.opened || core.length === 0) continue
       ensureBlockCounter(core)
       const blocks = core._ptBlocks
       if (blocks > 0) {
@@ -950,10 +991,10 @@ export async function createNode ({
     return [...out.values()]
   }
 
-  async function openUri (uri) {
+  async function openUri (uri, { joinSource = true } = {}) {
     const parsed = parseUri(uri, 'channel')
     if (parsed.action === 'source') return { action: 'source', source: await addSource(parsed) }
-    if (parsed.sourceKey) await addSource({ key: parsed.sourceKey, kind: parsed.sourceKind }).catch(() => {})
+    if (joinSource && parsed.sourceKey) await addSource({ key: parsed.sourceKey, kind: parsed.sourceKind }).catch(() => {})
     const { entry } = parsed
     const key = `watch/${entry.blobs}:${entry.blob.blockOffset}`
     ephemeralWatches.set(key, { entry, source: parsed.sourceKey || 'direct', sourceKind: 'watch' })
@@ -1181,7 +1222,10 @@ export async function createNode ({
     const next = tier === 'seeder' ? [64, 192] : tier === 'peer' ? [48, 128] : [24, 64]
     if (next[1] !== inflightRange[1]) {
       inflightRange = next
-      for (const c of store.cores) c.replicator?.setInflightRange(next[0], next[1])
+      for (const c of store.cores) {
+        const sc = c._ptBlockScale || 1
+        c.replicator?.setInflightRange(Math.max(next[0], 96 * sc), Math.max(next[1], 256 * sc))
+      }
     }
     const ratio = rxBytes > 0 ? Math.round((txBytes / rxBytes) * 100) / 100 : (txBytes > 0 ? 1 : 0)
     return { tier, seededBytes, contributingPeers, ratio, inflightMax: next[1] }
@@ -1264,6 +1308,25 @@ export async function createNode ({
   }
 
   function coreByteLen (c) { return c.byteLength || 0 }
+  // Lays bare every non-empty local channel and blob core ready for supplemental HiveRelay seeders to suck dry.
+  function seedableCores ({ includeCached = false } = {}) {
+    const out = []
+    if (localChannel.core.length > 0) {
+      out.push({ key: channelKey, kind: 'channel', length: localChannel.core.length, byteLength: localChannel.core.byteLength })
+    }
+    for (const s of blobSlots) {
+      if (s.core.length > 0) out.push({ key: s.key, kind: 'blobs', length: s.core.length, byteLength: s.core.byteLength })
+    }
+    if (includeCached) {
+      for (const [k, c] of blobCores) {
+        if (blobSlots.some(s => s.key === k) || !c.opened || c.length === 0 || c.byteLength === 0) continue
+        ensureBlockCounter(c)
+        if (c._ptBlocks >= c.length) out.push({ key: k, kind: 'blobs', length: c.length, byteLength: c.byteLength })
+      }
+    }
+    return out
+  }
+
 
   async function close () {
     closing = true
@@ -1288,11 +1351,15 @@ export async function createNode ({
     store,
     findEntry,
     blobCore,
+    seedableCores,
     privateRouting: Boolean(dht),
     bootstrap: bootstrap || null,
     relayThrough: relayThrough || null,
     hasLan: () => Boolean(lan),
     hasLanPeer,
+    lanEndpoint: () => lan?.port && lan?.host ? { host: lan.host, port: lan.port, publicKey: b4a.toString(swarm.keyPair.publicKey, 'hex') } : null,
+    dialLanPeer: ep => { if (ep?.publicKey && ep?.host && ep?.port) lan?.dialDirect?.(ep.publicKey, ep.host, ep.port) },
+    evictBehind,
     tracker,
     localChannel,
     swarm,

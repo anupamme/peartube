@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:installLocation="auto">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- The Wi-Fi multicast lock that LAN discovery (mDNS) needs while the app is in front. -->

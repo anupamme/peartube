@@ -11,7 +11,7 @@ import os from 'node:os'
 import b4a from 'b4a'
 import { createNode } from '../src/index.js'
 import { createLan, interfaceAdapter, lanAddress } from '../src/lan.js'
-import { createReceiver } from '../src/cast.js'
+import { createReceiver, resolvePeerStorage } from '../src/cast.js'
 
 if (typeof globalThis.Bare !== 'undefined') {
   await import('bare-process/global')
@@ -27,6 +27,7 @@ function argVal (flag, fallback = null) {
 const hasFlag = flag => args.includes(flag)
 
 const storage = argVal('--storage', env.PEARTUBE_STORAGE || './peartube-receiver-data')
+const peerStorageArg = argVal('--peer-storage', env.PEARTUBE_PEER_STORAGE || '')
 const name = argVal('--name', env.PEARTUBE_RECEIVER_NAME || `${os.hostname?.() || 'PearTube'} TV`)
 const port = Number(argVal('--port', env.PEARTUBE_RECEIVER_PORT || 8176))
 const thin = hasFlag('--thin') || env.PEARTUBE_RECEIVER_THIN === '1'
@@ -254,9 +255,10 @@ const driver = playerKind === 'mpv'
 
 let lanIp = currentLanIp()
 let node = null
+const peerStorage = peerStorageArg ? await resolvePeerStorage(peerStorageArg, storage) : storage
 if (!thin) {
   node = await createNode({
-    storage,
+    storage: peerStorage,
     bootstrap: bootstrap ? bootstrap.split(',').map(s => s.trim()).filter(Boolean) : undefined,
     privateRouting: Boolean(env.PEARTUBE_PRIVATE_ROUTING),
     relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
@@ -266,8 +268,8 @@ if (!thin) {
 
 const receiver = await createReceiver({
   storage,
+  peerStorage,
   name,
-  port,
   lanHost: lanIp,
   node,
   allowPeerNode: !thin,

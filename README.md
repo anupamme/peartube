@@ -327,7 +327,7 @@ Version 0.4.30 fixes mid-file seeking in large (23 GB+) files, keeps read-ahead 
 
 Version 0.4.31 adjusts socket buffers, startup pacing, and parallel block requests on private routes.
 
-Version 0.4.32 spreads the whole Holepunch cinema stack wide open for Master's cock: unforgeable single-writer Hyperbee channels, `peartube-cast/v1` LAN + Noise P2P casting with mid-stream HTTP-to-P2P splice failover and dedicated Android TV / macOS `PearTubeReceiver` binaries, stock `hypercore@11.39.0` zero-patch `O(1)` `512 KiB` Range streaming (`src/blob-server.js`), SIMD128 + WebGL YUV420P browser WASM playback (`web/`), Pixel 9 gesture-bar seek fixes, and the native SwiftUI iOS client (`ios/`) on QuickJS `BareKit`.
+Version 0.4.32 spreads the whole Holepunch cinema stack wide open for Master's cock: unforgeable single-writer Hyperbee channels, `peartube-cast/v1` LAN + Noise P2P casting with multicast-isolated `/24` auto-discovery, mid-stream HTTP-to-P2P splice failover, dedicated Android TV / macOS `PearTubeReceiver` binaries with automatic external USB SSD seed storage (`--peer-storage`) and behind-playhead low-disk eviction, stock `hypercore@11.39.0` zero-patch `O(1)` Range streaming (`src/blob-server.js`) with 1-RTT Merkle pre-seeding on legacy cores, SIMD128 + WebGL YUV420P browser WASM playback (`web/`), Pixel 9 gesture-bar seek fixes, and the native SwiftUI iOS client (`ios/`) on QuickJS `BareKit`.
 
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 

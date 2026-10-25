@@ -2,11 +2,12 @@
 // pairing, token-gated LAN HTTP Range streaming, and Hybrid P2P swarm handoff — kept wet and tight
 // outside Corestore so private pairing tokens never leak to replicating strangers.
 import { createServer, request as httpRequest } from 'node:http'
-import { mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, renameSync, readdirSync, rmSync, statfsSync } from 'node:fs'
 import { join } from 'node:path'
 import { isIPv4 } from 'node:net'
 import os from 'node:os'
 import { randomBytes } from 'node:crypto'
+import Corestore from 'corestore'
 import HyperDHT from 'hyperdht'
 import { BlobServer } from './blob-server.js'
 import b4a from 'b4a'
@@ -25,6 +26,63 @@ const CORS = {
   'access-control-allow-methods': 'GET, HEAD, POST, DELETE, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization, range',
   'access-control-expose-headers': 'content-length, content-range, accept-ranges'
+}
+const PRIVATE_IPV4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/
+const LOW_DISK_BOOT_BYTES = 2 * 1024 * 1024 * 1024
+const LOW_DISK_STREAM_BYTES = 1536 * 1024 * 1024
+
+// Checks how much free flesh the filesystem still has for non-root UIDs before RocksDB gags on ENOSPC.
+function freeDiskBytes (dir) {
+  try {
+    const st = statfsSync(dir)
+    return Number(st.bavail) * Number(st.bsize)
+  } catch {
+    return Infinity
+  }
+}
+
+// Purges stale receiver Corestores on boot when a tiny TV disk is choked, keeping pairing identity untouched.
+export function reclaimLowDiskReceiverStorage (storage) {
+  if (!storage) return false
+  try {
+    mkdirSync(storage, { recursive: true, mode: 0o700 })
+    if (freeDiskBytes(storage) >= LOW_DISK_BOOT_BYTES) return false
+    for (const name of readdirSync(storage)) {
+      if (name === 'corestore' || name.startsWith('peer-')) {
+        rmSync(join(storage, name), { recursive: true, force: true })
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+const probedPeerDirs = new Map()
+
+// Probes an external SSD/USB path with a real RocksDB Corestore lock+append before trusting it with P2P blocks.
+export async function resolvePeerStorage (candidate, fallback) {
+  if (!candidate || candidate === fallback) return fallback
+  if (probedPeerDirs.has(candidate)) return probedPeerDirs.get(candidate) ? candidate : fallback
+  const probeDir = join(candidate, '.rocksdb-probe')
+  let ok = false
+  let probe = null
+  try {
+    rmSync(probeDir, { recursive: true, force: true })
+    mkdirSync(probeDir, { recursive: true })
+    probe = new Corestore(probeDir)
+    const c = probe.get({ name: 'probe' })
+    await c.ready()
+    await c.append(b4a.from('ok'))
+    ok = true
+  } catch {
+    ok = false
+  } finally {
+    if (probe) await probe.close().catch(() => {})
+    try { rmSync(probeDir, { recursive: true, force: true }) } catch {}
+  }
+  probedPeerDirs.set(candidate, ok)
+  return ok ? candidate : fallback
 }
 
 // Constant-time byte stroke so a nosy neighbor on shared Wi-Fi cannot side-channel the TV PIN.
@@ -208,14 +266,24 @@ function adapterForHost (host, customAdapter) {
   return interfaceAdapter(host)
 }
 
+function estimateBlobBlock (blob, byteStart) {
+  const avgBs = Math.max(4096, Math.round((blob.byteLength || BLOB_BLOCK_BYTES) / Math.max(1, blob.blockLength)))
+  return blob.blockOffset + Math.min(blob.blockLength - 1, Math.floor(Math.max(0, byteStart) / avgBs))
+}
+
 function hasBlockCached (core, blob, byteStart) {
   if (!core?.opened || !blob || blob.blockLength <= 0) return false
-  const blockIdx = blob.blockOffset + Math.min(blob.blockLength - 1, Math.floor((blob.byteOffset + Math.max(0, byteStart)) / BLOB_BLOCK_BYTES))
+  const blockIdx = estimateBlobBlock(blob, byteStart)
   return core.length > blockIdx && Boolean(core.core?.bitfield?.get(blockIdx))
 }
 
 function hasActiveReplicationPeer (core, blob) {
-  return Boolean(core?.opened && blob && Array.isArray(core.peers) && core.peers.some(p => p.remoteLength > blob.blockOffset))
+  if (!core?.opened || !blob || !Array.isArray(core.peers)) return false
+  const endIdx = blob.blockOffset + blob.blockLength
+  return core.peers.some(p =>
+    p.remoteContiguousLength >= endIdx ||
+    (p.remoteLength >= endIdx && p.remoteBitfield?.findFirst?.(true, blob.blockOffset) === blob.blockOffset)
+  )
 }
 
 function countCachedBlobBytes (core, blob, totalSize) {
@@ -383,7 +451,7 @@ async function serveSpliceStream (media, req, res, onModeUpgrade) {
     }
     const sliceEnd = media.localP2PUrl ? Math.min(end, cursor + COLD_HTTP_WINDOW - 1) : end
     try {
-      const n = await pipeRangeSlice(media.httpStreamUrl, cursor, sliceEnd, res, { stallTimeoutMs: 2000, clientClosed: () => clientClosed })
+      const n = await pipeRangeSlice(media.httpStreamUrl, cursor, sliceEnd, res, { stallTimeoutMs: 8000, clientClosed: () => clientClosed })
       cursor += n
     } catch (err) {
       cursor += Number(err?.written) || 0
@@ -507,6 +575,7 @@ async function connectNoiseRpc (dht, publicKeyHex, { relayThrough = null, onStat
 // serves the 10-foot Smart TV Web Receiver at /tv, and upgrades HTTP Range streams to P2P swarm blocks.
 export async function createReceiver ({
   storage,
+  peerStorage = null,
   name = os.hostname?.() || 'PearTube TV',
   port = 8176,
   bindHost = '0.0.0.0',
@@ -520,6 +589,8 @@ export async function createReceiver ({
   onChange = null
 }) {
   mkdirSync(storage, { recursive: true, mode: 0o700 })
+  const peerRoot = await resolvePeerStorage(peerStorage, storage)
+  if (!node && allowPeerNode) reclaimLowDiskReceiverStorage(peerRoot)
   const idFile = join(storage, 'receiver.json')
   let identity = null
   try { identity = JSON.parse(readFileSync(idFile, 'utf8')) } catch {}
@@ -552,6 +623,9 @@ export async function createReceiver ({
   let managedPeerNode = null
   let managedPeerSig = ''
   let pairFailures = []
+  let lastLoadedBlobs = ''
+  let evicting = false
+  let lastEvictAt = 0
 
   const sseClients = new Set()
   const webSseClients = new Set()
@@ -598,6 +672,8 @@ export async function createReceiver ({
       capabilities: capabilities(),
       authRequired: !openAuth,
       routes: pStatus?.routes || null,
+      storageFreeBytes: (() => { const f = freeDiskBytes(peerRoot); return Number.isFinite(f) ? f : 0 })(),
+      externalStorage: Boolean(peerStorage && peerRoot === peerStorage && peerRoot !== storage),
       state
     }
   }
@@ -665,7 +741,7 @@ export async function createReceiver ({
           ? `peer-private-${(trackerForPrivate || sourceKey || 'default').slice(0, 12)}`
           : 'peer-public'
         managedPeerNode = await createNode({
-          storage: join(storage, subDir),
+          storage: join(peerRoot, subDir),
           tracker: trackerForPrivate || null,
           bootstrap: wantBootstrap || undefined,
           relayThrough: wantRelayThrough,
@@ -679,7 +755,8 @@ export async function createReceiver ({
       peerNode = managedPeerNode
     }
 
-    if (peerNode && sourceKey) {
+    // Public/LAN receivers join the blob content swarm directly without burning CPU on full tracker oplogs.
+    if (peerNode && sourceKey && wantPrivate) {
       await peerNode.addSource({ key: sourceKey, kind: sourceKind }).catch(() => {})
     }
     return peerNode
@@ -722,6 +799,13 @@ export async function createReceiver ({
       try {
         peerNode = await ensurePeerNode(netCfg)
         if (peerNode) {
+          const targetBlobs = parsedWatch?.action === 'watch' ? parsedWatch.entry.blobs : ''
+          const freeNow = freeDiskBytes(peerRoot)
+          if (freeNow < LOW_DISK_BOOT_BYTES || (lastLoadedBlobs && targetBlobs && lastLoadedBlobs !== targetBlobs && freeNow < Math.max(3 * 1024 * 1024 * 1024, (entry.size || 0) + LOW_DISK_STREAM_BYTES))) {
+            await peerNode.clearCache?.(null, { keepBlobsHex: freeNow < LOW_DISK_STREAM_BYTES ? null : targetBlobs }).catch(() => {})
+          }
+          if (targetBlobs) lastLoadedBlobs = targetBlobs
+          if (!netCfg.privateRouting && cmd.senderLan) peerNode.dialLanPeer?.(cmd.senderLan)
           if (HEX64.test(String(cmd.senderPeerKey || '').toLowerCase())) {
             const senderKeyBuf = b4a.from(String(cmd.senderPeerKey).toLowerCase(), 'hex')
             if (!b4a.equals(senderKeyBuf, peerNode.swarm.keyPair.publicKey)) {
@@ -737,7 +821,7 @@ export async function createReceiver ({
               }
             }
           }
-          const opened = await peerNode.openUri(magnetUrl)
+          const opened = await peerNode.openUri(magnetUrl, { joinSource: netCfg.privateRouting })
           localP2PUrl = opened?.entry?.streamUrl || null
           if (parsedWatch?.action === 'watch') {
             blob = parsedWatch.entry.blob
@@ -754,11 +838,9 @@ export async function createReceiver ({
     }
 
     const loadToken = randomHex(16)
-    // Native P2P receivers (Android TV / Pi 4 / Mac HTPC / daemon) hand OxideAV/mpv the direct 1-hop
-    // BlobServer URL — identical to local phone playback, avoiding a second QuickJS HTTP proxy hop.
-    // Only external Smart TV Web browsers (!onCommand) need the receiver's LAN-reachable /hybrid proxy.
-    const directLocalP2P = Boolean(onCommand && localP2PUrl)
-    const startOnP2P = Boolean(localP2PUrl && (directLocalP2P || !allowColdHttp || hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
+    // Start cold casts instantly off the sender's warm HTTP Range server via /cast/v1/hybrid/<token>,
+    // then splice mid-stream to local P2P BlobServer the moment swarm peers/blocks arrive (or if sender dies).
+    const startOnP2P = Boolean(localP2PUrl && (!allowColdHttp || hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
     const initialMode = startOnP2P ? p2pMode : 'http'
     activeMedia = {
       token: loadToken,
@@ -771,23 +853,23 @@ export async function createReceiver ({
       httpStreamUrl: allowColdHttp ? httpStreamUrl : null,
       localP2PUrl,
       core,
+      coreKeyHex: parsedWatch?.action === 'watch' ? parsedWatch.entry.blobs : '',
       blob,
       senderHttpAlive: allowColdHttp
     }
 
     const hostForPlayer = onCommand ? '127.0.0.1' : (currentHost || '127.0.0.1')
-    const streamUrl = directLocalP2P
-      ? localP2PUrl
-      : (localP2PUrl && allowColdHttp)
-          ? `http://${hostForPlayer}:${actualPort}/cast/v1/hybrid/${loadToken}`
-          : (localP2PUrl || httpStreamUrl)
+    const streamUrl = (localP2PUrl && allowColdHttp && !startOnP2P)
+      ? `http://${hostForPlayer}:${actualPort}/cast/v1/hybrid/${loadToken}`
+      : (localP2PUrl || httpStreamUrl)
     return {
       entry,
       mode: initialMode,
       streamUrl,
       httpFallbackUrl: allowColdHttp ? httpStreamUrl : null,
       localP2PUrl,
-      peerSwarmKey: peerNode ? b4a.toString(peerNode.swarm.keyPair.publicKey, 'hex') : ''
+      peerSwarmKey: peerNode ? b4a.toString(peerNode.swarm.keyPair.publicKey, 'hex') : '',
+      peerLan: !netCfg.privateRouting ? (peerNode?.lanEndpoint?.() || null) : null
     }
   }
 
@@ -830,7 +912,7 @@ export async function createReceiver ({
       }
       sendWebCommand(fullCmd)
       if (onCommand) await onCommand(fullCmd, { updateState, getState: () => state })
-      return { ...state, peerSwarmKey: prepared.peerSwarmKey }
+      return { ...state, peerSwarmKey: prepared.peerSwarmKey, peerLan: prepared.peerLan }
     }
 
     if (action === 'stop') {
@@ -1066,6 +1148,11 @@ export async function createReceiver ({
     const nextMode = (cachedBytes > 0 || hasActiveReplicationPeer(activeMedia.core, activeMedia.blob)) ? activeMedia.p2pMode : state.mode
     if (p2pPeers !== state.p2pPeers || cachedBytes !== state.cachedBytes || seeding !== state.seeding || nextMode !== state.mode) {
       updateState({ p2pPeers, cachedBytes, seeding, mode: nextMode })
+    }
+    if (activeMedia.coreKeyHex && activeMedia.blob && !evicting && Date.now() - lastEvictAt >= 6_000 && freeDiskBytes(peerRoot) < LOW_DISK_STREAM_BYTES) {
+      evicting = true
+      lastEvictAt = Date.now()
+      activeMedia.peerNode.evictBehind?.(activeMedia.coreKeyHex, activeMedia.blob).catch(() => {}).finally(() => { evicting = false })
     }
   }, 1000)
   peerStatsTimer.unref?.()
@@ -1382,6 +1469,61 @@ export function createCastController ({
     return { ok: true }
   }
 
+  let subnetScanning = false
+  let lastSubnetScanAt = 0
+
+  // Sweeps the local /24 for port-8176 PearTube TVs when Wi-Fi AP isolation or brcmfmac swallows mDNS multicast.
+  function probeSubnetReceivers (host) {
+    if (closing || subnetScanning || adapter || !host || !PRIVATE_IPV4.test(host)) return
+    const curNode = getNode()
+    if (curNode?.privateRouting && !curNode?.hasLan?.()) return
+    const dot = host.lastIndexOf('.')
+    if (dot === -1) return
+    const prefix = host.slice(0, dot + 1)
+    subnetScanning = true
+    lastSubnetScanAt = Date.now()
+    ;(async () => {
+      const ips = []
+      for (let i = 1; i <= 254; i++) {
+        const ip = `${prefix}${i}`
+        if (ip !== host) ips.push(ip)
+      }
+      const CONCURRENCY = 48
+      let cursor = 0
+      const worker = async () => {
+        while (!closing && cursor < ips.length) {
+          const ip = ips[cursor++]
+          try {
+            const info = await httpJson(`http://${ip}:8176/cast/v1/info`, { timeoutMs: 320 })
+            if (closing || info?.protocol !== 'peartube-cast/v1' || !info?.deviceId) continue
+            if (localReceiver && info.deviceId === localReceiver.deviceId) continue
+            const port = Number(info.port) || 8176
+            const pk = HEX64.test(String(info.publicKey || '').toLowerCase()) ? String(info.publicKey).toLowerCase() : ''
+            discovered.set(info.deviceId, {
+              id: info.deviceId,
+              name: cleanName(info.name, 'PearTube TV'),
+              host: ip,
+              port,
+              publicKey: pk,
+              p2p: Boolean(info.capabilities?.p2p),
+              auth: info.authRequired === false ? 'open' : 'code',
+              seenAt: Date.now()
+            })
+            const existing = saved.get(info.deviceId) || (pk && [...saved.values()].find(s => s.publicKey === pk))
+            if (existing) {
+              existing.host = ip
+              existing.port = port
+              if (pk) existing.publicKey = pk
+              existing.p2p = existing.p2p || Boolean(info.capabilities?.p2p)
+              persistSaved()
+            }
+            emitChange()
+          } catch {}
+        }
+      }
+      await Promise.all(Array.from({ length: CONCURRENCY }, worker))
+    })().catch(() => {}).finally(() => { subnetScanning = false })
+  }
   async function refreshBrowse (host) {
     if (host === browseHost && browseHandle) return
     const prev = browseHandle
@@ -1430,6 +1572,7 @@ export function createCastController ({
         onError () {}
       })
     } catch {}
+    probeSubnetReceivers(host)
   }
 
   function listReceivers () {
@@ -1466,6 +1609,7 @@ export function createCastController ({
     }
     for (const [id, s] of saved) {
       if (s.webHosted || merged.has(id)) continue
+      if (s.host && s.port && [...discovered.values()].some(d => d.host === s.host && d.port === s.port)) continue
       merged.set(id, {
         id,
         name: s.name || 'Paired TV',
@@ -1678,6 +1822,7 @@ export function createCastController ({
       magnetUrl: item.magnetUrl || formatWatchUri(raw, item.source || '', item.sourceKind || ''),
       senderPeerKey: b4a.toString(node.swarm.keyPair.publicKey, 'hex'),
       senderPrivateRouting: Boolean(node.privateRouting),
+      senderLan: !node.privateRouting ? (node.lanEndpoint?.() || null) : null,
       network: {
         privateRouting: Boolean(node.privateRouting),
         bootstrap: node.bootstrap || null,
@@ -1731,6 +1876,7 @@ export function createCastController ({
         }
         const headers = token ? { authorization: `Bearer ${token}` } : {}
         const res = await httpJson(`${baseUrl}/cast/v1/command`, { method: 'POST', headers, body: localLoad, timeoutMs: 12_000 })
+        if (!node.privateRouting && res.state?.peerLan) node.dialLanPeer?.(res.state.peerLan)
         if (HEX64.test(String(res.state?.peerSwarmKey || ''))) {
           const psk = b4a.from(res.state.peerSwarmKey, 'hex')
           if (!b4a.equals(psk, node.swarm.keyPair.publicKey)) {
@@ -1866,11 +2012,12 @@ export function createCastController ({
     return status()
   }
 
-  async function startLocalReceiver ({ name = 'PearTube TV', port = 8176, openAuth = true, onCommand = null } = {}) {
+  async function startLocalReceiver ({ name = 'PearTube TV', port = 8176, openAuth = true, peerStorage = null, onCommand = null } = {}) {
     if (localReceiver) await localReceiver.close().catch(() => {})
     const node = getNode() || (ensureNode ? await ensureNode() : null)
     localReceiver = await createReceiver({
       storage,
+      peerStorage,
       name,
       port,
       lanHost: getLanHost(),
@@ -1895,6 +2042,7 @@ export function createCastController ({
 
   function status () {
     const lanHost = getLanHost()
+    if (lanHost && !subnetScanning && Date.now() - lastSubnetScanAt > 12_000) probeSubnetReceivers(lanHost)
     return {
       webReceiverUrl: castHubPort && lanHost ? `http://${lanHost}:${castHubPort}/tv` : (castHubPort ? `http://127.0.0.1:${castHubPort}/tv` : null),
       receivers: listReceivers(),
