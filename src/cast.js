@@ -673,7 +673,7 @@ export async function createReceiver ({
       authRequired: !openAuth,
       routes: pStatus?.routes || null,
       storageFreeBytes: (() => { const f = freeDiskBytes(peerRoot); return Number.isFinite(f) ? f : 0 })(),
-      externalStorage: Boolean(peerStorage && peerRoot === peerStorage && peerRoot !== storage),
+      externalStorage: Boolean(String(peerRoot).startsWith('/mnt/expand/') || (peerStorage && peerRoot === peerStorage && peerRoot !== storage)),
       state
     }
   }

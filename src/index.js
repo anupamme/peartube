@@ -10,7 +10,7 @@ import { BlobServer } from './blob-server.js'
 import b4a from 'b4a'
 import { createHash } from 'node:crypto'
 import { pipelinePromise, Readable, Transform } from 'streamx'
-import { readdirSync, statSync } from 'node:fs'
+import { readdirSync, statSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tuneUdxSocket } from './lan.js'
 const ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
@@ -152,7 +152,17 @@ export async function createNode ({
   lan: createLan = null,
   onchange = null
 }) {
-  const store = new Corestore(join(storage, 'corestore'))
+  const csDir = join(storage, 'corestore')
+  let store = new Corestore(csDir)
+  try {
+    await store.ready()
+  } catch (err) {
+    if (!/Invalid device file/i.test(err?.message || '')) throw err
+    await store.close().catch(() => {})
+    try { unlinkSync(join(csDir, 'STORAGE')) } catch {}
+    store = new Corestore(csDir)
+    await store.ready()
+  }
   const wakeup = new ProtomuxWakeup()
   let onPeersChanged = null
   let viewEpoch = 1
