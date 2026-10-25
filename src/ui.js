@@ -348,11 +348,23 @@ function audioOutTime (ctx) {
   return (ts && ts.contextTime > 0) ? ts.contextTime : ctx.currentTime
 }
 // Keep one warm WASM Worker pre-compiled in the background so clicking Stream opens in 0 ms.
-const ASSET_VER = '?v=4'
+const ASSET_VER = '?v=5'
 let sharedWorker = null
+let workerCanvasTransferred = false
+let workerOffscreenReady = false
+function nowWallMs () { return (performance.timeOrigin || 0) + performance.now() }
 function getWorker () {
   if (!sharedWorker) {
     sharedWorker = new Worker('/web/player-worker.js' + ASSET_VER)
+    const glc = $('pGlCanvas')
+    if (!workerCanvasTransferred && glc && typeof glc.transferControlToOffscreen === 'function') {
+      try {
+        const off = glc.transferControlToOffscreen()
+        workerCanvasTransferred = true
+        workerOffscreenReady = true
+        sharedWorker.postMessage({ cmd: 'initCanvas', canvas: off }, [off])
+      } catch {}
+    }
     sharedWorker.postMessage({ cmd: 'warmup', wasmUrl: location.origin + '/web/peartube_web.wasm' + ASSET_VER })
   }
   return sharedWorker
@@ -431,6 +443,9 @@ function openPlayer (entry) {
     audioStream: -1,
     subStream: -1,
     useMse: false,
+    allowWebCodecs: false,
+    usingWebCodecs: false,
+    workerGlPrimed: false,
     ms: null,
     msUrl: '',
     sb: null,
@@ -476,15 +491,32 @@ function openPlayer (entry) {
     return p.freeBaseMedia + Math.max(0, (performance.now() - p.freeBasePerf) / 1000)
   }
 
-  function scheduleAudioChunk (m) {
-    if (!p.audioCtx || !p.gainNode || m.samples <= 0) return
-    const f32 = new Float32Array(m.buf)
-    const ab = p.audioCtx.createBuffer(2, m.samples, m.rate)
-    const ch0 = ab.getChannelData(0), ch1 = ab.getChannelData(1)
-    for (let i = 0, j = 0; i < m.samples; i++, j += 2) {
-      ch0[i] = f32[j]
-      ch1[i] = f32[j + 1]
+  function recycleVideoBuf (buf) {
+    if (buf && buf.byteLength > 0) {
+      try { worker.postMessage({ cmd: 'recycleVideo', buf }, [buf]) } catch {}
     }
+  }
+  function syncWorkerClock (timeSecs, playing) {
+    try { worker.postMessage({ cmd: 'clock', time: timeSecs, wallMs: nowWallMs(), playing }) } catch {}
+  }
+  p.syncWorkerClock = syncWorkerClock
+
+  function scheduleAudioChunk (m) {
+    if (!p.audioCtx || !p.gainNode || m.samples <= 0) {
+      if (m?.buf?.byteLength) { try { worker.postMessage({ cmd: 'recycleAudio', buf: m.buf }, [m.buf]) } catch {} }
+      return
+    }
+    const f32 = new Float32Array(m.buf, 0, m.samples * 2)
+    const ab = p.audioCtx.createBuffer(2, m.samples, m.rate)
+    const lSub = f32.subarray(0, m.samples), rSub = f32.subarray(m.samples, m.samples * 2)
+    if (ab.copyToChannel) {
+      ab.copyToChannel(lSub, 0)
+      ab.copyToChannel(rSub, 1)
+    } else {
+      ab.getChannelData(0).set(lSub)
+      ab.getChannelData(1).set(rSub)
+    }
+    try { worker.postMessage({ cmd: 'recycleAudio', buf: m.buf }, [m.buf]) } catch {}
     const node = p.audioCtx.createBufferSource()
     node.buffer = ab
     node.connect(p.gainNode)
@@ -508,7 +540,7 @@ function openPlayer (entry) {
 
   function tryPrime () {
     if (p.primed || !p.manifest) return
-    const vReady = p.videoStream < 0 || (p.useMse ? (p.mseReady && video.readyState >= 2) : p.swFrames.length >= 2) || p.eof
+    const vReady = p.videoStream < 0 || (p.useMse ? (p.mseReady && video.readyState >= 2) : (p.workerGlPrimed || p.swFrames.length >= 2)) || p.eof
     const aReady = p.audioStream < 0 || p.pendingAudio.length >= 1 || p.eof
     if (!vReady || !aReady) return
     p.primed = true
@@ -519,6 +551,7 @@ function openPlayer (entry) {
       p.lastMseTime = video.currentTime
       video.play().catch(() => {})
     }
+    syncWorkerClock(currentMediaTime(), !p.paused)
   }
 
   video.onloadeddata = () => { if (player === p) tryPrime() }
@@ -534,7 +567,8 @@ function openPlayer (entry) {
     p.audioBaseMedia = targetSecs
     p.freeBaseMedia = targetSecs
     p.freeBasePerf = performance.now()
-    p.swFrames.length = 0
+    while (p.swFrames.length > 0) recycleVideoBuf(p.swFrames.shift().buf)
+    p.workerGlPrimed = false
     p.lastSwPts = null
     p.consumedVideoSec = 0
     p.consumedAudioSec = 0
@@ -617,7 +651,8 @@ function openPlayer (entry) {
     updateBadge()
     p.seq = ++openCounter
     resetMediaOutputs(atSecs)
-    p.worker.postMessage({ cmd: 'seek', seq: p.seq, time: atSecs, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: false })
+    p.allowWebCodecs = Boolean(p.manifest?.webCodecs && p.webCodecsSupported)
+    p.worker.postMessage({ cmd: 'seek', seq: p.seq, time: atSecs, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: false, allowWebCodecs: p.allowWebCodecs })
   }
   video.onerror = () => { if (player === p && p.useMse) fallbackSw(currentMediaTime()) }
 
@@ -626,7 +661,10 @@ function openPlayer (entry) {
     const vt = p.manifest.tracks.find(t => t.stream === p.videoStream)
     const at = p.manifest.tracks.find(t => t.stream === p.audioStream)
     const parts = [p.manifest.container]
-    if (vt) parts.push(vt.codec + (p.useMse ? ' (MSE+WASM)' : ' (WASM)'))
+    if (vt) {
+      const tag = p.useMse ? ' (MSE+WASM)' : (p.usingWebCodecs ? ' (WebCodecs+WASM)' : (workerOffscreenReady ? ' (WASM+GPU)' : ' (WASM)'))
+      parts.push(vt.codec + tag)
+    }
     if (at) parts.push(at.codec)
     $('pBadge').textContent = parts.join(' \\u00b7 ')
     $('pBadge').className = 'badge seeder'
@@ -641,6 +679,7 @@ function openPlayer (entry) {
     if (player !== p) return
     const m = ev.data || {}
     if (m.type === 'warm') return
+    if (m.type === 'canvasReady') { workerOffscreenReady = Boolean(m.offscreen); return }
     if (m.seq && m.seq !== p.seq) return
     if (m.type === 'error') {
       $('pStatus').style.display = ''
@@ -677,20 +716,30 @@ function openPlayer (entry) {
       }))
       sSel.disabled = subs.length === 0
 
+      if (typeof m.offscreen === 'boolean') workerOffscreenReady = m.offscreen
+      p.webCodecsSupported = Boolean(m.webCodecsSupported)
       const MS = window.MediaSource || window.ManagedMediaSource
       p.useMse = Boolean(p.videoStream >= 0 && mf.mseCodec && MS && MS.isTypeSupported('video/mp4; codecs="' + mf.mseCodec + '"'))
+      p.allowWebCodecs = Boolean(!p.useMse && p.videoStream >= 0 && p.webCodecsSupported)
+      p.usingWebCodecs = p.allowWebCodecs
       if (p.useMse) {
         setupMse(0)
       } else {
         video.style.display = 'none'
-        glCanvas.style.display = 'none'
+        glCanvas.style.display = workerOffscreenReady ? 'block' : 'none'
         canvas.style.display = 'none'
       }
       updateBadge()
-      worker.postMessage({ cmd: 'start', seq: p.seq, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: p.useMse })
+      worker.postMessage({ cmd: 'start', seq: p.seq, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: p.useMse, allowWebCodecs: p.allowWebCodecs })
     } else if (m.type === 'mseInit' || m.type === 'mseSeg') {
       p.mseQueue.push(m.buf)
       drainMseQueue()
+    } else if (m.type === 'videoPrimed') {
+      p.workerGlPrimed = true
+      p.usingWebCodecs = Boolean(m.hw)
+      if (!p.useMse) { glCanvas.style.display = 'block'; canvas.style.display = 'none' }
+      updateBadge()
+      tryPrime()
     } else if (m.type === 'videoFrame') {
       p.swFrames.push(m)
       if (p.drawnFrames === 0) drawSwFrame(m)
@@ -713,12 +762,12 @@ function openPlayer (entry) {
   }
 
   function drawSwFrame (f) {
-    const r = f.yuv ? getYuvGl() : false
+    const r = (f.yuv && !workerCanvasTransferred) ? getYuvGl() : false
     if (r) {
       if (glCanvas.style.display !== 'block') { glCanvas.style.display = 'block'; canvas.style.display = 'none' }
       const { gl } = r
       const cw = (f.w + 1) >> 1, ch = (f.h + 1) >> 1
-      const u8 = new Uint8Array(f.buf)
+      const u8 = new Uint8Array(f.buf, 0, f.byteLen || f.buf.byteLength)
       const yLen = f.w * f.h, cLen = cw * ch
       const ySub = u8.subarray(0, yLen)
       const uSub = u8.subarray(yLen, yLen + cLen)
@@ -748,7 +797,7 @@ function openPlayer (entry) {
       canvas.height = f.h
       p.imgData = ctx2d.createImageData(f.w, f.h)
     }
-    p.imgData.data.set(new Uint8ClampedArray(f.buf))
+    p.imgData.data.set(new Uint8ClampedArray(f.buf, 0, f.w * f.h * 4))
     ctx2d.putImageData(p.imgData, 0, 0)
     p.drawnFrames++
   }
@@ -799,12 +848,16 @@ function openPlayer (entry) {
       let pick = null
       while (p.swFrames.length > 0 && p.swFrames[0].pts <= now + 0.015) {
         const f = p.swFrames.shift()
+        if (pick) recycleVideoBuf(pick.buf)
         const step = p.lastSwPts !== null ? Math.max(0.01, Math.min(0.2, f.pts - p.lastSwPts)) : (1 / 30)
         p.lastSwPts = f.pts
         p.consumedVideoSec += step
         pick = f
       }
-      if (pick) drawSwFrame(pick)
+      if (pick) {
+        drawSwFrame(pick)
+        recycleVideoBuf(pick.buf)
+      }
     }
     if (p.subCues.length > 0) {
       p.subCues = p.subCues.filter(c => c.end >= now - 2)
@@ -837,13 +890,13 @@ function openPlayer (entry) {
     }
     $('pClock').textContent = fmtClock(now) + ' / ' + fmtClock(p.duration)
 
-    if (p.primed && pf - lastCreditReport > 150 && (p.consumedVideoSec > 0 || p.consumedAudioSec > 0 || (pf - lastCreditReport > 500))) {
+    if (p.primed && pf - lastCreditReport > 120 && (p.consumedVideoSec > 0 || p.consumedAudioSec > 0 || (pf - lastCreditReport > 250))) {
       const vSec = p.consumedVideoSec
       const aSec = p.consumedAudioSec
       p.consumedVideoSec = 0
       p.consumedAudioSec = 0
       lastCreditReport = pf
-      worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: now })
+      worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: now, wallMs: nowWallMs(), playing: !p.paused })
     }
   }
   p.raf = requestAnimationFrame(tick)
@@ -863,13 +916,19 @@ function togglePlay () {
   if (player.paused) {
     player.audioCtx?.suspend?.().catch(() => {})
     if (player.useMse) $('pVideo').pause()
+    player.syncWorkerClock?.(now, false)
   } else {
     if (player.audioCtx) {
       player.audioCtx.resume().then(() => {
-        if (player) { player.audioBaseMedia = now; player.audioBaseCtx = player.audioCtx.currentTime }
+        if (player) {
+          player.audioBaseMedia = now
+          player.audioBaseCtx = player.audioCtx.currentTime
+          player.syncWorkerClock?.(now, true)
+        }
       }).catch(() => {})
     }
     if (player.useMse && player.primed) $('pVideo').play().catch(() => {})
+    if (player.primed) player.syncWorkerClock?.(now, true)
   }
 }
 
@@ -889,7 +948,8 @@ function seekTo (targetSecs) {
     videoStream: player.videoStream,
     audioStream: player.audioStream,
     subStream: player.subStream,
-    useMse: player.useMse
+    useMse: player.useMse,
+    allowWebCodecs: player.allowWebCodecs
   })
 }
 

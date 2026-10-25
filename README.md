@@ -60,6 +60,8 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 | `PEARTUBE_DIRECTORY` | off | `1`: publish a list of subscribed channels and trackers so other peers can discover them |
 | `PEARTUBE_WATCH_DIR` | none | Optional local folder (e.g. `/data/import`) automatically imported once per file |
 | `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON feed or peer `/v1/entries` URLs to import automatically |
+| `PEARTUBE_REPLICATE` | off | `1` (or comma-separated source/writer keys) to P2P-replicate all remote video blobs locally without duplicating catalog entries |
+| `PEARTUBE_REPLICATE_FREE_GB` | `20` | Minimum free disk GiB kept in reserve on `PEARTUBE_STORAGE` when `PEARTUBE_REPLICATE` is active |
 | `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |

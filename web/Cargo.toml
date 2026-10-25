@@ -12,48 +12,17 @@ crate-type = ["cdylib"]
 
 [dependencies]
 serde_json = "1"
+talc = { version = "4.4", default-features = false, features = ["lock_api"] }
 oxideav-core = "*"
 oxideav-pixfmt = "*"
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "de9359624a6c9f4ea2580ac488e8a3fbfe567080" }
-audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "de9359624a6c9f4ea2580ac488e8a3fbfe567080" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
+audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
 
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = true
-opt-level = 3
-
-[profile.release.package."*"]
-opt-level = "s"
-[profile.release.package.oxideav-core]
-opt-level = 3
-[profile.release.package.oxideav-pixfmt]
-opt-level = 3
-[profile.release.package.oxideav-h264]
-opt-level = 3
-[profile.release.package.oxideav-h265]
-opt-level = 3
-[profile.release.package.oxideav-av1]
-opt-level = 3
-[profile.release.package.oxideav-vp8]
-opt-level = 3
-[profile.release.package.oxideav-vp9]
-opt-level = 3
-[profile.release.package.oxideav-mpeg12video]
-opt-level = 3
-[profile.release.package.oxideav-mpeg4video]
-opt-level = 3
-[profile.release.package.oxideav-aac]
-opt-level = 3
-[profile.release.package.oxideav-mp3]
-opt-level = 3
-[profile.release.package.oxideav-ogg]
-opt-level = 3
-[profile.release.package.codec-wmv]
-opt-level = 3
-[profile.release.package.codec-dca]
-opt-level = 3
-[profile.release.package.codec-dv]
+panic = "abort"
 opt-level = 3
 
 # BEGIN pin-oxideav

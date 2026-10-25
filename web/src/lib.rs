@@ -1,21 +1,30 @@
 //! PearTube Browser WebAssembly Media Engine.
 //! Wraps peartube-media's safe-Rust container demuxers, video/audio/subtitle decoders,
-//! surround-to-stereo downmixer, and zero-reencode fMP4 muxer behind a flat C ABI for Web Workers.
+//! SIMD128 surround-to-stereo planar downmixer, and zero-copy H.264/HEVC/AV1/VP9 fMP4 muxer
+//! behind a flat C ABI for Dedicated Web Workers.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
+#[cfg(target_arch = "wasm32")]
+use core::arch::wasm32::*;
+
 use oxideav_core::{
-    ChannelLayout, ChannelPosition, Decoder, Demuxer, Error as AvError, Frame,
+    ChannelLayout, ChannelPosition, CodecParameters, Decoder, Demuxer, Error as AvError, Frame,
     MediaType, Packet, PixelFormat, ProbeData, RuntimeContext, SampleFormat, Segment, StreamInfo,
     SubtitleCue, TimeBase, VideoFrame, PROBE_SCORE_EXTENSION,
 };
 use oxideav_pixfmt::{ConvertOptions, FrameInfo};
 use serde_json::json;
+
+// O(1) bitmapped TLSF allocator keeps per-frame VideoPlane/deblock churn off dlmalloc's slow linear lists.
+#[cfg(target_arch = "wasm32")]
+#[global_allocator]
+static ALLOCATOR: talc::TalckWasm = unsafe { talc::TalckWasm::new_global() };
 
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
@@ -24,19 +33,21 @@ unsafe extern "C" {
 }
 
 const PROBE_PAGE_SIZE: usize = 128 * 1024;
-const STREAM_PAGE_SIZE: usize = 1024 * 1024;
-const MAX_PAGES: usize = 20;
+const STREAM_PAGE_SIZE: usize = 256 * 1024;
+const MAX_PAGES: usize = 4;
 const VIDEO_TIMESCALE: u32 = 90_000;
 
 static REGISTRY: LazyLock<RuntimeContext> = LazyLock::new(codecs::context);
 
 struct CachePage {
     start: u64,
+    valid: usize,
     stamp: u64,
     data: Vec<u8>,
 }
 
-// Sucks 128 KiB probe slices on open and 1 MiB streaming blocks during playback so 20+ GB Blu-rays open & stream fast.
+// Lean 1 MiB (4 x 256 KiB) in-place page ring over the Worker's async-prefetched 2 MiB block cache:
+// zero per-page heap allocations and 19 MiB less WASM linear memory footprint.
 struct HttpRangeSource {
     len: u64,
     pos: u64,
@@ -62,7 +73,7 @@ impl HttpRangeSource {
         if let Some(idx) = self
             .pages
             .iter()
-            .position(|p| pos >= p.start && pos < p.start + p.data.len() as u64)
+            .position(|p| p.valid > 0 && pos >= p.start && pos < p.start + p.valid as u64)
         {
             self.pages[idx].stamp = self.clock;
             return Ok(idx);
@@ -77,17 +88,38 @@ impl HttpRangeSource {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past stream end"));
         }
         let want = (self.len - aligned_start).min(chunk_size as u64) as usize;
-        let mut buf = vec![0u8; want];
+        let slot = if self.pages.len() < MAX_PAGES {
+            let idx = self.pages.len();
+            self.pages.push(CachePage {
+                start: 0,
+                valid: 0,
+                stamp: 0,
+                data: Vec::with_capacity(STREAM_PAGE_SIZE),
+            });
+            idx
+        } else {
+            self.pages
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| p.stamp)
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+        let page = &mut self.pages[slot];
+        if page.data.len() < want {
+            page.data.resize(want, 0);
+        }
         let mut filled = 0usize;
         while filled < want {
             let got = unsafe {
                 host_read_at(
                     aligned_start + filled as u64,
-                    buf[filled..].as_mut_ptr(),
+                    page.data[filled..want].as_mut_ptr(),
                     want - filled,
                 )
             };
             if got < 0 {
+                page.valid = 0;
                 return Err(io::Error::other("HTTP Range read failed"));
             }
             if got == 0 {
@@ -95,33 +127,14 @@ impl HttpRangeSource {
             }
             filled += got as usize;
         }
-        buf.truncate(filled);
         if filled == 0 {
+            page.valid = 0;
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty Range response"));
         }
-        if self.pages.len() >= MAX_PAGES {
-            let lru = self
-                .pages
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, p)| p.stamp)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.pages[lru] = CachePage {
-                start: aligned_start,
-                stamp: self.clock,
-                data: buf,
-            };
-            Ok(lru)
-        } else {
-            let idx = self.pages.len();
-            self.pages.push(CachePage {
-                start: aligned_start,
-                stamp: self.clock,
-                data: buf,
-            });
-            Ok(idx)
-        }
+        page.start = aligned_start;
+        page.valid = filled;
+        page.stamp = self.clock;
+        Ok(slot)
     }
 }
 
@@ -137,10 +150,10 @@ impl Read for HttpRangeSource {
         };
         let page = &self.pages[slot];
         let page_off = (self.pos - page.start) as usize;
-        if page_off >= page.data.len() {
+        if page_off >= page.valid {
             return Ok(0);
         }
-        let n = out.len().min(page.data.len() - page_off);
+        let n = out.len().min(page.valid - page_off);
         out[..n].copy_from_slice(&page.data[page_off..page_off + n]);
         self.pos += n as u64;
         Ok(n)
@@ -162,7 +175,7 @@ impl Seek for HttpRangeSource {
     }
 }
 
-// Folds 5.1 / 7.1 surround channels down to hot stereo without losing center-channel dialogue or clipping.
+// Folds 5.1 / 7.1 surround channels straight into reusable planar [L..][R..] f32 buffers with SIMD128 and zero per-packet allocations.
 struct StereoMix {
     channels: usize,
     gains: [[f32; 2]; 64],
@@ -200,36 +213,312 @@ impl StereoMix {
         Self { channels, gains }
     }
 
-    fn mix(&self, pcm: &[f32]) -> Vec<f32> {
-        let frames = pcm.len() / self.channels.max(1);
-        let mut out = Vec::with_capacity(frames * 2);
-        for input in pcm.chunks_exact(self.channels.max(1)) {
-            let mut l = 0.0f32;
-            let mut r = 0.0f32;
-            for (&s, g) in input.iter().zip(&self.gains) {
-                let sample = if s.is_finite() { s } else { 0.0 };
-                l += sample * g[0];
-                r += sample * g[1];
+    fn append_frame_planar(
+        &self,
+        af: &oxideav_core::AudioFrame,
+        format: SampleFormat,
+        out_l: &mut Vec<f32>,
+        out_r: &mut Vec<f32>,
+    ) -> usize {
+        let n = af.samples as usize;
+        if n == 0 || af.data.is_empty() {
+            return 0;
+        }
+        let ch = self.channels.clamp(1, 64);
+        let base_idx = out_l.len();
+        out_l.resize(base_idx + n, 0.0);
+        out_r.resize(base_idx + n, 0.0);
+        let dst_l = &mut out_l[base_idx..base_idx + n];
+        let dst_r = &mut out_r[base_idx..base_idx + n];
+
+        match format {
+            SampleFormat::F32P => {
+                if ch == 2 && af.data.len() >= 2 && af.data[0].len() >= n * 4 && af.data[1].len() >= n * 4 {
+                    decode_f32le_clamped(&af.data[0][..n * 4], dst_l);
+                    decode_f32le_clamped(&af.data[1][..n * 4], dst_r);
+                    return n;
+                }
+                if ch == 1 && af.data[0].len() >= n * 4 {
+                    decode_f32le_clamped(&af.data[0][..n * 4], dst_l);
+                    dst_r.copy_from_slice(dst_l);
+                    return n;
+                }
+                for (c, &[gl, gr]) in self.gains[..ch].iter().enumerate() {
+                    if gl == 0.0 && gr == 0.0 {
+                        continue;
+                    }
+                    let Some(plane) = af.data.get(c).filter(|p| p.len() >= n * 4) else {
+                        continue;
+                    };
+                    accum_f32le_plane(&plane[..n * 4], gl, gr, dst_l, dst_r);
+                }
+                clamp_stereo_inplace(dst_l, dst_r);
+                n
             }
-            out.push(l.clamp(-1.0, 1.0));
-            out.push(r.clamp(-1.0, 1.0));
+            SampleFormat::F32 => {
+                let plane = &af.data[0];
+                let avail = (plane.len() / (ch * 4)).min(n);
+                if avail == 0 {
+                    out_l.truncate(base_idx);
+                    out_r.truncate(base_idx);
+                    return 0;
+                }
+                out_l.truncate(base_idx + avail);
+                out_r.truncate(base_idx + avail);
+                let dl = &mut out_l[base_idx..base_idx + avail];
+                let dr = &mut out_r[base_idx..base_idx + avail];
+                if ch == 2 {
+                    for (i, frame) in plane[..avail * 8].chunks_exact(8).enumerate() {
+                        let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
+                        let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
+                        dl[i] = if l.is_finite() { l.clamp(-1.0, 1.0) } else { 0.0 };
+                        dr[i] = if r.is_finite() { r.clamp(-1.0, 1.0) } else { 0.0 };
+                    }
+                } else {
+                    for (i, frame) in plane[..avail * ch * 4].chunks_exact(ch * 4).enumerate() {
+                        let mut l = 0.0f32;
+                        let mut r = 0.0f32;
+                        for (s_bytes, &[gl, gr]) in frame.chunks_exact(4).zip(&self.gains[..ch]) {
+                            let s = f32::from_le_bytes([s_bytes[0], s_bytes[1], s_bytes[2], s_bytes[3]]);
+                            if s.is_finite() {
+                                l += s * gl;
+                                r += s * gr;
+                            }
+                        }
+                        dl[i] = l.clamp(-1.0, 1.0);
+                        dr[i] = r.clamp(-1.0, 1.0);
+                    }
+                }
+                avail
+            }
+            SampleFormat::S16P => {
+                const SCALE: f32 = 1.0 / 32768.0;
+                for (c, &[gl, gr]) in self.gains[..ch].iter().enumerate() {
+                    if gl == 0.0 && gr == 0.0 {
+                        continue;
+                    }
+                    let Some(plane) = af.data.get(c).filter(|p| p.len() >= n * 2) else {
+                        continue;
+                    };
+                    let sl = gl * SCALE;
+                    let sr = gr * SCALE;
+                    for (i, b) in plane[..n * 2].chunks_exact(2).enumerate() {
+                        let s = i16::from_le_bytes([b[0], b[1]]) as f32;
+                        dst_l[i] += s * sl;
+                        dst_r[i] += s * sr;
+                    }
+                }
+                clamp_stereo_inplace(dst_l, dst_r);
+                n
+            }
+            SampleFormat::S16 => {
+                const SCALE: f32 = 1.0 / 32768.0;
+                let plane = &af.data[0];
+                let avail = (plane.len() / (ch * 2)).min(n);
+                out_l.truncate(base_idx + avail);
+                out_r.truncate(base_idx + avail);
+                let dl = &mut out_l[base_idx..base_idx + avail];
+                let dr = &mut out_r[base_idx..base_idx + avail];
+                if ch == 2 {
+                    for (i, frame) in plane[..avail * 4].chunks_exact(4).enumerate() {
+                        dl[i] = i16::from_le_bytes([frame[0], frame[1]]) as f32 * SCALE;
+                        dr[i] = i16::from_le_bytes([frame[2], frame[3]]) as f32 * SCALE;
+                    }
+                } else {
+                    for (i, frame) in plane[..avail * ch * 2].chunks_exact(ch * 2).enumerate() {
+                        let mut l = 0.0f32;
+                        let mut r = 0.0f32;
+                        for (b, &[gl, gr]) in frame.chunks_exact(2).zip(&self.gains[..ch]) {
+                            let s = i16::from_le_bytes([b[0], b[1]]) as f32 * SCALE;
+                            l += s * gl;
+                            r += s * gr;
+                        }
+                        dl[i] = l.clamp(-1.0, 1.0);
+                        dr[i] = r.clamp(-1.0, 1.0);
+                    }
+                }
+                avail
+            }
+            SampleFormat::S32P => {
+                const SCALE: f32 = 1.0 / 2_147_483_648.0;
+                for (c, &[gl, gr]) in self.gains[..ch].iter().enumerate() {
+                    if gl == 0.0 && gr == 0.0 {
+                        continue;
+                    }
+                    let Some(plane) = af.data.get(c).filter(|p| p.len() >= n * 4) else {
+                        continue;
+                    };
+                    let sl = gl * SCALE;
+                    let sr = gr * SCALE;
+                    for (i, b) in plane[..n * 4].chunks_exact(4).enumerate() {
+                        let s = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32;
+                        dst_l[i] += s * sl;
+                        dst_r[i] += s * sr;
+                    }
+                }
+                clamp_stereo_inplace(dst_l, dst_r);
+                n
+            }
+            SampleFormat::S32 => {
+                const SCALE: f32 = 1.0 / 2_147_483_648.0;
+                let plane = &af.data[0];
+                let avail = (plane.len() / (ch * 4)).min(n);
+                out_l.truncate(base_idx + avail);
+                out_r.truncate(base_idx + avail);
+                let dl = &mut out_l[base_idx..base_idx + avail];
+                let dr = &mut out_r[base_idx..base_idx + avail];
+                for (i, frame) in plane[..avail * ch * 4].chunks_exact(ch * 4).enumerate() {
+                    let mut l = 0.0f32;
+                    let mut r = 0.0f32;
+                    for (b, &[gl, gr]) in frame.chunks_exact(4).zip(&self.gains[..ch]) {
+                        let s = i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 * SCALE;
+                        l += s * gl;
+                        r += s * gr;
+                    }
+                    dl[i] = l.clamp(-1.0, 1.0);
+                    dr[i] = r.clamp(-1.0, 1.0);
+                }
+                avail
+            }
+            _ => {
+                for i in 0..n {
+                    let mut l = 0.0f32;
+                    let mut r = 0.0f32;
+                    for (c, &[gl, gr]) in self.gains[..ch].iter().enumerate() {
+                        if gl == 0.0 && gr == 0.0 {
+                            continue;
+                        }
+                        let s = sample_f32_fallback(format, &af.data, ch, c, i);
+                        if s.is_finite() {
+                            l += s * gl;
+                            r += s * gr;
+                        }
+                    }
+                    dst_l[i] = l.clamp(-1.0, 1.0);
+                    dst_r[i] = r.clamp(-1.0, 1.0);
+                }
+                n
+            }
         }
-        out
     }
 }
 
-fn convert_audio_to_f32(af: &oxideav_core::AudioFrame, format: SampleFormat, channels: usize) -> Vec<f32> {
-    let n = af.samples as usize;
-    let mut out = Vec::with_capacity(n * channels);
-    for i in 0..n {
-        for c in 0..channels {
-            out.push(sample_f32(format, &af.data, channels, c, i));
+#[inline]
+fn decode_f32le_clamped(src_bytes: &[u8], dst: &mut [f32]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let n = dst.len().min(src_bytes.len() / 4);
+        let vecs = n / 4;
+        let min_v = f32x4_splat(-1.0);
+        let max_v = f32x4_splat(1.0);
+        let zero_v = f32x4_splat(0.0);
+        let sp = src_bytes.as_ptr();
+        let dp = dst.as_mut_ptr();
+        for i in 0..vecs {
+            unsafe {
+                let v = v128_load(sp.add(i * 16) as *const v128);
+                let finite_mask = f32x4_eq(v, v);
+                let clean = v128_bitselect(v, zero_v, finite_mask);
+                let clamped = f32x4_pmax(min_v, f32x4_pmin(max_v, clean));
+                v128_store(dp.add(i * 4) as *mut v128, clamped);
+            }
+        }
+        for i in (vecs * 4)..n {
+            let b = &src_bytes[i * 4..i * 4 + 4];
+            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            dst[i] = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
         }
     }
-    out
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for (d, b) in dst.iter_mut().zip(src_bytes.chunks_exact(4)) {
+            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            *d = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+        }
+    }
 }
 
-fn sample_f32(format: SampleFormat, data: &[Vec<u8>], channels: usize, c: usize, i: usize) -> f32 {
+#[inline]
+fn accum_f32le_plane(src_bytes: &[u8], gl: f32, gr: f32, dst_l: &mut [f32], dst_r: &mut [f32]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let n = dst_l.len().min(dst_r.len()).min(src_bytes.len() / 4);
+        let vecs = n / 4;
+        let gl_v = f32x4_splat(gl);
+        let gr_v = f32x4_splat(gr);
+        let zero_v = f32x4_splat(0.0);
+        let sp = src_bytes.as_ptr();
+        let lp = dst_l.as_mut_ptr();
+        let rp = dst_r.as_mut_ptr();
+        for i in 0..vecs {
+            unsafe {
+                let v = v128_load(sp.add(i * 16) as *const v128);
+                let finite_mask = f32x4_eq(v, v);
+                let clean = v128_bitselect(v, zero_v, finite_mask);
+                if gl != 0.0 {
+                    let cur_l = v128_load(lp.add(i * 4) as *const v128);
+                    v128_store(lp.add(i * 4) as *mut v128, f32x4_add(cur_l, f32x4_mul(clean, gl_v)));
+                }
+                if gr != 0.0 {
+                    let cur_r = v128_load(rp.add(i * 4) as *const v128);
+                    v128_store(rp.add(i * 4) as *mut v128, f32x4_add(cur_r, f32x4_mul(clean, gr_v)));
+                }
+            }
+        }
+        for i in (vecs * 4)..n {
+            let b = &src_bytes[i * 4..i * 4 + 4];
+            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            if s.is_finite() {
+                dst_l[i] += s * gl;
+                dst_r[i] += s * gr;
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for ((dl, dr), b) in dst_l.iter_mut().zip(dst_r.iter_mut()).zip(src_bytes.chunks_exact(4)) {
+            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            if s.is_finite() {
+                *dl += s * gl;
+                *dr += s * gr;
+            }
+        }
+    }
+}
+
+#[inline]
+fn clamp_stereo_inplace(dst_l: &mut [f32], dst_r: &mut [f32]) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let min_v = f32x4_splat(-1.0);
+        let max_v = f32x4_splat(1.0);
+        for slice in [dst_l, dst_r] {
+            let n = slice.len();
+            let vecs = n / 4;
+            let p = slice.as_mut_ptr();
+            for i in 0..vecs {
+                unsafe {
+                    let v = v128_load(p.add(i * 4) as *const v128);
+                    v128_store(p.add(i * 4) as *mut v128, f32x4_pmax(min_v, f32x4_pmin(max_v, v)));
+                }
+            }
+            for x in &mut slice[vecs * 4..] {
+                *x = x.clamp(-1.0, 1.0);
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for x in dst_l {
+            *x = x.clamp(-1.0, 1.0);
+        }
+        for x in dst_r {
+            *x = x.clamp(-1.0, 1.0);
+        }
+    }
+}
+
+fn sample_f32_fallback(format: SampleFormat, data: &[Vec<u8>], channels: usize, c: usize, i: usize) -> f32 {
     let (plane, index) = if format.is_planar() {
         (data.get(c).or_else(|| data.first()).map(Vec::as_slice).unwrap_or(&[]), i)
     } else {
@@ -244,29 +533,152 @@ fn sample_f32(format: SampleFormat, data: &[Vec<u8>], channels: usize, c: usize,
     match format {
         SampleFormat::U8 | SampleFormat::U8P => (b[0] as f32 - 128.0) / 128.0,
         SampleFormat::S8 => (b[0] as i8 as f32) / 128.0,
-        SampleFormat::S16 | SampleFormat::S16P => i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0,
         SampleFormat::S24 => (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as f32 / 8_388_608.0,
-        SampleFormat::S32 | SampleFormat::S32P => {
-            i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0
-        }
-        SampleFormat::F32 | SampleFormat::F32P => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
-        SampleFormat::F64 | SampleFormat::F64P => {
-            f64::from_le_bytes(b.try_into().unwrap_or([0; 8])) as f32
-        }
+        SampleFormat::F64 | SampleFormat::F64P => f64::from_le_bytes(b.try_into().unwrap_or([0; 8])) as f32,
         _ => 0.0,
     }
+}
+
+// SIMD128 10-bit YUV420P10LE -> 8-bit YUV420P narrowing kernel (16 pixels per 2 SIMD ops).
+fn pack_plane_10_to_8(plane: &oxideav_core::VideoPlane, cols: usize, rows: usize, dst: &mut Vec<u8>) {
+    let row_bytes = cols * 2;
+    let base = dst.len();
+    dst.resize(base + cols * rows, 0);
+    let out = &mut dst[base..base + cols * rows];
+    for r in 0..rows {
+        let s = r * plane.stride;
+        if s + row_bytes > plane.data.len() {
+            break;
+        }
+        let src_row = &plane.data[s..s + row_bytes];
+        let dst_row = &mut out[r * cols..(r + 1) * cols];
+        #[cfg(target_arch = "wasm32")]
+        {
+            let chunks16 = cols / 16;
+            let sp = src_row.as_ptr();
+            let dp = dst_row.as_mut_ptr();
+            for i in 0..chunks16 {
+                unsafe {
+                    let lo = u16x8_shr(v128_load(sp.add(i * 32) as *const v128), 2);
+                    let hi = u16x8_shr(v128_load(sp.add(i * 32 + 16) as *const v128), 2);
+                    let packed = u8x16_narrow_i16x8(lo, hi);
+                    v128_store(dp.add(i * 16) as *mut v128, packed);
+                }
+            }
+            for i in (chunks16 * 16)..cols {
+                let px = u16::from_le_bytes([src_row[i * 2], src_row[i * 2 + 1]]);
+                dst_row[i] = (px >> 2).min(255) as u8;
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for (d, px) in dst_row.iter_mut().zip(src_row.chunks_exact(2)) {
+                *d = (u16::from_le_bytes([px[0], px[1]]) >> 2).min(255) as u8;
+            }
+        }
+    }
+}
+
+fn pack_plane_8(plane: &oxideav_core::VideoPlane, cols: usize, rows: usize, dst: &mut Vec<u8>) -> bool {
+    if plane.stride == cols && plane.data.len() >= cols * rows {
+        dst.extend_from_slice(&plane.data[..cols * rows]);
+        return true;
+    }
+    let start_len = dst.len();
+    dst.reserve(cols * rows);
+    for r in 0..rows {
+        let s = r * plane.stride;
+        if s + cols > plane.data.len() {
+            dst.truncate(start_len);
+            return false;
+        }
+        dst.extend_from_slice(&plane.data[s..s + cols]);
+    }
+    true
+}
+
+// Vertically averages 4:2:2 chroma rows using hardware u8x16_avgr_u so YUV422P stays on the GPU YUV shader.
+fn subsample_422_chroma(plane: &oxideav_core::VideoPlane, cwu: usize, hu: usize, chu: usize, dst: &mut Vec<u8>) -> bool {
+    let base = dst.len();
+    dst.resize(base + cwu * chu, 128);
+    let out = &mut dst[base..base + cwu * chu];
+    for cr in 0..chu {
+        let r0 = (cr * 2).min(hu.saturating_sub(1));
+        let r1 = (cr * 2 + 1).min(hu.saturating_sub(1));
+        let s0 = r0 * plane.stride;
+        let s1 = r1 * plane.stride;
+        if s0 + cwu > plane.data.len() || s1 + cwu > plane.data.len() {
+            dst.truncate(base);
+            return false;
+        }
+        let row0 = &plane.data[s0..s0 + cwu];
+        let row1 = &plane.data[s1..s1 + cwu];
+        let drow = &mut out[cr * cwu..(cr + 1) * cwu];
+        #[cfg(target_arch = "wasm32")]
+        {
+            let chunks16 = cwu / 16;
+            for i in 0..chunks16 {
+                unsafe {
+                    let a = v128_load(row0.as_ptr().add(i * 16) as *const v128);
+                    let b = v128_load(row1.as_ptr().add(i * 16) as *const v128);
+                    v128_store(drow.as_mut_ptr().add(i * 16) as *mut v128, u8x16_avgr(a, b));
+                }
+            }
+            for i in (chunks16 * 16)..cwu {
+                drow[i] = ((u16::from(row0[i]) + u16::from(row1[i]) + 1) >> 1) as u8;
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            for i in 0..cwu {
+                drow[i] = ((u16::from(row0[i]) + u16::from(row1[i]) + 1) >> 1) as u8;
+            }
+        }
+    }
+    true
+}
+
+fn subsample_444_chroma(plane: &oxideav_core::VideoPlane, wu: usize, hu: usize, cwu: usize, chu: usize, dst: &mut Vec<u8>) -> bool {
+    let base = dst.len();
+    dst.resize(base + cwu * chu, 128);
+    let out = &mut dst[base..base + cwu * chu];
+    for cr in 0..chu {
+        let r0 = (cr * 2).min(hu.saturating_sub(1));
+        let r1 = (cr * 2 + 1).min(hu.saturating_sub(1));
+        let s0 = r0 * plane.stride;
+        let s1 = r1 * plane.stride;
+        if s0 + wu > plane.data.len() || s1 + wu > plane.data.len() {
+            dst.truncate(base);
+            return false;
+        }
+        let row0 = &plane.data[s0..s0 + wu];
+        let row1 = &plane.data[s1..s1 + wu];
+        let drow = &mut out[cr * cwu..(cr + 1) * cwu];
+        for cx in 0..cwu {
+            let x0 = (cx * 2).min(wu.saturating_sub(1));
+            let x1 = (cx * 2 + 1).min(wu.saturating_sub(1));
+            let sum = u16::from(row0[x0]) + u16::from(row0[x1]) + u16::from(row1[x0]) + u16::from(row1[x1]) + 2;
+            drow[cx] = (sum >> 2) as u8;
+        }
+    }
+    true
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VideoCodecKind {
     H264,
     Hevc,
+    Av1,
+    Vp9,
+    Vp8,
+    Other,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NalFraming {
     AnnexB,
     LengthPrefixed(u8),
+    RawPassthrough,
 }
 
 #[derive(Clone)]
@@ -275,31 +687,76 @@ struct MseVideoConfig {
     width: u32,
     height: u32,
     framing: NalFraming,
-    record_4byte: Vec<u8>,
+    config_box_fourcc: [u8; 4],
+    sample_entry_fourcc: [u8; 4],
+    config_payload: Vec<u8>,
     codec_string: String,
     frame_ticks_90k: i64,
 }
 
+#[derive(Clone)]
+struct ActiveVideoMeta {
+    time_base: TimeBase,
+    width: u32,
+    height: u32,
+    pixel_format: PixelFormat,
+    frame_dur: f64,
+    codec_kind: VideoCodecKind,
+    h264_framing: NalFraming,
+}
+
+#[derive(Clone)]
+struct ActiveAudioMeta {
+    time_base: TimeBase,
+    params: CodecParameters,
+}
+
+// Stride-3 startcode scanner skips non-0/1 bytes 3x faster than naive byte-by-byte Annex-B loops.
 fn split_annexb_nals(data: &[u8]) -> Vec<&[u8]> {
     let mut starts = Vec::new();
+    let len = data.len();
     let mut i = 0usize;
-    while i + 2 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+    while i + 2 < len {
+        let b2 = data[i + 2];
+        if b2 > 1 {
+            i += 3;
+        } else if b2 == 1 && data[i] == 0 && data[i + 1] == 0 {
             starts.push(i);
             i += 3;
         } else {
             i += 1;
         }
     }
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(starts.len());
     for (idx, &s) in starts.iter().enumerate() {
         let nal_start = s + 3;
-        let mut nal_end = starts.get(idx + 1).copied().unwrap_or(data.len());
+        let mut nal_end = starts.get(idx + 1).copied().unwrap_or(len);
         while nal_end > nal_start && data[nal_end - 1] == 0 {
             nal_end -= 1;
         }
         if nal_end > nal_start {
             out.push(&data[nal_start..nal_end]);
+        }
+    }
+    out
+}
+
+fn unescape_rbsp_prefix(nal: &[u8], max_out: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(max_out.min(nal.len()));
+    let mut zeros = 0usize;
+    for &b in nal {
+        if out.len() >= max_out {
+            break;
+        }
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        out.push(b);
+        if b == 0 {
+            zeros += 1;
+        } else {
+            zeros = 0;
         }
     }
     out
@@ -314,9 +771,11 @@ fn keep_hevc_nal(nal: &[u8]) -> bool {
     layer_id == 0 && nal_type < 62
 }
 
-fn to_4byte_nals(data: &[u8], framing: NalFraming, kind: VideoCodecKind) -> Vec<u8> {
+// Moves 4-byte H.264, AV1, and VP9 packet buffers straight through with zero allocations or copies.
+fn to_fmp4_sample_bytes(data: Vec<u8>, framing: NalFraming, kind: VideoCodecKind) -> Vec<u8> {
     match framing {
-        NalFraming::LengthPrefixed(4) if kind == VideoCodecKind::H264 => data.to_vec(),
+        NalFraming::RawPassthrough => data,
+        NalFraming::LengthPrefixed(4) if kind == VideoCodecKind::H264 => data,
         NalFraming::LengthPrefixed(w) => {
             let width = w as usize;
             let mut out = Vec::with_capacity(data.len() + 16);
@@ -342,7 +801,7 @@ fn to_4byte_nals(data: &[u8], framing: NalFraming, kind: VideoCodecKind) -> Vec<
         }
         NalFraming::AnnexB => {
             let mut out = Vec::with_capacity(data.len() + 16);
-            for nal in split_annexb_nals(data) {
+            for nal in split_annexb_nals(&data) {
                 if kind == VideoCodecKind::Hevc && !keep_hevc_nal(nal) {
                     continue;
                 }
@@ -352,6 +811,189 @@ fn to_4byte_nals(data: &[u8], framing: NalFraming, kind: VideoCodecKind) -> Vec<
             out
         }
     }
+}
+
+// True when every VCL NAL in an H.264 packet has nal_ref_idc == 0 (disposable non-reference B-frame).
+fn is_droppable_h264_nonref(data: &[u8], framing: NalFraming) -> bool {
+    let mut saw_vcl = false;
+    match framing {
+        NalFraming::LengthPrefixed(w) if w >= 1 && w <= 4 => {
+            let width = w as usize;
+            let mut pos = 0usize;
+            while pos + width < data.len() {
+                let mut len = 0usize;
+                for &b in &data[pos..pos + width] {
+                    len = (len << 8) | (b as usize);
+                }
+                pos += width;
+                if len == 0 || pos + len > data.len() {
+                    return false;
+                }
+                let b0 = data[pos];
+                pos += len;
+                let nal_type = b0 & 0x1F;
+                if (1..=5).contains(&nal_type) {
+                    saw_vcl = true;
+                    if nal_type == 5 || ((b0 >> 5) & 3) != 0 {
+                        return false;
+                    }
+                }
+            }
+        }
+        NalFraming::AnnexB => {
+            for nal in split_annexb_nals(data) {
+                let b0 = nal[0];
+                let nal_type = b0 & 0x1F;
+                if (1..=5).contains(&nal_type) {
+                    saw_vcl = true;
+                    if nal_type == 5 || ((b0 >> 5) & 3) != 0 {
+                        return false;
+                    }
+                }
+            }
+        }
+        _ => return false,
+    }
+    saw_vcl
+}
+
+fn read_leb128(buf: &[u8]) -> Option<(usize, usize)> {
+    let mut val = 0usize;
+    for (i, &b) in buf.iter().take(8).enumerate() {
+        val |= ((b & 0x7F) as usize) << (i * 7);
+        if (b & 0x80) == 0 {
+            return Some((val, i + 1));
+        }
+    }
+    None
+}
+
+// Extracts an AV1CodecConfigurationRecord from MP4/MKV extradata or raw in-band OBUs for hardware av01 MSE.
+fn build_av1_config(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option<(Vec<u8>, String)> {
+    let extra = &stream.params.extradata;
+    let is_10bit = matches!(stream.params.pixel_format, Some(PixelFormat::Yuv420P10Le));
+    if extra.len() >= 4 && (extra[0] & 0x80) != 0 && (extra[0] & 0x7F) == 1 {
+        let profile = (extra[1] >> 5) & 0x07;
+        let level = extra[1] & 0x1F;
+        let tier = if (extra[2] & 0x80) != 0 { 'H' } else { 'M' };
+        let high_bd = (extra[2] & 0x40) != 0;
+        let twelve_bd = (extra[2] & 0x20) != 0;
+        let bit_depth = if profile == 2 && high_bd && twelve_bd {
+            12
+        } else if high_bd || is_10bit {
+            10
+        } else {
+            8
+        };
+        let codec_string = format!("av01.{profile}.{level:02}{tier}.{bit_depth:02}");
+        return Some((extra.clone(), codec_string));
+    }
+
+    for src in [Some(extra.as_slice()), first_keyframe].into_iter().flatten() {
+        let mut pos = 0usize;
+        while pos < src.len() {
+            let hdr = src[pos];
+            let obu_type = (hdr >> 3) & 0x0F;
+            let has_ext = (hdr & 0x04) != 0;
+            let has_size = (hdr & 0x02) != 0;
+            let hdr_len = 1 + usize::from(has_ext);
+            if pos + hdr_len > src.len() {
+                break;
+            }
+            let (payload_len, size_bytes) = if has_size {
+                let Some((sz, sb)) = read_leb128(&src[pos + hdr_len..]) else {
+                    break;
+                };
+                (sz, sb)
+            } else {
+                (src.len() - (pos + hdr_len), 0)
+            };
+            let obu_total = hdr_len + size_bytes + payload_len;
+            if pos + obu_total > src.len() {
+                break;
+            }
+            if obu_type == 1 && payload_len >= 2 {
+                let p = &src[pos + hdr_len + size_bytes..pos + obu_total];
+                let profile = (p[0] >> 5) & 0x07;
+                let reduced = (p[0] & 0x08) != 0;
+                let level = if reduced { p[0] & 0x1F } else { ((p[0] & 0x07) << 2) | (p[1] >> 6) };
+                let high_bd = is_10bit;
+                let bit_depth = if high_bd { 10 } else { 8 };
+                let flags = (u8::from(high_bd) << 6) | 0x0C; // 4:2:0 subsampling x=1,y=1
+                let mut rec = Vec::with_capacity(4 + obu_total);
+                rec.extend_from_slice(&[0x81, (profile << 5) | (level & 0x1F), flags, 0x00]);
+                rec.extend_from_slice(&src[pos..pos + obu_total]);
+                let codec_string = format!("av01.{profile}.{level:02}M.{bit_depth:02}");
+                return Some((rec, codec_string));
+            }
+            pos += obu_total;
+        }
+    }
+    None
+}
+
+// Synthesizes an ISO-BMFF vpcC v1 FullBox from VP9 keyframe header + pixel format so WebM/MKV VP9 hits hardware MSE.
+fn build_vp9_config(stream: &StreamInfo, first_keyframe: Option<&[u8]>, w: u32, h: u32) -> (Vec<u8>, String) {
+    let mut profile: u8 = if matches!(stream.params.pixel_format, Some(PixelFormat::Yuv420P10Le)) {
+        2
+    } else {
+        0
+    };
+    let mut bit_depth: u8 = if profile >= 2 { 10 } else { 8 };
+    if let Some(kf) = first_keyframe
+        && kf.len() >= 5
+        && (kf[0] >> 6) == 2
+    {
+        let p_low = (kf[0] >> 5) & 1;
+        let p_high = (kf[0] >> 4) & 1;
+        let parsed_prof = (p_high << 1) | p_low;
+        profile = parsed_prof;
+        if parsed_prof < 2 {
+            bit_depth = 8;
+        } else if bit_depth < 10 {
+            bit_depth = 10;
+        }
+    }
+    let pixels = (w as u64) * (h as u64);
+    let level: u8 = if pixels <= 1280 * 720 {
+        31
+    } else if pixels <= 1920 * 1080 {
+        41
+    } else if pixels <= 2560 * 1440 {
+        50
+    } else {
+        51
+    };
+    let mut vpcc = Vec::with_capacity(12);
+    vpcc.extend_from_slice(&[1, 0, 0, 0]); // FullBox version=1, flags=0
+    vpcc.push(profile);
+    vpcc.push(level);
+    vpcc.push((bit_depth << 4) | 0x02); // chromaSubsampling=1 (4:2:0), limited range
+    vpcc.extend_from_slice(&[1, 1, 1, 0, 0]); // BT.709 color + 0-len init data
+    let codec_string = format!("vp09.{profile:02}.{level:02}.{bit_depth:02}");
+    (vpcc, codec_string)
+}
+
+fn hevc_codec_string_from_ptl(ptl12: &[u8]) -> String {
+    let space = match (ptl12[0] >> 6) & 3 {
+        1 => "A",
+        2 => "B",
+        3 => "C",
+        _ => "",
+    };
+    let tier = if (ptl12[0] & 0x20) != 0 { "H" } else { "L" };
+    let profile = ptl12[0] & 0x1F;
+    let compat = u32::from_be_bytes([ptl12[1], ptl12[2], ptl12[3], ptl12[4]]).reverse_bits();
+    let level = ptl12[11];
+    let mut constraints = &ptl12[5..11];
+    while let Some((&0, rest)) = constraints.split_last() {
+        constraints = rest;
+    }
+    let mut codec_string = format!("hvc1.{space}{profile}.{compat:x}.{tier}{level}");
+    for &b in constraints {
+        codec_string.push_str(&format!(".{b:X}"));
+    }
+    codec_string
 }
 
 fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option<MseVideoConfig> {
@@ -374,14 +1016,16 @@ fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option
             if extra.len() >= 7 && extra[0] == 1 {
                 let len_size = (extra[4] & 3) + 1;
                 let mut rec = extra.clone();
-                rec[4] |= 0x03; // declare 4-byte NAL lengths in avcC
+                rec[4] |= 0x03;
                 let codec_string = format!("avc1.{:02x}{:02x}{:02x}", extra[1], extra[2], extra[3]);
                 Some(MseVideoConfig {
                     kind: VideoCodecKind::H264,
                     width: w,
                     height: h,
                     framing: NalFraming::LengthPrefixed(len_size),
-                    record_4byte: rec,
+                    config_box_fourcc: *b"avcC",
+                    sample_entry_fourcc: *b"avc1",
+                    config_payload: rec,
                     codec_string,
                     frame_ticks_90k,
                 })
@@ -411,7 +1055,9 @@ fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option
                     width: w,
                     height: h,
                     framing: NalFraming::AnnexB,
-                    record_4byte: rec,
+                    config_box_fourcc: *b"avcC",
+                    sample_entry_fourcc: *b"avc1",
+                    config_payload: rec,
                     codec_string,
                     frame_ticks_90k,
                 })
@@ -421,8 +1067,8 @@ fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option
             if extra.len() >= 23 && extra[0] == 1 {
                 let len_size = (extra[21] & 3) + 1;
                 let mut header_22 = extra[0..22].to_vec();
-                header_22[21] |= 0x03; // declare 4-byte NAL lengths in hvcC
-                // Strip SEI (39/40) and Dolby Vision RPU/EL arrays from hvcC so Apple VideoToolbox accepts 4K UHD remuxes.
+                header_22[21] |= 0x03;
+                // Strip SEI (39/40) and Dolby Vision RPU/EL arrays from hvcC so VideoToolbox accepts 4K UHD remuxes.
                 let num_arrays = extra[22] as usize;
                 let mut pos = 23usize;
                 let mut kept_arrays: Vec<(u8, Vec<Vec<u8>>)> = Vec::new();
@@ -463,36 +1109,98 @@ fn probe_mse_video(stream: &StreamInfo, first_keyframe: Option<&[u8]>) -> Option
                         rec.extend_from_slice(nal);
                     }
                 }
-                let space = match (extra[1] >> 6) & 3 {
-                    1 => "A",
-                    2 => "B",
-                    3 => "C",
-                    _ => "",
-                };
-                let tier = if (extra[1] & 0x20) != 0 { "H" } else { "L" };
-                let profile = extra[1] & 0x1F;
-                let compat = u32::from_be_bytes([extra[2], extra[3], extra[4], extra[5]]).reverse_bits();
-                let level = extra[12];
-                let mut constraints = &extra[6..12];
-                while let Some((&0, rest)) = constraints.split_last() {
-                    constraints = rest;
-                }
-                let mut codec_string = format!("hvc1.{space}{profile}.{compat:x}.{tier}{level}");
-                for &b in constraints {
-                    codec_string.push_str(&format!(".{b:X}"));
-                }
+                let codec_string = hevc_codec_string_from_ptl(&extra[1..13]);
                 Some(MseVideoConfig {
                     kind: VideoCodecKind::Hevc,
                     width: w,
                     height: h,
                     framing: NalFraming::LengthPrefixed(len_size),
-                    record_4byte: rec,
+                    config_box_fourcc: *b"hvcC",
+                    sample_entry_fourcc: *b"hvc1",
+                    config_payload: rec,
                     codec_string,
                     frame_ticks_90k,
                 })
             } else {
-                None
+                // Annex-B HEVC (e.g. MPEG-TS): extract VPS (32), SPS (33), PPS (34) and synthesize hvcC.
+                let mut vps: Option<Vec<u8>> = None;
+                let mut sps: Option<Vec<u8>> = None;
+                let mut pps: Option<Vec<u8>> = None;
+                for src in [Some(extra.as_slice()), first_keyframe].into_iter().flatten() {
+                    for nal in split_annexb_nals(src) {
+                        if nal.len() < 2 {
+                            continue;
+                        }
+                        match (nal[0] >> 1) & 0x3F {
+                            32 if vps.is_none() => vps = Some(nal.to_vec()),
+                            33 if sps.is_none() => sps = Some(nal.to_vec()),
+                            34 if pps.is_none() => pps = Some(nal.to_vec()),
+                            _ => {}
+                        }
+                    }
+                }
+                let (vps, sps, pps) = (vps?, sps?, pps?);
+                let sps_rbsp = unescape_rbsp_prefix(&sps, 20);
+                if sps_rbsp.len() < 15 {
+                    return None;
+                }
+                let ptl12 = &sps_rbsp[3..15];
+                let codec_string = hevc_codec_string_from_ptl(ptl12);
+                let is_10bit = matches!(params.pixel_format, Some(PixelFormat::Yuv420P10Le));
+                let bd_minus8 = if is_10bit { 2u8 } else { 0u8 };
+                let mut rec = Vec::with_capacity(23 + vps.len() + sps.len() + pps.len() + 24);
+                rec.push(1);
+                rec.extend_from_slice(ptl12);
+                rec.extend_from_slice(&[0xF0, 0x00, 0xFC, 0xFD, 0xF8 | bd_minus8, 0xF8 | bd_minus8, 0x00, 0x00, 0x03, 0x03]);
+                for (nal_type, nal) in [(32u8, &vps), (33u8, &sps), (34u8, &pps)] {
+                    rec.push(0x80 | nal_type);
+                    rec.extend_from_slice(&1u16.to_be_bytes());
+                    rec.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+                    rec.extend_from_slice(nal);
+                }
+                Some(MseVideoConfig {
+                    kind: VideoCodecKind::Hevc,
+                    width: w,
+                    height: h,
+                    framing: NalFraming::AnnexB,
+                    config_box_fourcc: *b"hvcC",
+                    sample_entry_fourcc: *b"hvc1",
+                    config_payload: rec,
+                    codec_string,
+                    frame_ticks_90k,
+                })
             }
+        }
+        "av1" => {
+            let (av1c, codec_string) = build_av1_config(stream, first_keyframe)?;
+            Some(MseVideoConfig {
+                kind: VideoCodecKind::Av1,
+                width: w,
+                height: h,
+                framing: NalFraming::RawPassthrough,
+                config_box_fourcc: *b"av1C",
+                sample_entry_fourcc: *b"av01",
+                config_payload: av1c,
+                codec_string,
+                frame_ticks_90k,
+            })
+        }
+        "vp9" => {
+            if extra.is_empty() && first_keyframe.is_none() {
+                return None;
+            }
+            let (vpcc, codec_string) = build_vp9_config(stream, first_keyframe, w, h);
+            Some(MseVideoConfig {
+                kind: VideoCodecKind::Vp9,
+                width: w,
+                height: h,
+                framing: NalFraming::RawPassthrough,
+                config_box_fourcc: *b"vpcC",
+                sample_entry_fourcc: *b"vp09",
+                config_payload: vpcc,
+                codec_string,
+                frame_ticks_90k,
+            })
         }
         _ => None,
     }
@@ -538,11 +1246,7 @@ fn build_fmp4_init(cfg: &MseVideoConfig) -> Vec<u8> {
     tkhd.extend_from_slice(&(cfg.width << 16).to_be_bytes());
     tkhd.extend_from_slice(&(cfg.height << 16).to_be_bytes());
 
-    let (sample_fourcc, cfg_fourcc) = match cfg.kind {
-        VideoCodecKind::H264 => (b"avc1", b"avcC"),
-        VideoCodecKind::Hevc => (b"hvc1", b"hvcC"),
-    };
-    let mut vse = Vec::with_capacity(86 + cfg.record_4byte.len());
+    let mut vse = Vec::with_capacity(86 + cfg.config_payload.len());
     vse.extend_from_slice(&[0u8; 6]);
     vse.extend_from_slice(&1u16.to_be_bytes());
     vse.extend_from_slice(&[0u8; 16]);
@@ -555,8 +1259,8 @@ fn build_fmp4_init(cfg: &MseVideoConfig) -> Vec<u8> {
     vse.extend_from_slice(&[0u8; 32]);
     vse.extend_from_slice(&0x0018u16.to_be_bytes());
     vse.extend_from_slice(&0xFFFFu16.to_be_bytes());
-    vse.extend_from_slice(&wrap_box(cfg_fourcc, &cfg.record_4byte));
-    let sample_entry = wrap_box(sample_fourcc, &vse);
+    vse.extend_from_slice(&wrap_box(&cfg.config_box_fourcc, &cfg.config_payload));
+    let sample_entry = wrap_box(&cfg.sample_entry_fourcc, &vse);
 
     let mut stsd_body = Vec::with_capacity(8 + sample_entry.len());
     stsd_body.extend_from_slice(&[0, 0, 0, 0]);
@@ -581,7 +1285,7 @@ fn build_fmp4_init(cfg: &MseVideoConfig) -> Vec<u8> {
     mdhd.extend_from_slice(&[0u8; 12]);
     mdhd.extend_from_slice(&VIDEO_TIMESCALE.to_be_bytes());
     mdhd.extend_from_slice(&0u32.to_be_bytes());
-    mdhd.extend_from_slice(&21956u16.to_be_bytes()); // "und"
+    mdhd.extend_from_slice(&21956u16.to_be_bytes());
     mdhd.extend_from_slice(&0u16.to_be_bytes());
 
     let mut hdlr = Vec::with_capacity(37);
@@ -824,9 +1528,17 @@ enum OutItem {
     MseSegment { data: Vec<u8>, start: f64, end: f64 },
     VideoRgba { data: Vec<u8>, pts: f64, w: u32, h: u32 },
     VideoYuv420 { data: Vec<u8>, pts: f64, w: u32, h: u32 },
-    AudioF32 { data: Vec<u8>, pts: f64, rate: u32, frames: u32 },
+    VideoPacket { data: Vec<u8>, pts: f64, dur: f64, keyframe: bool },
+    AudioPlanarF32 { data: Vec<u8>, pts: f64, rate: u32, frames: u32 },
     SubText { text: Vec<u8>, start: f64, end: f64 },
     SubBitmap { rgba: Vec<u8>, start: f64, end: f64, x: i32, y: i32, w: u32, h: u32, cw: u32, ch: u32 },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VideoOutputMode {
+    Software,
+    Mse,
+    WebCodecs,
 }
 
 struct WebSession {
@@ -837,22 +1549,27 @@ struct WebSession {
     mse_cfg: Option<MseVideoConfig>,
     peek_packets: VecDeque<Packet>,
     out_queue: VecDeque<OutItem>,
+    frame_pool: Vec<Vec<u8>>,
     video_idx: Option<u32>,
     audio_idx: Option<u32>,
     sub_idx: Option<u32>,
-    use_mse: bool,
+    video_mode: VideoOutputMode,
+    video_meta: Option<ActiveVideoMeta>,
+    audio_meta: Option<ActiveAudioMeta>,
+    sub_meta: Option<(TimeBase, String)>,
     video_dec: Option<Box<dyn Decoder>>,
     audio_dec: Option<Box<dyn Decoder>>,
     sub_dec: Option<Box<dyn Decoder>>,
     audio_mix: Option<(ChannelLayout, StereoMix)>,
     audio_next_pts: Option<f64>,
-    audio_accum: Vec<u8>,
+    audio_left: Vec<f32>,
+    audio_right: Vec<f32>,
     audio_accum_pts: Option<f64>,
     audio_accum_rate: u32,
-    audio_accum_frames: u32,
     audio_first_flushed: bool,
     video_next_pts: f64,
     video_seeded: bool,
+    drop_until_keyframe: bool,
     client_clock: f64,
     mse_gop: Vec<GopPacket>,
     mse_seq: u32,
@@ -863,6 +1580,7 @@ struct WebSession {
     flushed_eof: bool,
 }
 
+#[derive(Default)]
 struct WasmState {
     session: Option<WebSession>,
     json_buf: Vec<u8>,
@@ -879,26 +1597,6 @@ struct WasmState {
     out_samples: u32,
 }
 
-impl Default for WasmState {
-    fn default() -> Self {
-        Self {
-            session: None,
-            json_buf: Vec::new(),
-            out_buf: Vec::new(),
-            out_pts: 0.0,
-            out_dur: 0.0,
-            out_w: 0,
-            out_h: 0,
-            out_x: 0,
-            out_y: 0,
-            out_cw: 0,
-            out_ch: 0,
-            out_rate: 0,
-            out_samples: 0,
-        }
-    }
-}
-
 thread_local! {
     static STATE: RefCell<WasmState> = RefCell::new(WasmState::default());
 }
@@ -909,7 +1607,7 @@ fn set_json_error(st: &mut WasmState, msg: &str) -> i32 {
 }
 
 fn make_subtitle_cue(cue: &SubtitleCue, pkt_start: f64, pkt_dur: Option<f64>) -> Option<OutItem> {
-    let mut buf = String::new();
+    let mut buf = String::with_capacity(64);
     collect_segments_text(&cue.segments, &mut buf, 0);
     let cleaned = strip_ass_overrides(&buf);
     if cleaned.is_empty() {
@@ -930,9 +1628,58 @@ fn make_subtitle_cue(cue: &SubtitleCue, pkt_start: f64, pkt_dur: Option<f64>) ->
     })
 }
 
+fn build_webcodecs_hint(vs: &StreamInfo, mse_cfg: Option<&MseVideoConfig>) -> Option<serde_json::Value> {
+    let w = vs.params.width.unwrap_or(0);
+    let h = vs.params.height.unwrap_or(0);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if vs.params.codec_id.as_str() == "vp8" {
+        return Some(json!({ "codec": "vp8", "width": w, "height": h, "raw": true }));
+    }
+    let cfg = mse_cfg?;
+    let desc_bytes: &[u8] = match cfg.kind {
+        VideoCodecKind::H264 | VideoCodecKind::Hevc | VideoCodecKind::Av1 => &cfg.config_payload,
+        VideoCodecKind::Vp9 => &[],
+        _ => return None,
+    };
+    let mut hex = String::with_capacity(desc_bytes.len() * 2);
+    for &b in desc_bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    Some(json!({
+        "codec": cfg.codec_string,
+        "width": cfg.width,
+        "height": cfg.height,
+        "descriptionHex": hex,
+    }))
+}
+
 impl WebSession {
     fn stream_info(&self, idx: u32) -> Option<&StreamInfo> {
         self.streams.iter().find(|s| s.index == idx)
+    }
+
+    fn take_pooled_buf(&mut self, cap: usize) -> Vec<u8> {
+        if let Some(idx) = self.frame_pool.iter().position(|b| b.capacity() >= cap) {
+            let mut v = self.frame_pool.swap_remove(idx);
+            v.clear();
+            return v;
+        }
+        if let Some(mut v) = self.frame_pool.pop() {
+            v.clear();
+            v.reserve(cap);
+            return v;
+        }
+        Vec::with_capacity(cap)
+    }
+
+    fn recycle_buf(&mut self, mut buf: Vec<u8>) {
+        if buf.capacity() >= 16 * 1024 && self.frame_pool.len() < 6 {
+            buf.clear();
+            self.frame_pool.push(buf);
+        }
     }
 
     fn rebuild_decoders(&mut self) {
@@ -940,25 +1687,62 @@ impl WebSession {
         self.video_dec = None;
         self.audio_dec = None;
         self.sub_dec = None;
+        self.video_meta = None;
+        self.audio_meta = None;
+        self.sub_meta = None;
         self.audio_mix = None;
         self.audio_next_pts = None;
-        self.audio_accum.clear();
+        self.audio_left.clear();
+        self.audio_right.clear();
         self.audio_accum_pts = None;
         self.audio_accum_rate = 0;
-        self.audio_accum_frames = 0;
         self.audio_first_flushed = false;
         self.video_next_pts = self.seek_target.unwrap_or(0.0);
         self.video_seeded = false;
+        self.drop_until_keyframe = false;
         self.client_clock = self.seek_target.unwrap_or(0.0);
         self.mse_gop.clear();
         self.mse_started = false;
-        if !self.use_mse
-            && let Some(vi) = self.video_idx
+
+        if let Some(vi) = self.video_idx
             && let Some(s) = self.stream_info(vi).cloned()
         {
-            self.video_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
-                .ok()
-                .and_then(Result::ok);
+            let tb = s.time_base;
+            let frame_dur = s
+                .params
+                .frame_rate
+                .filter(|r| r.num > 0 && r.den > 0)
+                .map(|r| (r.den as f64) / (r.num as f64))
+                .filter(|&d| d > 0.004 && d < 0.2)
+                .or_else(|| tb.is_valid().then(|| tb.seconds_of(1)).filter(|&d| d > 0.004 && d < 0.2))
+                .unwrap_or(1.0 / 24.0);
+            let codec_kind = match s.params.codec_id.as_str() {
+                "h264" => VideoCodecKind::H264,
+                "h265" | "hevc" => VideoCodecKind::Hevc,
+                "av1" => VideoCodecKind::Av1,
+                "vp9" => VideoCodecKind::Vp9,
+                "vp8" => VideoCodecKind::Vp8,
+                _ => VideoCodecKind::Other,
+            };
+            let h264_framing = if s.params.extradata.len() >= 7 && s.params.extradata[0] == 1 {
+                NalFraming::LengthPrefixed((s.params.extradata[4] & 3) + 1)
+            } else {
+                NalFraming::AnnexB
+            };
+            self.video_meta = Some(ActiveVideoMeta {
+                time_base: tb,
+                width: s.params.width.unwrap_or(0),
+                height: s.params.height.unwrap_or(0),
+                pixel_format: s.params.pixel_format.unwrap_or(PixelFormat::Yuv420P),
+                frame_dur,
+                codec_kind,
+                h264_framing,
+            });
+            if self.video_mode == VideoOutputMode::Software {
+                self.video_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
+                    .ok()
+                    .and_then(Result::ok);
+            }
         }
         if let Some(ai) = self.audio_idx
             && let Some(s) = self.stream_info(ai).cloned()
@@ -966,6 +1750,10 @@ impl WebSession {
             self.audio_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
                 .ok()
                 .and_then(Result::ok);
+            self.audio_meta = Some(ActiveAudioMeta {
+                time_base: s.time_base,
+                params: s.params,
+            });
         }
         if let Some(si) = self.sub_idx
             && let Some(s) = self.stream_info(si).cloned()
@@ -973,23 +1761,53 @@ impl WebSession {
             self.sub_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
                 .ok()
                 .and_then(Result::ok);
+            self.sub_meta = Some((s.time_base, s.params.codec_id.as_str().to_string()));
         }
     }
 
     fn flush_audio_accum(&mut self) {
-        if self.audio_accum_frames > 0
+        let frames = self.audio_left.len().min(self.audio_right.len());
+        if frames > 0
             && let Some(pts) = self.audio_accum_pts.take()
         {
-            let data = std::mem::take(&mut self.audio_accum);
-            let frames = self.audio_accum_frames;
+            let byte_len = frames * 2 * 4;
+            let mut out = self.take_pooled_buf(byte_len);
+            // wasm32 and modern hosts are little-endian; bulk-copy contiguous planar L then R directly.
+            #[cfg(target_endian = "little")]
+            unsafe {
+                out.set_len(byte_len);
+                std::ptr::copy_nonoverlapping(
+                    self.audio_left.as_ptr() as *const u8,
+                    out.as_mut_ptr(),
+                    frames * 4,
+                );
+                std::ptr::copy_nonoverlapping(
+                    self.audio_right.as_ptr() as *const u8,
+                    out.as_mut_ptr().add(frames * 4),
+                    frames * 4,
+                );
+            }
+            #[cfg(not(target_endian = "little"))]
+            {
+                for &s in &self.audio_left[..frames] {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+                for &s in &self.audio_right[..frames] {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+            }
+            self.audio_left.clear();
+            self.audio_right.clear();
             let rate = self.audio_accum_rate;
-            self.audio_accum_frames = 0;
-            self.out_queue.push_back(OutItem::AudioF32 {
-                data,
+            self.out_queue.push_back(OutItem::AudioPlanarF32 {
+                data: out,
                 pts,
                 rate,
-                frames,
+                frames: frames as u32,
             });
+        } else {
+            self.audio_left.clear();
+            self.audio_right.clear();
         }
     }
 
@@ -1000,7 +1818,6 @@ impl WebSession {
             }
             self.seek_target = None;
         }
-        // Drop display conversion for frames already >85ms behind speaker playback so heavy 1080p software codecs stay locked to real-time.
         if self.client_clock > 0.25 && pts + 0.085 < self.client_clock {
             return;
         }
@@ -1008,61 +1825,53 @@ impl WebSession {
         let hu = h as usize;
         let cwu = (wu + 1) / 2;
         let chu = (hu + 1) / 2;
+        let y_len = wu * hu;
+        let c_len = cwu * chu;
+        let total_yuv = y_len + c_len * 2;
 
-        // Zero-conversion GPU planar YUV420P fast path (3.1 MB at 1080p vs 8.3 MB RGBA, zero CPU color matrix math!).
         if fmt == PixelFormat::Yuv420P && vf.planes.len() >= 3 {
-            let y_len = wu * hu;
-            let c_len = cwu * chu;
-            let mut packed = Vec::with_capacity(y_len + c_len * 2);
-            let p0 = &vf.planes[0];
-            if p0.stride == wu && p0.data.len() >= y_len {
-                packed.extend_from_slice(&p0.data[..y_len]);
-            } else {
-                for r in 0..hu {
-                    let s = r * p0.stride;
-                    if s + wu <= p0.data.len() {
-                        packed.extend_from_slice(&p0.data[s..s + wu]);
-                    }
-                }
-            }
-            for plane in [&vf.planes[1], &vf.planes[2]] {
-                if plane.stride == cwu && plane.data.len() >= c_len {
-                    packed.extend_from_slice(&plane.data[..c_len]);
-                } else {
-                    for r in 0..chu {
-                        let s = r * plane.stride;
-                        if s + cwu <= plane.data.len() {
-                            packed.extend_from_slice(&plane.data[s..s + cwu]);
-                        }
-                    }
-                }
-            }
-            if packed.len() == y_len + c_len * 2 {
+            let mut packed = self.take_pooled_buf(total_yuv);
+            if pack_plane_8(&vf.planes[0], wu, hu, &mut packed)
+                && pack_plane_8(&vf.planes[1], cwu, chu, &mut packed)
+                && pack_plane_8(&vf.planes[2], cwu, chu, &mut packed)
+                && packed.len() == total_yuv
+            {
                 self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
                 return;
             }
+            self.recycle_buf(packed);
         } else if fmt == PixelFormat::Yuv420P10Le && vf.planes.len() >= 3 {
-            let y_len = wu * hu;
-            let c_len = cwu * chu;
-            let mut packed = Vec::with_capacity(y_len + c_len * 2);
-            let pack_10 = |plane: &oxideav_core::VideoPlane, cols: usize, rows: usize, dst: &mut Vec<u8>| {
-                let row_bytes = cols * 2;
-                for r in 0..rows {
-                    let s = r * plane.stride;
-                    if s + row_bytes <= plane.data.len() {
-                        for px in plane.data[s..s + row_bytes].chunks_exact(2) {
-                            dst.push((u16::from_le_bytes([px[0], px[1]]) >> 2).min(255) as u8);
-                        }
-                    }
-                }
-            };
-            pack_10(&vf.planes[0], wu, hu, &mut packed);
-            pack_10(&vf.planes[1], cwu, chu, &mut packed);
-            pack_10(&vf.planes[2], cwu, chu, &mut packed);
-            if packed.len() == y_len + c_len * 2 {
+            let mut packed = self.take_pooled_buf(total_yuv);
+            pack_plane_10_to_8(&vf.planes[0], wu, hu, &mut packed);
+            pack_plane_10_to_8(&vf.planes[1], cwu, chu, &mut packed);
+            pack_plane_10_to_8(&vf.planes[2], cwu, chu, &mut packed);
+            if packed.len() == total_yuv {
                 self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
                 return;
             }
+            self.recycle_buf(packed);
+        } else if fmt == PixelFormat::Yuv422P && vf.planes.len() >= 3 {
+            let mut packed = self.take_pooled_buf(total_yuv);
+            if pack_plane_8(&vf.planes[0], wu, hu, &mut packed)
+                && subsample_422_chroma(&vf.planes[1], cwu, hu, chu, &mut packed)
+                && subsample_422_chroma(&vf.planes[2], cwu, hu, chu, &mut packed)
+                && packed.len() == total_yuv
+            {
+                self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
+                return;
+            }
+            self.recycle_buf(packed);
+        } else if fmt == PixelFormat::Yuv444P && vf.planes.len() >= 3 {
+            let mut packed = self.take_pooled_buf(total_yuv);
+            if pack_plane_8(&vf.planes[0], wu, hu, &mut packed)
+                && subsample_444_chroma(&vf.planes[1], wu, hu, cwu, chu, &mut packed)
+                && subsample_444_chroma(&vf.planes[2], wu, hu, cwu, chu, &mut packed)
+                && packed.len() == total_yuv
+            {
+                self.out_queue.push_back(OutItem::VideoYuv420 { data: packed, pts, w, h });
+                return;
+            }
+            self.recycle_buf(packed);
         }
 
         let info = FrameInfo::new(fmt, w, h);
@@ -1073,46 +1882,27 @@ impl WebSession {
             && let Some(plane) = rgba_frame.planes.first()
         {
             let row_bytes = wu * 4;
-            let stride = plane.stride;
-            let mut tight = Vec::with_capacity(row_bytes * hu);
-            if stride == row_bytes && plane.data.len() >= row_bytes * hu {
-                tight.extend_from_slice(&plane.data[..row_bytes * hu]);
-            } else {
-                for y in 0..hu {
-                    let s = y * stride;
-                    if s + row_bytes <= plane.data.len() {
-                        tight.extend_from_slice(&plane.data[s..s + row_bytes]);
-                    }
-                }
-            }
-            if tight.len() == row_bytes * hu {
+            let mut tight = self.take_pooled_buf(row_bytes * hu);
+            if pack_plane_8(plane, row_bytes, hu, &mut tight) && tight.len() == row_bytes * hu {
                 self.out_queue.push_back(OutItem::VideoRgba { data: tight, pts, w, h });
+            } else {
+                self.recycle_buf(tight);
             }
         }
     }
 
     fn handle_video_packet(&mut self, pkt: Packet) {
-        let Some(vi) = self.video_idx else { return };
-        let Some(tb) = self.stream_info(vi).map(|s| s.time_base) else { return };
-        let Some(default_w) = self.stream_info(vi).map(|s| s.params.width.unwrap_or(0)) else { return };
-        let Some(default_h) = self.stream_info(vi).map(|s| s.params.height.unwrap_or(0)) else { return };
-        let Some(default_pf) = self
-            .stream_info(vi)
-            .map(|s| s.params.pixel_format.unwrap_or(PixelFormat::Yuv420P))
-        else {
-            return;
-        };
-        let frame_dur = self
-            .stream_info(vi)
-            .and_then(|s| s.params.frame_rate)
-            .filter(|r| r.num > 0 && r.den > 0)
-            .map(|r| (r.den as f64) / (r.num as f64))
-            .filter(|&d| d > 0.004 && d < 0.2)
-            .or_else(|| tb.is_valid().then(|| tb.seconds_of(1)).filter(|&d| d > 0.004 && d < 0.2))
-            .unwrap_or(1.0 / 24.0);
+        let Some(vm) = self.video_meta.clone() else { return };
+        let tb = vm.time_base;
 
-        if self.use_mse {
-            let Some(cfg) = self.mse_cfg.clone() else { return };
+        if self.video_mode == VideoOutputMode::Mse {
+            let Some((framing, kind, frame_ticks_90k)) = self
+                .mse_cfg
+                .as_ref()
+                .map(|c| (c.framing, c.kind, c.frame_ticks_90k))
+            else {
+                return;
+            };
             let raw_ticks = pkt.pts.or(pkt.dts).unwrap_or(0);
             let pts_secs = if tb.is_valid() { tb.seconds_of(raw_ticks).max(0.0) } else { 0.0 };
             let pts_90k = (pts_secs * f64::from(VIDEO_TIMESCALE)).round() as i64;
@@ -1125,7 +1915,7 @@ impl WebSession {
                 self.mse_started = true;
                 self.mse_min_dts = pts_90k;
             }
-            let data_4byte = to_4byte_nals(&pkt.data, cfg.framing, cfg.kind);
+            let data_4byte = to_fmp4_sample_bytes(pkt.data, framing, kind);
             if !data_4byte.is_empty() {
                 self.mse_gop.push(GopPacket {
                     pts_90k,
@@ -1141,7 +1931,7 @@ impl WebSession {
                     self.mse_seq,
                     &chunk,
                     &self.mse_gop,
-                    cfg.frame_ticks_90k,
+                    frame_ticks_90k,
                     &mut self.mse_min_dts,
                 ) {
                     self.out_queue.push_back(OutItem::MseSegment { data: seg, start, end });
@@ -1150,14 +1940,67 @@ impl WebSession {
             return;
         }
 
+        if self.video_mode == VideoOutputMode::WebCodecs {
+            let raw_ticks = pkt.pts.or(pkt.dts).unwrap_or(0);
+            let pts_secs = if tb.is_valid() { tb.seconds_of(raw_ticks).max(0.0) } else { self.video_next_pts };
+            let is_sync = pkt.flags.keyframe;
+            if !self.mse_started {
+                if !is_sync {
+                    return;
+                }
+                self.mse_started = true;
+            }
+            self.video_next_pts = pts_secs + vm.frame_dur;
+            let payload = if let Some(cfg) = self.mse_cfg.as_ref() {
+                to_fmp4_sample_bytes(pkt.data, cfg.framing, cfg.kind)
+            } else {
+                pkt.data
+            };
+            if !payload.is_empty() {
+                self.out_queue.push_back(OutItem::VideoPacket {
+                    data: payload,
+                    pts: pts_secs,
+                    dur: vm.frame_dur,
+                    keyframe: is_sync,
+                });
+            }
+            return;
+        }
+
+        let mut pkt_pts_secs = pkt
+            .pts
+            .or(pkt.dts)
+            .filter(|_| tb.is_valid())
+            .map(|t| tb.seconds_of(t).max(0.0));
+
+        // Pre-decode recovery: skip whole GOPs on >1.5s starvation, or skip disposable non-reference H.264 B-frames before decoding.
+        if self.drop_until_keyframe {
+            if !pkt.flags.keyframe {
+                return;
+            }
+            self.drop_until_keyframe = false;
+            if let Some(dec) = self.video_dec.as_mut() {
+                let _ = catch_unwind(AssertUnwindSafe(|| dec.flush()));
+            }
+        } else if let Some(est) = pkt_pts_secs {
+            if self.client_clock > 0.5 && est + 1.50 < self.client_clock && !pkt.flags.keyframe {
+                self.drop_until_keyframe = true;
+                return;
+            }
+            let drop_b = (self.client_clock > 0.25 && est + 0.090 < self.client_clock)
+                || self.seek_target.is_some_and(|t| est + 0.040 < t);
+            if drop_b
+                && vm.codec_kind == VideoCodecKind::H264
+                && !pkt.flags.keyframe
+                && is_droppable_h264_nonref(&pkt.data, vm.h264_framing)
+            {
+                return;
+            }
+        }
+
         let mut decoded_frames = Vec::new();
         let is_avi = self.container == "avi";
         if let Some(dec) = self.video_dec.as_mut() {
-            let mut pkt_pts_secs = pkt
-                .pts
-                .or(pkt.dts)
-                .filter(|_| tb.is_valid())
-                .map(|t| tb.seconds_of(t).max(0.0));
             if catch_unwind(AssertUnwindSafe(|| dec.send_packet(&pkt))).is_err() {
                 return;
             }
@@ -1168,8 +2011,8 @@ impl WebSession {
                     Ok(Ok(_)) => continue,
                     _ => break,
                 };
-                let (w, h) = dec.output_video_dimensions().unwrap_or((default_w, default_h));
-                let fmt = dec.output_pixel_format().unwrap_or(default_pf);
+                let (w, h) = dec.output_video_dimensions().unwrap_or((vm.width, vm.height));
+                let fmt = dec.output_pixel_format().unwrap_or(vm.pixel_format);
                 if w == 0 || h == 0 || w > 8192 || h > 8192 {
                     continue;
                 }
@@ -1179,7 +2022,6 @@ impl WebSession {
                     self.video_seeded = true;
                 }
                 let pts_secs = if is_avi {
-                    // Anchor AVI directly to container packet timestamps when advancing so 23.976/29.97fps never drifts.
                     match seed_pkt {
                         Some(p) if p + 0.005 >= self.video_next_pts && p <= self.video_next_pts + 0.25 => p,
                         _ => self.video_next_pts,
@@ -1192,7 +2034,7 @@ impl WebSession {
                         .or_else(|| seed_pkt.filter(|&s| (s - self.video_next_pts).abs() < 0.5))
                         .unwrap_or(self.video_next_pts)
                 };
-                self.video_next_pts = pts_secs + frame_dur;
+                self.video_next_pts = pts_secs + vm.frame_dur;
                 decoded_frames.push((vf, pts_secs, w, h, fmt));
             }
         }
@@ -1202,43 +2044,43 @@ impl WebSession {
     }
 
     fn handle_audio_packet(&mut self, pkt: Packet) {
-        let Some(ai) = self.audio_idx else { return };
-        let Some(stream) = self.stream_info(ai).cloned() else { return };
         let Some(dec) = self.audio_dec.as_mut() else { return };
+        let Some(am) = self.audio_meta.as_ref() else { return };
+        let tb = am.time_base;
         let mut pkt_pts = pkt.pts.or(pkt.dts);
         if catch_unwind(AssertUnwindSafe(|| dec.send_packet(&pkt))).is_err() {
             return;
         }
+        let mut raw_frames = Vec::new();
         loop {
             let recv = catch_unwind(AssertUnwindSafe(|| dec.receive_frame()));
-            let af = match recv {
-                Ok(Ok(Frame::Audio(af))) => af,
+            match recv {
+                Ok(Ok(Frame::Audio(af))) => {
+                    if af.samples > 0 {
+                        let out_fmt = dec.output_audio_format();
+                        raw_frames.push((af, out_fmt));
+                    }
+                }
                 Ok(Ok(_)) => continue,
                 _ => break,
-            };
-            if af.samples == 0 {
-                continue;
             }
-            let af_layout = audio_trim::frame_layout(dec.output_audio_format(), &stream.params, &af);
-            let (format, rate, channels) = (
-                af_layout.sample_format,
-                af_layout.sample_rate.max(8000),
-                (af_layout.channels as usize).max(1),
-            );
-            let raw_pcm = convert_audio_to_f32(&af, format, channels);
-            let frames = raw_pcm.len() / channels;
-            if frames == 0 {
-                continue;
-            }
+        }
+        for (af, out_fmt) in raw_frames {
+            let Some(am) = self.audio_meta.as_ref() else { break };
+            let af_layout = audio_trim::frame_layout(out_fmt, &am.params, &af);
+            let format = af_layout.sample_format;
+            let rate = af_layout.sample_rate.max(8000);
+            let channels = (af_layout.channels as usize).clamp(1, 64);
+            let frames = af.samples as usize;
+
             let pkt_secs = af
                 .pts
                 .or(pkt_pts.take())
-                .filter(|_| stream.time_base.is_valid())
-                .map(|t| stream.time_base.seconds_of(t).max(0.0));
+                .filter(|_| tb.is_valid())
+                .map(|t| tb.seconds_of(t).max(0.0));
             let pts_secs = match (self.audio_next_pts, pkt_secs) {
                 (None, Some(s)) => s,
                 (None, None) => self.seek_target.unwrap_or(0.0),
-                // Align within 40ms (GStreamer/peartube-media AUDIO_ALIGN_SECS) for sample-exact continuity; snap on real discontinuities.
                 (Some(next), Some(s)) if (s - next).abs() > 0.040 && (s - next).abs() < 30.0 => s,
                 (Some(next), _) => next,
             };
@@ -1248,62 +2090,36 @@ impl WebSession {
             {
                 continue;
             }
-            let chan_layout = stream
+            let chan_layout = am
                 .params
                 .resolved_layout()
                 .filter(|l| usize::from(l.channel_count()) == channels)
                 .unwrap_or_else(|| ChannelLayout::from_count(channels as u16));
-            let need_new_mix = self
-                .audio_mix
-                .as_ref()
-                .is_none_or(|(prev, _)| *prev != chan_layout);
-            if need_new_mix {
-                self.audio_mix = Some((chan_layout, StereoMix::new(chan_layout)));
-            }
-            let stereo = self.audio_mix.as_ref().unwrap().1.mix(&raw_pcm);
-            let stereo_frames = (stereo.len() / 2) as u32;
-            if self.audio_accum_frames > 0 && self.audio_accum_rate != rate
-                && let Some(pts) = self.audio_accum_pts.take()
-            {
-                self.out_queue.push_back(OutItem::AudioF32 {
-                    data: std::mem::take(&mut self.audio_accum),
-                    pts,
-                    rate: self.audio_accum_rate,
-                    frames: self.audio_accum_frames,
-                });
-                self.audio_accum_frames = 0;
+
+            if !self.audio_left.is_empty() && self.audio_accum_rate != rate {
+                self.flush_audio_accum();
             }
             if self.audio_accum_pts.is_none() {
                 self.audio_accum_pts = Some(pts_secs);
                 self.audio_accum_rate = rate;
             }
-            self.audio_accum.reserve(stereo.len() * 4);
-            for sample in stereo {
-                self.audio_accum.extend_from_slice(&sample.to_le_bytes());
+            if self.audio_mix.as_ref().is_none_or(|(prev, _)| *prev != chan_layout) {
+                self.audio_mix = Some((chan_layout, StereoMix::new(chan_layout)));
             }
-            self.audio_accum_frames += stereo_frames;
-            let flush_thresh = if self.audio_first_flushed { 4096 } else { 1024 };
-            if self.audio_accum_frames >= flush_thresh
-                && let Some(pts) = self.audio_accum_pts.take()
-            {
+            let (_, mixer) = self.audio_mix.as_ref().unwrap();
+            mixer.append_frame_planar(&af, format, &mut self.audio_left, &mut self.audio_right);
+
+            let flush_thresh = if self.audio_first_flushed { 8192 } else { 1024 };
+            if self.audio_left.len() >= flush_thresh {
                 self.audio_first_flushed = true;
-                self.out_queue.push_back(OutItem::AudioF32 {
-                    data: std::mem::take(&mut self.audio_accum),
-                    pts,
-                    rate: self.audio_accum_rate,
-                    frames: self.audio_accum_frames,
-                });
-                self.audio_accum_frames = 0;
+                self.flush_audio_accum();
             }
         }
     }
 
     fn handle_sub_packet(&mut self, pkt: Packet) {
-        let Some(si) = self.sub_idx else { return };
-        let Some(tb) = self.stream_info(si).map(|s| s.time_base) else { return };
-        let Some(codec_id) = self.stream_info(si).map(|s| s.params.codec_id.as_str().to_string()) else {
-            return;
-        };
+        let Some((tb, ref codec_id_owned)) = self.sub_meta else { return };
+        let codec_id = codec_id_owned.clone();
         let pkt_start = pkt
             .pts
             .or(pkt.dts)
@@ -1314,8 +2130,9 @@ impl WebSession {
             .filter(|&d| d > 0)
             .map(|d| if tb.is_valid() { tb.seconds_of(d).max(0.0) } else { 0.0 });
 
-        // ASS/SSA Dialogue packets in MKV hold clean event text after the 8th comma (`ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`).
-        if matches!(codec_id.as_str(), "ass" | "ssa") && let Ok(raw) = std::str::from_utf8(&pkt.data) {
+        if matches!(codec_id.as_str(), "ass" | "ssa")
+            && let Ok(raw) = std::str::from_utf8(&pkt.data)
+        {
             let text_part = if raw.starts_with("Dialogue:") {
                 raw.splitn(10, ',').nth(9).unwrap_or(raw)
             } else {
@@ -1380,34 +2197,32 @@ impl WebSession {
         }
         self.flushed_eof = true;
         self.flush_audio_accum();
-        if self.use_mse {
-            if !self.mse_gop.is_empty() && let Some(cfg) = self.mse_cfg.clone() {
+        if self.video_mode == VideoOutputMode::Mse {
+            if !self.mse_gop.is_empty()
+                && let Some(frame_ticks_90k) = self.mse_cfg.as_ref().map(|c| c.frame_ticks_90k)
+            {
                 self.mse_seq = self.mse_seq.wrapping_add(1);
                 let gop = std::mem::take(&mut self.mse_gop);
                 if let Some((seg, start, end)) =
-                    build_fmp4_segment(self.mse_seq, &gop, &[], cfg.frame_ticks_90k, &mut self.mse_min_dts)
+                    build_fmp4_segment(self.mse_seq, &gop, &[], frame_ticks_90k, &mut self.mse_min_dts)
                 {
                     self.out_queue.push_back(OutItem::MseSegment { data: seg, start, end });
                 }
             }
-        } else {
-            let vinfo = self.video_idx.and_then(|vi| self.stream_info(vi).cloned());
+        } else if self.video_mode == VideoOutputMode::Software {
+            let vm = self.video_meta.clone();
             let mut tail_frames = Vec::new();
-            if let (Some(dec), Some(s)) = (self.video_dec.as_mut(), vinfo) {
+            if let (Some(dec), Some(vm)) = (self.video_dec.as_mut(), vm) {
                 let _ = catch_unwind(AssertUnwindSafe(|| dec.flush()));
                 loop {
                     let Ok(Ok(Frame::Video(vf))) = catch_unwind(AssertUnwindSafe(|| dec.receive_frame()))
                     else {
                         break;
                     };
-                    let (w, h) = dec
-                        .output_video_dimensions()
-                        .unwrap_or((s.params.width.unwrap_or(0), s.params.height.unwrap_or(0)));
-                    let fmt = dec
-                        .output_pixel_format()
-                        .unwrap_or(s.params.pixel_format.unwrap_or(PixelFormat::Yuv420P));
+                    let (w, h) = dec.output_video_dimensions().unwrap_or((vm.width, vm.height));
+                    let fmt = dec.output_pixel_format().unwrap_or(vm.pixel_format);
                     let pts = self.video_next_pts;
-                    self.video_next_pts = pts + 0.04;
+                    self.video_next_pts = pts + vm.frame_dur;
                     tail_frames.push((vf, pts, w, h, fmt));
                 }
             }
@@ -1612,7 +2427,7 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             })
             .unwrap_or(0.0);
 
-        // Peek ahead up to 128 packets only if needed to grab Annex B SPS/PPS from the first keyframe, keeping every packet.
+        // Peek up to 128 packets when extradata lacks Annex-B SPS/PPS, raw AV1 OBUs, or VP9 profile bits.
         let mut peek_packets = VecDeque::new();
         let mut mse_cfg = first_video
             .and_then(|vi| streams.iter().find(|s| s.index == vi))
@@ -1620,7 +2435,7 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
         if mse_cfg.is_none()
             && let Some(vi) = first_video
             && let Some(vs) = streams.iter().find(|s| s.index == vi).cloned()
-            && matches!(vs.params.codec_id.as_str(), "h264" | "h265" | "hevc")
+            && matches!(vs.params.codec_id.as_str(), "h264" | "h265" | "hevc" | "av1" | "vp9")
         {
             for _ in 0..128 {
                 let Ok(Ok(pkt)) = catch_unwind(AssertUnwindSafe(|| demuxer.next_packet())) else {
@@ -1635,6 +2450,10 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             }
         }
 
+        let webcodecs_hint = first_video
+            .and_then(|vi| streams.iter().find(|s| s.index == vi))
+            .and_then(|vs| build_webcodecs_hint(vs, mse_cfg.as_ref()));
+
         let (width, height) = first_video
             .and_then(|vi| streams.iter().find(|s| s.index == vi))
             .map(|s| (s.params.width.unwrap_or(0), s.params.height.unwrap_or(0)))
@@ -1646,6 +2465,7 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             "width": mse_cfg.as_ref().map_or(width, |c| c.width),
             "height": mse_cfg.as_ref().map_or(height, |c| c.height),
             "mseCodec": mse_cfg.as_ref().map(|c| c.codec_string.as_str()),
+            "webCodecs": webcodecs_hint,
             "tracks": tracks_json,
             "defaultVideo": first_video,
             "defaultAudio": first_audio,
@@ -1660,22 +2480,27 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             mse_cfg,
             peek_packets,
             out_queue: VecDeque::new(),
+            frame_pool: Vec::with_capacity(6),
             video_idx: first_video,
             audio_idx: first_audio,
             sub_idx: None,
-            use_mse: false,
+            video_mode: VideoOutputMode::Software,
+            video_meta: None,
+            audio_meta: None,
+            sub_meta: None,
             video_dec: None,
             audio_dec: None,
             sub_dec: None,
             audio_mix: None,
             audio_next_pts: None,
-            audio_accum: Vec::with_capacity(4096 * 8),
+            audio_left: Vec::with_capacity(8192 + 2048),
+            audio_right: Vec::with_capacity(8192 + 2048),
             audio_accum_pts: None,
             audio_accum_rate: 0,
-            audio_accum_frames: 0,
             audio_first_flushed: false,
             video_next_pts: 0.0,
             video_seeded: false,
+            drop_until_keyframe: false,
             client_clock: 0.0,
             mse_gop: Vec::new(),
             mse_seq: 0,
@@ -1699,7 +2524,11 @@ pub extern "C" fn pt_configure(video_stream: i32, audio_stream: i32, sub_stream:
         sess.video_idx = (video_stream >= 0).then_some(video_stream as u32);
         sess.audio_idx = (audio_stream >= 0).then_some(audio_stream as u32);
         sess.sub_idx = (sub_stream >= 0).then_some(sub_stream as u32);
-        sess.use_mse = use_mse != 0 && sess.mse_cfg.is_some();
+        sess.video_mode = match use_mse {
+            1 if sess.mse_cfg.is_some() => VideoOutputMode::Mse,
+            2 => VideoOutputMode::WebCodecs,
+            _ => VideoOutputMode::Software,
+        };
         sess.out_queue.clear();
         sess.streaming_io.store(true, Ordering::Relaxed);
 
@@ -1716,7 +2545,7 @@ pub extern "C" fn pt_configure(video_stream: i32, audio_stream: i32, sub_stream:
         sess.demuxer.set_active_streams(&active);
         sess.rebuild_decoders();
 
-        if sess.use_mse
+        if sess.video_mode == VideoOutputMode::Mse
             && let Some(cfg) = sess.mse_cfg.as_ref()
         {
             sess.out_queue.push_back(OutItem::MseInit(build_fmp4_init(cfg)));
@@ -1749,11 +2578,10 @@ pub extern "C" fn pt_seek(target_secs: f64) -> i32 {
 
         let res = catch_unwind(AssertUnwindSafe(|| sess.demuxer.seek_to(seek_stream, ticks)));
         if let Err(_) | Ok(Err(_)) = res {
-            // Best-effort rewind fallback if container lacks index
             let _ = catch_unwind(AssertUnwindSafe(|| sess.demuxer.seek_to(seek_stream, 0)));
         }
         sess.rebuild_decoders();
-        if sess.use_mse
+        if sess.video_mode == VideoOutputMode::Mse
             && let Some(cfg) = sess.mse_cfg.as_ref()
         {
             sess.out_queue.push_back(OutItem::MseInit(build_fmp4_init(cfg)));
@@ -1775,10 +2603,13 @@ pub extern "C" fn pt_set_clock(clock_secs: f64) {
 pub extern "C" fn pt_step() -> i32 {
     STATE.with(|cell| {
         let mut st = cell.borrow_mut();
+        let prev_out = std::mem::take(&mut st.out_buf);
         let code = {
             let Some(sess) = st.session.as_mut() else {
                 return set_json_error(&mut st, "No open session");
             };
+            sess.recycle_buf(prev_out);
+
             let mut safety = 0usize;
             while sess.out_queue.is_empty() && safety < 4096 {
                 safety += 1;
@@ -1842,7 +2673,14 @@ pub extern "C" fn pt_step() -> i32 {
                     st.out_h = h;
                     7
                 }
-                Some(OutItem::AudioF32 { data, pts, rate, frames }) => {
+                Some(OutItem::VideoPacket { data, pts, dur, keyframe }) => {
+                    st.out_buf = data;
+                    st.out_pts = pts;
+                    st.out_dur = dur;
+                    st.out_w = u32::from(keyframe);
+                    8
+                }
+                Some(OutItem::AudioPlanarF32 { data, pts, rate, frames }) => {
                     st.out_buf = data;
                     st.out_pts = pts;
                     st.out_rate = rate;

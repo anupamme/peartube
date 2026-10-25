@@ -133,6 +133,20 @@ if (!dhtPort && env.PEARTUBE_PRIVATE_RELAY) {
   }
 }
 
+const replicateOpt = env.PEARTUBE_REPLICATE
+  ? (env.PEARTUBE_REPLICATE === '1' || env.PEARTUBE_REPLICATE === 'true'
+      ? true
+      : env.PEARTUBE_REPLICATE.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
+  : false
+let replicateDebounce = null
+function scheduleReplicate () {
+  if (!replicateOpt || shuttingDown || replicateDebounce) return
+  replicateDebounce = setTimeout(() => {
+    replicateDebounce = null
+    if (!shuttingDown) state.mirror?.run('p2p-replicate').catch(() => {})
+  }, 2000)
+  replicateDebounce.unref?.()
+}
 const node = await createNode({
   storage,
   tracker: env.PEARTUBE_TRACKER || null,
@@ -146,7 +160,10 @@ const node = await createNode({
   privateRelay: env.PEARTUBE_PRIVATE_RELAY_PORT ? Number(env.PEARTUBE_PRIVATE_RELAY_PORT) : Boolean(env.PEARTUBE_PRIVATE_RELAY),
   relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
   lan: env.PEARTUBE_LAN_HOST ? keyPair => createLan({ host: env.PEARTUBE_LAN_HOST, keyPair }) : null,
-  onchange: () => api.notify('update')
+  onchange: () => {
+    api.notify('update')
+    scheduleReplicate()
+  }
 })
 state.node = node
 if (isDirectory) await syncDirectory(node.listSources())
@@ -159,6 +176,8 @@ state.mirror = await createMirrorHost({
   mirrorChannel,
   watchDir: env.PEARTUBE_WATCH_DIR || null,
   feeds: env.PEARTUBE_MIRROR_FEEDS ? env.PEARTUBE_MIRROR_FEEDS.split(',').map(s => s.trim()).filter(Boolean) : [],
+  replicate: replicateOpt,
+  replicateMinFreeBytes: Math.max(0, Number(env.PEARTUBE_REPLICATE_FREE_GB ?? 20)) * 1024 * 1024 * 1024,
   pluginsDir: env.PEARTUBE_PLUGINS_DIR || join(storage, 'plugins'),
   onchange: () => api.notify('update')
 })
