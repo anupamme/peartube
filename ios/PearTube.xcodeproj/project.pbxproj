@@ -1,0 +1,577 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0B522A22E564B3F24E58EDC9 /* NativePlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE630C60C7D0BE89C70C3CA9 /* NativePlayer.swift */; };
+		27074CB4A400D78EA7EAB627 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4A17A54BEF06AD8A74C2193 /* AppModel.swift */; };
+		34FCEA318F6D31C54AF09B14 /* Worker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B785159FD2F01F89A06C325 /* Worker.swift */; };
+		43040C3CD1696E0E04CDB374 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2819498E04189DE028CFDEBA /* Models.swift */; };
+		514D8502803EDC5BF84BBE70 /* PlayerScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = D169D9DC7C20208A72DEC729 /* PlayerScreen.swift */; };
+		5FF876E637774FB382C04A04 /* CastScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4857A864DAC2831EC6814560 /* CastScreen.swift */; };
+		6307F6EB476C9997D3D69F28 /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12739CFFE5A96DF56DD4CABA /* SettingsScreen.swift */; };
+		7697EF2095410E4EF09D22F5 /* LibraryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B9A628BC8CD14A5C6927275 /* LibraryScreen.swift */; };
+		821C4A891261A36BE749F134 /* PearTubeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E6D71617B610AF449664AC /* PearTubeApp.swift */; };
+		8B47852652882D74AAF2C86D /* fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 9E7F9E3CED967151BD96E5B9 /* fixture.json */; };
+		96E31373BBFD672AD23B5513 /* ParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1229757358D33156CBE95036 /* ParityTests.swift */; };
+		A96DCCB47FE96CA902AD0C41 /* QRCode.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA794DF05DA630E07BD6E746 /* QRCode.swift */; };
+		F310B67A309312AF626D7E76 /* Bonjour.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CADB987189272EBD0B66D6B /* Bonjour.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		EF4826C14C5905458B0B6F42 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 8F776531134BC2EADBA794C1 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D56D825CA68635ACD5C16ADD;
+			remoteInfo = PearTube;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		1229757358D33156CBE95036 /* ParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParityTests.swift; sourceTree = "<group>"; };
+		12739CFFE5A96DF56DD4CABA /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
+		1CADB987189272EBD0B66D6B /* Bonjour.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bonjour.swift; sourceTree = "<group>"; };
+		2819498E04189DE028CFDEBA /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		3716ED4FBC67F1A0D2FFC3B9 /* PearTube-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "PearTube-Bridging-Header.h"; sourceTree = "<group>"; };
+		4857A864DAC2831EC6814560 /* CastScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastScreen.swift; sourceTree = "<group>"; };
+		4B9A628BC8CD14A5C6927275 /* LibraryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryScreen.swift; sourceTree = "<group>"; };
+		6B785159FD2F01F89A06C325 /* Worker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Worker.swift; sourceTree = "<group>"; };
+		94E6D71617B610AF449664AC /* PearTubeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PearTubeApp.swift; sourceTree = "<group>"; };
+		9DB09FF22D2272D8328B6694 /* PearTubeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PearTubeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9E7F9E3CED967151BD96E5B9 /* fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = fixture.json; sourceTree = "<group>"; };
+		A8B51B81E7C4A61511DDCF7C /* PearTube.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PearTube.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CA794DF05DA630E07BD6E746 /* QRCode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCode.swift; sourceTree = "<group>"; };
+		D169D9DC7C20208A72DEC729 /* PlayerScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerScreen.swift; sourceTree = "<group>"; };
+		D4A17A54BEF06AD8A74C2193 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		EE630C60C7D0BE89C70C3CA9 /* NativePlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePlayer.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		12547AA51447B2FBE1604210 /* Runtime */ = {
+			isa = PBXGroup;
+			children = (
+				1CADB987189272EBD0B66D6B /* Bonjour.swift */,
+				3716ED4FBC67F1A0D2FFC3B9 /* PearTube-Bridging-Header.h */,
+				6B785159FD2F01F89A06C325 /* Worker.swift */,
+			);
+			path = Runtime;
+			sourceTree = "<group>";
+		};
+		1BC790C69E73276D17D957BD /* App */ = {
+			isa = PBXGroup;
+			children = (
+				D4A17A54BEF06AD8A74C2193 /* AppModel.swift */,
+				4857A864DAC2831EC6814560 /* CastScreen.swift */,
+				4B9A628BC8CD14A5C6927275 /* LibraryScreen.swift */,
+				2819498E04189DE028CFDEBA /* Models.swift */,
+				EE630C60C7D0BE89C70C3CA9 /* NativePlayer.swift */,
+				94E6D71617B610AF449664AC /* PearTubeApp.swift */,
+				D169D9DC7C20208A72DEC729 /* PlayerScreen.swift */,
+				CA794DF05DA630E07BD6E746 /* QRCode.swift */,
+				12739CFFE5A96DF56DD4CABA /* SettingsScreen.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		339D7E5F165F545289057D49 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A8B51B81E7C4A61511DDCF7C /* PearTube.app */,
+				9DB09FF22D2272D8328B6694 /* PearTubeUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		4711163FE2FBA3DF32F032C4 /* UITests */ = {
+			isa = PBXGroup;
+			children = (
+				1229757358D33156CBE95036 /* ParityTests.swift */,
+			);
+			path = UITests;
+			sourceTree = "<group>";
+		};
+		AB899F1BE9D0103289105E51 /* peartube-ios-e2e-YqVrTc */ = {
+			isa = PBXGroup;
+			children = (
+				9E7F9E3CED967151BD96E5B9 /* fixture.json */,
+			);
+			name = "peartube-ios-e2e-YqVrTc";
+			path = "../../../../../var/folders/1y/hd_twrb12g708y80z4y73jv80000gn/T/peartube-ios-e2e-YqVrTc";
+			sourceTree = "<group>";
+		};
+		E2283F428B4A0E429298BFCD = {
+			isa = PBXGroup;
+			children = (
+				1BC790C69E73276D17D957BD /* App */,
+				AB899F1BE9D0103289105E51 /* peartube-ios-e2e-YqVrTc */,
+				12547AA51447B2FBE1604210 /* Runtime */,
+				4711163FE2FBA3DF32F032C4 /* UITests */,
+				339D7E5F165F545289057D49 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		3880DF3DF2171E208785922F /* PearTubeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 40B1751DC0A4AEE297A374A4 /* Build configuration list for PBXNativeTarget "PearTubeUITests" */;
+			buildPhases = (
+				2031936A175D8825214CC844 /* Sources */,
+				7A99D0AFFA3894F805714964 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E3A6BF86BB979920DC44338A /* PBXTargetDependency */,
+			);
+			name = PearTubeUITests;
+			packageProductDependencies = (
+			);
+			productName = PearTubeUITests;
+			productReference = 9DB09FF22D2272D8328B6694 /* PearTubeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		D56D825CA68635ACD5C16ADD /* PearTube */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CF8D176A240D076364BA82C7 /* Build configuration list for PBXNativeTarget "PearTube" */;
+			buildPhases = (
+				A67644388DACB87916E9A8F3 /* Prepare shared P2P runtime and Rust player */,
+				CA0668709C47D5B9BE582C4C /* Sources */,
+				4DEF0C480BE83039AA1D2DC5 /* Embed worklet and native addons */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = PearTube;
+			packageProductDependencies = (
+			);
+			productName = PearTube;
+			productReference = A8B51B81E7C4A61511DDCF7C /* PearTube.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8F776531134BC2EADBA794C1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					3880DF3DF2171E208785922F = {
+						ProvisioningStyle = Automatic;
+						TestTargetID = D56D825CA68635ACD5C16ADD;
+					};
+					D56D825CA68635ACD5C16ADD = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = F9488DCB0D99C6676223B5D1 /* Build configuration list for PBXProject "PearTube" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = E2283F428B4A0E429298BFCD;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 339D7E5F165F545289057D49 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D56D825CA68635ACD5C16ADD /* PearTube */,
+				3880DF3DF2171E208785922F /* PearTubeUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		7A99D0AFFA3894F805714964 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B47852652882D74AAF2C86D /* fixture.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4DEF0C480BE83039AA1D2DC5 /* Embed worklet and native addons */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed worklet and native addons";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nsh \"$SRCROOT/embed.sh\"";
+		};
+		A67644388DACB87916E9A8F3 /* Prepare shared P2P runtime and Rust player */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Prepare shared P2P runtime and Rust player";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nexport PATH=\"/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH\"\nnode \"$SRCROOT/prepare.mjs\" \"$PLATFORM_NAME\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		2031936A175D8825214CC844 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				96E31373BBFD672AD23B5513 /* ParityTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CA0668709C47D5B9BE582C4C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				27074CB4A400D78EA7EAB627 /* AppModel.swift in Sources */,
+				F310B67A309312AF626D7E76 /* Bonjour.swift in Sources */,
+				5FF876E637774FB382C04A04 /* CastScreen.swift in Sources */,
+				7697EF2095410E4EF09D22F5 /* LibraryScreen.swift in Sources */,
+				43040C3CD1696E0E04CDB374 /* Models.swift in Sources */,
+				0B522A22E564B3F24E58EDC9 /* NativePlayer.swift in Sources */,
+				821C4A891261A36BE749F134 /* PearTubeApp.swift in Sources */,
+				514D8502803EDC5BF84BBE70 /* PlayerScreen.swift in Sources */,
+				A96DCCB47FE96CA902AD0C41 /* QRCode.swift in Sources */,
+				6307F6EB476C9997D3D69F28 /* SettingsScreen.swift in Sources */,
+				34FCEA318F6D31C54AF09B14 /* Worker.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		E3A6BF86BB979920DC44338A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D56D825CA68635ACD5C16ADD /* PearTube */;
+			targetProxy = EF4826C14C5905458B0B6F42 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		49D3AB38BC59B03E747AD83A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 0.4.31;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.4.31;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.peartube.app.dev;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		6EC92F04862175AB38A52ABB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.peartube.app.dev.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = PearTube;
+			};
+			name = Debug;
+		};
+		761216D8199CCAAC0199325D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.peartube.app.dev.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = PearTube;
+			};
+			name = Release;
+		};
+		8B8163A0558078128EDA0590 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/$(PLATFORM_NAME)/Frameworks",
+				);
+				INFOPLIST_FILE = build/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/$(PLATFORM_NAME)",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework BareKit",
+					"-lpeartube_ios",
+					"-lc++",
+					"-liconv",
+					"-lz",
+					"-framework AVFoundation",
+					"-framework AudioToolbox",
+					"-framework CoreAudio",
+					"-framework CoreMedia",
+					"-framework CoreVideo",
+					"-framework QuartzCore",
+					"-framework CoreGraphics",
+					"-framework Foundation",
+					"-framework UIKit",
+					"-framework Security",
+					"-framework VideoToolbox",
+					"-framework SystemConfiguration",
+				);
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Runtime/PearTube-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		B8BD98FA18F8C37E593FC7F3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/$(PLATFORM_NAME)/Frameworks",
+				);
+				INFOPLIST_FILE = build/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/build/$(PLATFORM_NAME)",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-framework BareKit",
+					"-lpeartube_ios",
+					"-lc++",
+					"-liconv",
+					"-lz",
+					"-framework AVFoundation",
+					"-framework AudioToolbox",
+					"-framework CoreAudio",
+					"-framework CoreMedia",
+					"-framework CoreVideo",
+					"-framework QuartzCore",
+					"-framework CoreGraphics",
+					"-framework Foundation",
+					"-framework UIKit",
+					"-framework Security",
+					"-framework VideoToolbox",
+					"-framework SystemConfiguration",
+				);
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Runtime/PearTube-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		DB4C087DB00368BD0B9724DE /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 0.4.31;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.4.31;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.peartube.app.dev;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		40B1751DC0A4AEE297A374A4 /* Build configuration list for PBXNativeTarget "PearTubeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				6EC92F04862175AB38A52ABB /* Debug */,
+				761216D8199CCAAC0199325D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CF8D176A240D076364BA82C7 /* Build configuration list for PBXNativeTarget "PearTube" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B8BD98FA18F8C37E593FC7F3 /* Debug */,
+				8B8163A0558078128EDA0590 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		F9488DCB0D99C6676223B5D1 /* Build configuration list for PBXProject "PearTube" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DB4C087DB00368BD0B9724DE /* Debug */,
+				49D3AB38BC59B03E747AD83A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 8F776531134BC2EADBA794C1 /* Project object */;
+}

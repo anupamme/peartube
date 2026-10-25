@@ -5,6 +5,7 @@
 #
 # A target is an Android ABI (arm64-v8a, armeabi-v7a, x86_64, x86), giving
 # android/<abi>/libbare-kit.so, or darwin, giving darwin/BareKit.framework
+# iOS targets are ios-arm64 and ios-arm64-simulator (Xcode required).
 # for this Mac. By default it builds for what this machine can: darwin on a
 # Mac, and arm64-v8a if it finds the Android NDK.
 #
@@ -49,8 +50,8 @@ fi
 for target in "$@"; do
   case $target in
     arm64-v8a | armeabi-v7a | x86_64 | x86) ;;
-    darwin) [ "$(uname)" = Darwin ] || { echo "darwin builds only on a Mac" >&2; exit 1; } ;;
-    *) echo "Unknown target $target: an Android ABI or darwin" >&2; exit 1 ;;
+    darwin | ios-arm64 | ios-arm64-simulator) [ "$(uname)" = Darwin ] || { echo "$target builds only on a Mac" >&2; exit 1; } ;;
+    *) echo "Unknown target $target: an Android ABI, darwin, ios-arm64, or ios-arm64-simulator" >&2; exit 1 ;;
   esac
 done
 key=$(cat bare-kit.sh patches/*.patch | shasum -a 256 | cut -c1-16)
@@ -146,9 +147,30 @@ darwin() {
   cp -R "$out/darwin-$arch/BareKit.framework" vendor/bare-kit/darwin/
 }
 
+ios() {
+  target=$1
+  case $target in
+    ios-arm64) sysroot=iphoneos ;;
+    ios-arm64-simulator) sysroot=iphonesimulator ;;
+  esac
+  if [ ! -d "$out/$target/BareKit.framework" ]; then
+    sources
+    build "$target" -DCMAKE_SYSTEM_NAME=iOS "-DCMAKE_OSX_SYSROOT=$sysroot" \
+      -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+      -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO -DCMAKE_MACOSX_BUNDLE=OFF
+    mkdir -p "$out/$target.part"
+    cp -R "$work/$target/apple/BareKit.framework" "$out/$target.part/"
+    mv "$out/$target.part" "$out/$target"
+  fi
+  mkdir -p "vendor/bare-kit/$target"
+  rm -rf "vendor/bare-kit/$target/BareKit.framework"
+  cp -R "$out/$target/BareKit.framework" "vendor/bare-kit/$target/"
+}
+
 for target in "$@"; do
   case $target in
     darwin) darwin ;;
+    ios-arm64 | ios-arm64-simulator) ios "$target" ;;
     *) android "$target" ;;
   esac
 done
