@@ -239,10 +239,11 @@ export class BlobServer {
 
       const bs = uniformBlockSize(blob)
       const avgBs = bs > 0 ? bs : Math.max(4096, Math.round(blob.byteLength / Math.max(1, blob.blockLength)))
-      const scale = Math.max(1, Math.min(8, Math.round(524288 / avgBs)))
-      if (core.core && (core.core._ptBlockScale || 0) < scale) {
-        core.core._ptBlockScale = scale
-        core.core.replicator?.setInflightRange(128 * scale, 384 * scale)
+      // Cap bytes-in-flight under Android's 256 KiB rmem_max so 1 Gbps Ethernet seeders never overflow Wi-Fi receivers.
+      const maxFlight = Math.max(4, Math.min(24, Math.floor(393216 / avgBs)))
+      if (core.core && core.core._ptMaxFlight !== maxFlight) {
+        core.core._ptMaxFlight = maxFlight
+        core.core.replicator?.setInflightRange(maxFlight, Math.min(32, maxFlight * 2))
       }
       let blockIdx
       let relOffset
@@ -274,8 +275,8 @@ export class BlobServer {
       let sent = 0
       let remaining = contentLength
 
-      // Linear RangeRequest keeps up to 32 MiB streaming strictly in order without RandomIterator shuffling _queued.
-      const windowBlocks = Math.max(16, Math.ceil((32 * 1048576) / avgBs))
+      // Linear RangeRequest keeps 16 MiB streaming strictly in order without overflowing mobile UDP receive buffers.
+      const windowBlocks = Math.min(512, Math.max(16, Math.ceil((16 * 1048576) / avgBs)))
       const stepBlocks = Math.max(8, windowBlocks >> 1)
       const advancePrefetch = () => {
         if (aborted || blockIdx >= endBlockExcl) return

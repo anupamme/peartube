@@ -174,7 +174,7 @@ export async function createNode ({
   // fastForward: false forces every peer to verify writer namespaces locally through apply.
   const tracker = new Autobee(store.namespace('tracker'), trackerKey && b4a.from(trackerKey, 'hex'), { apply, update, optimistic: true, fastForward: false, wakeup })
   await tracker.ready()
-  let inflightRange = [48, 128]
+  let inflightRange = [12, 32]
   store.watch(core => core.replicator.setInflightRange(inflightRange[0], inflightRange[1]))
   const usePrimaryTracker = Boolean(trackerKey) || initialSources.length === 0
   if (!trackerKey && usePrimaryTracker && tracker.local.length === 0) {
@@ -546,8 +546,22 @@ export async function createNode ({
     syncBlockCounter(core)
     core.on('download', () => { core._ptBlocks++; core._ptSeq++; core._ptSlices.clear() })
     core.on('append', () => syncBlockCounter(core))
+    // Fan 8 MiB ahead across libuv workers on upload so stock Hypercore's serial receiverQueue hits RAM instead of spinning-disk latency.
+    let warmUpTo = -1
+    core.on('upload', (index, byteLen) => {
+      if (closing) return
+      const lookahead = byteLen > 0 && byteLen <= 131072 ? 128 : 24
+      const stride = lookahead >> 1
+      if (index < warmUpTo - lookahead || index > warmUpTo) warmUpTo = index
+      if (index + (lookahead - stride) < warmUpTo) return
+      const start = Math.max(index + 1, warmUpTo + 1)
+      const end = Math.min(core.length, index + lookahead)
+      if (end <= start) return
+      warmUpTo = end - 1
+      for (let i = start; i < end; i++) core.get(i, { wait: false }).catch(() => {})
+    })
   }
-
+  for (const s of blobSlots) ensureBlockCounter(s.core)
   async function blobCore (hex) {
     let core = blobCores.get(hex)
     if (!core) {
@@ -575,11 +589,12 @@ export async function createNode ({
     }
     const { blockOffset, blockLength, byteLength } = entry.blob
     const avgBs = Math.max(4096, Math.round((byteLength || BLOB_BLOCK_SIZE) / Math.max(1, blockLength)))
-    const scale = Math.max(1, Math.min(4, Math.round(BLOB_BLOCK_SIZE / avgBs)))
-    if (core.core && (core.core._ptBlockScale || 0) < scale) {
-      core.core._ptBlockScale = scale
-      core.core.replicator?.setInflightRange(96 * scale, 256 * scale)
+    const maxFlight = Math.max(4, Math.min(24, Math.floor(393216 / avgBs)))
+    if (core.core && core.core._ptMaxFlight !== maxFlight) {
+      core.core._ptMaxFlight = maxFlight
+      core.core.replicator?.setInflightRange(maxFlight, Math.min(32, maxFlight * 2))
     }
+    const scale = avgBs <= 16384 ? 3 : avgBs <= 131072 ? 2 : 1
     const endBlock = blockOffset + blockLength
     const headEnd = Math.min(endBlock, blockOffset + 8 * scale)
     const ranges = [core.download({ start: blockOffset, end: headEnd, linear: true })]
@@ -1070,7 +1085,7 @@ export async function createNode ({
 
   // Re-chunks legacy variable-block local blobs into uniform 512 KiB slots, SHA-256 verifies
   // every byte before swapping tracker + channel pointers, then clears & compacts the old spans.
-  async function rechunkLegacyBlobs ({ onMigrate = null, onProgress = null, limit = Infinity } = {}) {
+  async function rechunkLegacyBlobs ({ id = null, onMigrate = null, onProgress = null, limit = Infinity } = {}) {
     const writer = b4a.toString(tracker.local.key, 'hex')
     const uniformByHash = new Map()
     const legacyGroups = new Map()
@@ -1117,7 +1132,9 @@ export async function createNode ({
       }
     }
 
-    const queue = [...legacyGroups.values()].sort((a, b) => a.size - b.size)
+    const allGroups = [...legacyGroups.values()]
+    const filtered = id ? allGroups.filter(g => g.trackerOps.some(t => t.op.id === id) || g.channelOps.some(c => c.op.id === id)) : allGroups
+    const queue = filtered.sort((a, b) => a.size - b.size)
     let migrated = 0, deduped = 0, migratedBytes = 0, clearedSinceGc = 0
     onProgress?.({ total: queue.length, migrated, deduped, remaining: queue.length, migratedBytes, currentId: null, currentTitle: null })
 
@@ -1143,14 +1160,20 @@ export async function createNode ({
           read (cb) {
             if (closing) return cb(new Error('Node closing'))
             if (idx >= endIdx) { this.push(null); return cb(null) }
-            const batchEnd = Math.min(endIdx, idx + 16)
-            const reqs = []
-            while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++, { wait: false }))
-            Promise.all(reqs).then(blocks => {
-              if (blocks.some(b => !b)) return cb(new Error('Missing local block during rechunk'))
-              for (const blk of blocks) this.push(blk)
-              setTimeout(() => cb(null), 5)
-            }, cb)
+            const pump = () => {
+              if (closing) return cb(new Error('Node closing'))
+              status()
+              if (upBps > 65536) { setTimeout(pump, 1500).unref?.(); return }
+              const batchEnd = Math.min(endIdx, idx + 16)
+              const reqs = []
+              while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++, { wait: false }))
+              Promise.all(reqs).then(blocks => {
+                if (blocks.some(b => !b)) return cb(new Error('Missing local block during rechunk'))
+                for (const blk of blocks) this.push(blk)
+                setTimeout(() => cb(null), 5)
+              }, cb)
+            }
+            pump()
           }
         })
         const newOp = await put({ id: sample.id, title: sample.title }, src, null, { excludeHex: g.blobs })
@@ -1234,12 +1257,14 @@ export async function createNode ({
     const tier = seededBytes > 0 && (txBytes > 0 || blobSlots.some(s => s.core.byteLength > 0) || privateRelay || seededBytes >= BLOB_BLOCK_SIZE)
       ? 'seeder'
       : (seededBytes > 0 || contributingPeers > 0 ? 'peer' : 'leecher')
-    const next = tier === 'seeder' ? [64, 192] : tier === 'peer' ? [48, 128] : [24, 64]
+    const next = dht
+      ? (tier === 'seeder' ? [64, 192] : tier === 'peer' ? [48, 128] : [24, 64])
+      : (tier === 'seeder' ? [16, 48] : tier === 'peer' ? [12, 32] : [8, 24])
     if (next[1] !== inflightRange[1]) {
       inflightRange = next
       for (const c of store.cores) {
-        const sc = c._ptBlockScale || 1
-        c.replicator?.setInflightRange(Math.max(next[0], 96 * sc), Math.max(next[1], 256 * sc))
+        if (c._ptMaxFlight && !dht) c.replicator?.setInflightRange(c._ptMaxFlight, Math.min(32, c._ptMaxFlight * 2))
+        else c.replicator?.setInflightRange(next[0], next[1])
       }
     }
     const ratio = rxBytes > 0 ? Math.round((txBytes / rxBytes) * 100) / 100 : (txBytes > 0 ? 1 : 0)

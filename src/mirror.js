@@ -212,6 +212,7 @@ export async function createMirrorHost ({
       rechunkProgress = { ...rechunkProgress, running: true }
       try {
         const res = await node.rechunkLegacyBlobs({
+          id: typeof payload?.id === 'string' && payload.id.trim() ? payload.id.trim() : null,
           limit: Number.isFinite(Number(payload?.limit)) && Number(payload.limit) > 0 ? Number(payload.limit) : Infinity,
           onMigrate: (oldTag, target) => { acquirer?.repointBlob?.(oldTag, target) },
           onProgress: p => { rechunkProgress = { running: true, ...p } }
