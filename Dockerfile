@@ -8,7 +8,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY worklet/crypto ./worklet/crypto
 RUN npm ci --omit=dev --no-audit --no-fund && BARE_BIN=$(ls /app/node_modules/bare-runtime-linux-*/bin/bare | head -n 1) && chmod +x "$BARE_BIN" && ln -sfn bare-events node_modules/events && ln -sfn bare-dgram node_modules/dgram && ln -sfn bare-os node_modules/os && ln -sfn bare-net node_modules/net && ln -sfn peartube-crypto node_modules/crypto && ln -sfn bare-buffer node_modules/buffer && ln -sfn "$BARE_BIN" /usr/local/bin/bare && rm -f /usr/sbin/openvpn2.6 && printf '#!/bin/sh\nsed -i "/^user *\$/d" /etc/openvpn/target.ovpn 2>/dev/null || true\ngrep -q "^sndbuf " /etc/openvpn/target.ovpn 2>/dev/null || printf "\\nsndbuf 4194304\\nrcvbuf 4194304\\n" >> /etc/openvpn/target.ovpn 2>/dev/null || true\nexec /usr/sbin/openvpn "$@"\n' > /usr/sbin/openvpn2.6 && chmod +x /usr/sbin/openvpn2.6
-COPY patches/hyperdht-private ./node_modules/hyperdht/lib/private
 COPY src ./src
 COPY bin ./bin
 COPY web/assets ./web/assets

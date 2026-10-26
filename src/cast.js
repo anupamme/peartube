@@ -290,10 +290,28 @@ function hasActiveReplicationPeer (core, blob, bytePos = 0) {
 
 function countCachedBlobBytes (core, blob, totalSize) {
   if (!core?.opened || !blob || blob.blockLength <= 0 || core.length <= blob.blockOffset) return 0
+  const now = Date.now()
+  // Spare QuickJS from walking 1.2M legacy bitfield bits every second when nothing new landed.
+  if (
+    core._ptCachedAt &&
+    now - core._ptCachedAt < 3000 &&
+    core._ptCachedOff === blob.blockOffset &&
+    core._ptCachedLen === core.length &&
+    core._ptCachedContig === core.contiguousLength &&
+    core._ptCachedSeq === (core._ptSeq || 0)
+  ) {
+    return core._ptCachedVal
+  }
   const len = Math.min(blob.blockLength, core.length - blob.blockOffset)
   const blocks = core.core?.bitfield?.countSet(blob.blockOffset, len) || 0
-  if (blocks <= 0) return 0
-  return blocks >= blob.blockLength ? totalSize : Math.min(totalSize, Math.round((blocks / blob.blockLength) * totalSize))
+  const val = blocks <= 0 ? 0 : (blocks >= blob.blockLength ? totalSize : Math.min(totalSize, Math.round((blocks / blob.blockLength) * totalSize)))
+  core._ptCachedAt = now
+  core._ptCachedOff = blob.blockOffset
+  core._ptCachedLen = core.length
+  core._ptCachedContig = core.contiguousLength
+  core._ptCachedSeq = core._ptSeq || 0
+  core._ptCachedVal = val
+  return val
 }
 
 function sameBootstrap (a, b) {
@@ -665,6 +683,22 @@ export async function createReceiver ({
     })
   }
 
+  let cachedQrUri = ''
+  let cachedQrSvg = ''
+  let cachedFreeBytes = 0
+  let cachedFreeAt = 0
+  let lastLocalNotifyKey = ''
+
+  function currentFreeBytes () {
+    const now = Date.now()
+    if (now - cachedFreeAt >= 5000) {
+      const f = freeDiskBytes(peerRoot)
+      cachedFreeBytes = Number.isFinite(f) ? f : 0
+      cachedFreeAt = now
+    }
+    return cachedFreeBytes
+  }
+
   function publicInfo () {
     const pNode = currentPeerNode()
     const pStatus = pNode ? pNode.status() : null
@@ -679,7 +713,7 @@ export async function createReceiver ({
       capabilities: capabilities(),
       authRequired: !openAuth,
       routes: pStatus?.routes || null,
-      storageFreeBytes: (() => { const f = freeDiskBytes(peerRoot); return Number.isFinite(f) ? f : 0 })(),
+      storageFreeBytes: currentFreeBytes(),
       externalStorage: Boolean(String(peerRoot).startsWith('/mnt/expand/') || (peerStorage && peerRoot === peerStorage && peerRoot !== storage)),
       state
     }
@@ -687,24 +721,41 @@ export async function createReceiver ({
 
   function detailedInfo () {
     const uri = pairingUri()
+    // Hold the rendered QR SVG hot in memory so playback state ticks never re-run Reed-Solomon math on QuickJS.
+    if (uri !== cachedQrUri) {
+      cachedQrUri = uri
+      cachedQrSvg = qrSvg(uri)
+    }
     return {
       ...publicInfo(),
       pairCode: openAuth ? 'OPEN' : identity.pairCode,
       pairingUri: uri,
-      qrSvg: qrSvg(uri),
+      qrSvg: cachedQrSvg,
       listenUrl: `http://${currentHost || '127.0.0.1'}:${actualPort}`
     }
   }
 
+  function notifyLocalHost (force = false) {
+    if (!onChange) return
+    const key = `${currentHost || ''}:${actualPort}:${identity.pairCode}:${state.status}:${state.mode || ''}:${state.p2pPeers || 0}:${state.playing}:${state.buffering}:${state.ended}:${state.error || ''}:${state.entry?.id || ''}`
+    if (!force && key === lastLocalNotifyKey) return
+    lastLocalNotifyKey = key
+    onChange(state)
+  }
+
   function broadcastState () {
-    const sseFrame = b4a.from(`data: ${JSON.stringify({ event: 'state', state })}\n\n`)
-    for (const res of sseClients) { try { res.write(sseFrame) } catch { sseClients.delete(res) } }
-    const noiseFrame = b4a.from(JSON.stringify({ event: 'state', state }) + '\n')
-    for (const conn of noiseSubscribers) {
-      if (conn.destroyed) noiseSubscribers.delete(conn)
-      else { try { conn.write(noiseFrame) } catch { noiseSubscribers.delete(conn) } }
+    if (sseClients.size > 0) {
+      const sseFrame = b4a.from(`data: ${JSON.stringify({ event: 'state', state })}\n\n`)
+      for (const res of sseClients) { try { res.write(sseFrame) } catch { sseClients.delete(res) } }
     }
-    onChange?.(state, detailedInfo())
+    if (noiseSubscribers.size > 0) {
+      const noiseFrame = b4a.from(JSON.stringify({ event: 'state', state }) + '\n')
+      for (const conn of noiseSubscribers) {
+        if (conn.destroyed) noiseSubscribers.delete(conn)
+        else { try { conn.write(noiseFrame) } catch { noiseSubscribers.delete(conn) } }
+      }
+    }
+    notifyLocalHost(false)
   }
 
   function updateState (patch) {
@@ -733,6 +784,7 @@ export async function createReceiver ({
       !node.closing &&
       Boolean(node.privateRouting) === wantPrivate &&
       (!wantBootstrap || sameBootstrap(node.bootstrap, wantBootstrap)) &&
+      sameBootstrap(node.relayThrough || [], wantRelayThrough || []) &&
       (!wantPrivate || Boolean(node.hasLan?.()) === wantLan)
     ) {
       peerNode = node
@@ -763,7 +815,7 @@ export async function createReceiver ({
     }
 
     if (peerNode && sourceKey) {
-      if (wantPrivate) await peerNode.addSource({ key: sourceKey, kind: sourceKind }).catch(() => {})
+      if (wantPrivate) await peerNode.addSource({ key: sourceKey, kind: sourceKind })
       else peerNode.joinSourceSwarm?.(sourceKey)
     }
     return peerNode
@@ -794,8 +846,8 @@ export async function createReceiver ({
 
     const wantP2P = Boolean(p2pCapable && magnetUrl && preferMode !== 'http')
     const p2pMode = netCfg.privateRouting ? 'private-p2p' : 'p2p'
-    // Strict private-only casts (LAN disabled on initiator) never pull cleartext LAN HTTP unless explicitly forced.
-    const allowColdHttp = Boolean(httpStreamUrl && preferMode !== 'p2p' && (!netCfg.privateRouting || netCfg.lan || !wantP2P))
+    // Strict private-only casts (LAN disabled on initiator) never pull cleartext HTTP unless explicitly forced (`preferMode === 'http'`).
+    const allowColdHttp = Boolean(httpStreamUrl && (preferMode === 'http' || (preferMode !== 'p2p' && (!netCfg.privateRouting || netCfg.lan))))
 
     let peerNode = null
     let localP2PUrl = null
@@ -836,12 +888,13 @@ export async function createReceiver ({
           }
         }
       } catch (err) {
-        if (!httpStreamUrl) throw err
+        if (!allowColdHttp) throw err
       }
     }
 
-    if (!localP2PUrl && !httpStreamUrl) {
-      throw new Error('Cast load requires an HTTP Range URL or a P2P peartube://watch URI')
+    const effectiveHttpUrl = allowColdHttp ? httpStreamUrl : null
+    if (!localP2PUrl && !effectiveHttpUrl) {
+      throw new Error('Cast load requires an allowed HTTP Range URL or a reachable P2P peartube://watch URI')
     }
 
     const loadToken = randomHex(16)
@@ -859,7 +912,7 @@ export async function createReceiver ({
       privateRouting: netCfg.privateRouting,
       p2pMode,
       peerNode,
-      httpStreamUrl: allowColdHttp ? httpStreamUrl : null,
+      httpStreamUrl: effectiveHttpUrl,
       localP2PUrl,
       core,
       coreKeyHex: parsedWatch?.action === 'watch' ? parsedWatch.entry.blobs : '',
@@ -872,12 +925,12 @@ export async function createReceiver ({
       ? localP2PUrl
       : (localP2PUrl && allowColdHttp)
           ? `http://${hostForPlayer}:${actualPort}/cast/v1/hybrid/${loadToken}`
-          : (localP2PUrl || httpStreamUrl)
+          : (localP2PUrl || effectiveHttpUrl)
     return {
       entry,
       mode: initialMode,
       streamUrl,
-      httpFallbackUrl: allowColdHttp ? httpStreamUrl : null,
+      httpFallbackUrl: effectiveHttpUrl,
       localP2PUrl,
       peerSwarmKey: peerNode ? b4a.toString(peerNode.swarm.keyPair.publicKey, 'hex') : '',
       peerLan: !netCfg.privateRouting ? (peerNode?.lanEndpoint?.() || null) : null
@@ -1210,14 +1263,14 @@ export async function createReceiver ({
       identity.pairCode = generatePairCode()
       identity.pairToken = randomHex(16)
       writeJsonAtomic(idFile, identity)
-      onChange?.(state, detailedInfo())
+      notifyLocalHost(true)
       return detailedInfo()
     },
     async setHost (nextHost) {
       if (nextHost === currentHost) return
       currentHost = nextHost
       await refreshMdns()
-      onChange?.(state, detailedInfo())
+      notifyLocalHost(true)
     },
     async close () {
       if (closing) return
@@ -1814,8 +1867,13 @@ export function createCastController ({
     const node = getNode() || (ensureNode ? await ensureNode() : null)
     if (!node) throw new Error('P2P node is not started')
     const { item, raw } = await resolveEntryToCast(node, { key, uri })
-    await node.warm(raw)
-
+    const discTarget = discovered.get(receiverId)
+    const pairTarget = saved.get(receiverId)
+    const targetP2PCapable = Boolean(discTarget?.p2p || pairTarget?.p2p)
+    // Don't pull a second uncached 4K stream onto the phone's Wi-Fi radio when a P2P TV receiver will stream directly from the swarm.
+    if (!targetP2PCapable || item.local || (item.cachedBytes || 0) > 0) {
+      await node.warm(raw)
+    }
     allowedCastBlobs.add(raw.blobs)
     const lanHost = getLanHost()
     const blobSrv = await ensureLanBlobServer()
@@ -2053,10 +2111,11 @@ export function createCastController ({
 
   function status () {
     const lanHost = getLanHost()
-    if (lanHost && !subnetScanning && Date.now() - lastSubnetScanAt > 12_000) probeSubnetReceivers(lanHost)
+    // Dedicated TV receivers catch incoming casts; they never need to sweep 254 LAN hosts every 12s while playing.
+    if (!localReceiver && lanHost && !subnetScanning && Date.now() - lastSubnetScanAt > 12_000) probeSubnetReceivers(lanHost)
     return {
       webReceiverUrl: castHubPort && lanHost ? `http://${lanHost}:${castHubPort}/tv` : (castHubPort ? `http://127.0.0.1:${castHubPort}/tv` : null),
-      receivers: listReceivers(),
+      receivers: localReceiver ? [] : listReceivers(),
       session: active ? {
         receiverId: active.receiverId,
         receiverName: active.receiverName,

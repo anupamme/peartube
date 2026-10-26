@@ -24,7 +24,7 @@ class ReceiverApp : Application() {
         private set
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var multicastLock: WifiManager.MulticastLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var highPerfWifiLock: WifiManager.WifiLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
@@ -60,7 +60,8 @@ class ReceiverApp : Application() {
             setReferenceCounted(false)
             acquire()
         }
-        wifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "PearTube TV stream").apply {
+        @Suppress("DEPRECATION")
+        highPerfWifiLock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "PearTube TV wifi").apply {
             setReferenceCounted(false)
             acquire()
         }

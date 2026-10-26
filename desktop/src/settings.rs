@@ -28,7 +28,7 @@ pub struct Settings {
     pub bootstrap: Vec<String>,
     /// Find relays and peers on the local network over mDNS.
     pub lan_discovery: bool,
-    /// Route peer connections over 4-hop encrypted relay circuits.
+    /// Route peer connections over 2-hop encrypted guard circuits.
     pub private_routing: bool,
 }
 

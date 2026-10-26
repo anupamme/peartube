@@ -78,9 +78,9 @@ test('channels, gossip discovery, cross-channel magnet seeding, reciprocity, Str
   apis.push(apiB)
   const baseB = `http://127.0.0.1:${apiB.address().port}`
 
-  // Viewer B initially has zero cached bytes -> 'leecher' reciprocity tier (inflightMax 64).
+  // Viewer B initially has zero cached bytes -> 'leecher' reciprocity tier (inflightMax 24 on public swarm).
   assert.equal(viewerB.status().reciprocity.tier, 'leecher')
-  assert.equal(viewerB.status().reciprocity.inflightMax, 64)
+  assert.equal(viewerB.status().reciprocity.inflightMax, 24)
 
   // Unauthenticated mutation is rejected with 401; read-only endpoints remain open.
   const unauth = await fetch(`${baseB}/v1/sources`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: creatorChannel, kind: 'channel' }) })
@@ -142,14 +142,14 @@ test('channels, gossip discovery, cross-channel magnet seeding, reciprocity, Str
   const m3u = await (await fetch(`${baseB}/v1/playlist.m3u`)).text()
   assert.ok(m3u.includes('#EXTM3U') && m3u.includes('Shawshank Channel Cut'))
 
-  // Viewer B streams both files via Stremio's returned URL, caching all blocks and graduating to 'seeder' (192 inflight)!
+  // Viewer B streams both files via Stremio's returned URL, caching all blocks and graduating to 'seeder' (48 inflight on public swarm)!
   const streamedMovie = Buffer.from(await (await fetch(stremioMovie.streams[0].url)).arrayBuffer())
   const streamedEp = Buffer.from(await (await fetch(stremioEp.streams[0].url)).arrayBuffer())
   assert.equal(sha256(streamedMovie), sha256(movieBytes))
   assert.equal(sha256(streamedEp), sha256(epBytes))
   const bStatusAfter = viewerB.status()
   assert.equal(bStatusAfter.reciprocity.tier, 'seeder')
-  assert.equal(bStatusAfter.reciprocity.inflightMax, 192)
+  assert.equal(bStatusAfter.reciprocity.inflightMax, 48)
 
   // Creator A and Directory D BOTH go completely offline!
   await creator.close()

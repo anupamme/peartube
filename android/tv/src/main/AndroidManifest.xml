@@ -22,7 +22,7 @@
 
         <activity
             android:name=".ReceiverActivity"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|navigation"
+            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboardHidden|navigation"
             android:exported="true"
             android:label="PearTube Receiver"
             android:launchMode="singleTask"

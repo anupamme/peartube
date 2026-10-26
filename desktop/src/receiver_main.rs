@@ -505,7 +505,7 @@ impl Render for DumbTvApp {
         };
         let title = self.entry.as_ref().map(|e| e.title.clone()).unwrap_or_else(|| "PearTube Cast".into());
         let badge = match self.mode.as_str() {
-            "private-p2p" => "PRIVATE 4-HOP P2P",
+            "private-p2p" => "PRIVATE 2-HOP P2P",
             "p2p" => "P2P SWARM PEER",
             _ => "LAN STREAM",
         };

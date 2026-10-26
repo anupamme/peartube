@@ -47,6 +47,62 @@ if (env.VPN_SERVICE_PROVIDER) {
     }
   }, 2000).unref?.()
 }
+function readForwardedPort () {
+  try {
+    const p = Number(readFileSync('/tmp/gluetun/forwarded_port', 'utf8').trim())
+    if (p > 0) return Promise.resolve(p)
+  } catch {}
+  return new Promise(resolve => {
+    const req = request('http://127.0.0.1:8000/v1/portforward', res => {
+      let data = ''
+      res.on('data', c => { data += c })
+      res.on('end', () => { try { resolve(Number(JSON.parse(data).port) || 0) } catch { resolve(0) } })
+    })
+    req.on('error', () => resolve(0))
+    req.end()
+  })
+}
+
+if (env.PEARTUBE_PRIVATE_RELAY || env.PEARTUBE_PRIVATE_RELAY_PORT) {
+  if (env.PEARTUBE_TRACKER || env.PEARTUBE_SOURCES || env.PEARTUBE_PRIVATE_ROUTING || env.PEARTUBE_REPLICATE || env.PEARTUBE_WATCH_DIR || env.PEARTUBE_MIRROR_FEEDS) {
+    throw new Error('PEARTUBE_PRIVATE_RELAY runs a standalone Corestore-free guard forwarder and cannot be combined with tracker or content flags; run peartube-private-relay separately')
+  }
+  let guardPort = Number(env.PEARTUBE_PRIVATE_RELAY_PORT || env.PEARTUBE_DHT_PORT || 0)
+  if (!guardPort) {
+    for (let i = 0; i < 15 && !guardPort; i++) {
+      const p = await readForwardedPort()
+      if (p > 0) { guardPort = p; break }
+      if (!env.VPN_SERVICE_PROVIDER && i >= 5) break
+      await new Promise(resolve => setTimeout(resolve, 1000))
+    }
+  }
+  const { createPrivateGuard } = await import('../src/private-overlay.js')
+  const bootstrap = env.PEARTUBE_BOOTSTRAP
+    ? env.PEARTUBE_BOOTSTRAP.split(',').map(s => {
+        const i = s.trim().lastIndexOf(':')
+        return i > 0 ? { host: s.trim().slice(0, i), port: Number(s.trim().slice(i + 1)) } : s.trim()
+      }).filter(Boolean)
+    : undefined
+  const guard = await createPrivateGuard({ host: env.PEARTUBE_PRIVATE_HOST || undefined, port: guardPort, bootstrap })
+  const addr = guard.address()
+  console.log(JSON.stringify({ msg: 'private-guard ready', publicKey: Buffer.from(guard.publicKey).toString('hex'), host: addr?.host || '0.0.0.0', port: addr?.port || guardPort }))
+  const hb = setInterval(() => console.log(JSON.stringify({ msg: 'private-guard heartbeat', publicKey: Buffer.from(guard.publicKey).toString('hex'), ...guard.stats() })), 60_000)
+  hb.unref?.()
+  const stopGuard = async () => {
+    clearInterval(hb)
+    setTimeout(() => process.exit(0), 2000).unref?.()
+    await guard.close().catch(() => {})
+    process.exit(0)
+  }
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, stopGuard)
+  if (!env.PEARTUBE_DHT_PORT && !env.PEARTUBE_PRIVATE_RELAY_PORT) {
+    setInterval(async () => {
+      const p = await readForwardedPort()
+      if (p > 0 && p !== guardPort) await stopGuard()
+    }, 15_000).unref?.()
+  }
+  await new Promise(() => {})
+}
 const storage = env.PEARTUBE_STORAGE || './peartube-data'
 mkdirSync(storage, { recursive: true, mode: 0o700 })
 const jobsFile = join(storage, 'jobs.json')
@@ -104,46 +160,31 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, shutdown)
 }
 
-function readForwardedPort () {
-  try {
-    const p = Number(readFileSync('/tmp/gluetun/forwarded_port', 'utf8').trim())
-    if (p > 0) return Promise.resolve(p)
-  } catch {}
-  return new Promise(resolve => {
-    const req = request('http://127.0.0.1:8000/v1/portforward', res => {
-      let data = ''
-      res.on('data', c => { data += c })
-      res.on('end', () => { try { resolve(Number(JSON.parse(data).port) || 0) } catch { resolve(0) } })
-    })
-    req.on('error', () => resolve(0))
-    req.end()
-  })
-}
-
 const stagger = env.PEARTUBE_LAN_HOST ? Math.max(0, (Number(env.PEARTUBE_LAN_HOST.split('.')[3]) - 111) * 3000) : 0
 if (stagger > 0) await new Promise(resolve => setTimeout(resolve, stagger))
-
-let dhtPort = env.PEARTUBE_DHT_PORT ? Number(env.PEARTUBE_DHT_PORT) : undefined
-if (!dhtPort && env.PEARTUBE_PRIVATE_RELAY) {
-  for (let i = 0; i < 15 && !dhtPort; i++) {
-    const port = await readForwardedPort()
-    if (port > 0) { dhtPort = port; break }
-    if (!env.VPN_SERVICE_PROVIDER && i >= 5) break
-    await new Promise(resolve => setTimeout(resolve, 1000))
-  }
-}
+const dhtPort = env.PEARTUBE_DHT_PORT ? Number(env.PEARTUBE_DHT_PORT) : undefined
 
 const replicateOpt = env.PEARTUBE_REPLICATE
   ? (env.PEARTUBE_REPLICATE === '1' || env.PEARTUBE_REPLICATE === 'true'
       ? true
       : env.PEARTUBE_REPLICATE.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
   : false
+const hiverelayOpt = {
+  relays: env.PEARTUBE_HIVERELAYS || '',
+  apiKey: env.PEARTUBE_HIVERELAY_API_KEY || null,
+  discover: Boolean(env.PEARTUBE_HIVERELAY_DISCOVER || env.PEARTUBE_HIVERELAY === '1' || env.PEARTUBE_HIVERELAY === 'true'),
+  replicas: Number(env.PEARTUBE_HIVERELAY_REPLICAS || 3),
+  includeCached: Boolean(replicateOpt)
+}
+const hiverelayEnabled = Boolean(hiverelayOpt.relays || hiverelayOpt.discover)
 let replicateDebounce = null
 function scheduleReplicate () {
-  if (!replicateOpt || shuttingDown || replicateDebounce) return
+  if ((!replicateOpt && !hiverelayEnabled) || shuttingDown || replicateDebounce) return
   replicateDebounce = setTimeout(() => {
     replicateDebounce = null
-    if (!shuttingDown) state.mirror?.run('p2p-replicate').catch(() => {})
+    if (shuttingDown) return
+    if (replicateOpt) state.mirror?.run('p2p-replicate').catch(() => {})
+    if (hiverelayEnabled) state.mirror?.run('hiverelay-seed').catch(() => {})
   }, 2000)
   replicateDebounce.unref?.()
 }
@@ -157,7 +198,7 @@ const node = await createNode({
   bootstrap: env.PEARTUBE_BOOTSTRAP ? env.PEARTUBE_BOOTSTRAP.split(',') : undefined,
   dhtPort,
   privateRouting: Boolean(env.PEARTUBE_PRIVATE_ROUTING),
-  privateRelay: env.PEARTUBE_PRIVATE_RELAY_PORT ? Number(env.PEARTUBE_PRIVATE_RELAY_PORT) : Boolean(env.PEARTUBE_PRIVATE_RELAY),
+  privateRelay: false,
   relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
   lan: env.PEARTUBE_LAN_HOST ? keyPair => createLan({ host: env.PEARTUBE_LAN_HOST, keyPair }) : null,
   onchange: () => {
@@ -168,7 +209,13 @@ const node = await createNode({
 state.node = node
 if (isDirectory) await syncDirectory(node.listSources())
 const mirrorChannel = env.PEARTUBE_PUBLISH_CHANNEL ? env.PEARTUBE_PUBLISH_CHANNEL !== '0' : true
-state.acquirer = createAcquirer(node, jobsFile, { defaultChannel: mirrorChannel, onDone: () => api.notify('update') })
+state.acquirer = createAcquirer(node, jobsFile, {
+  defaultChannel: mirrorChannel,
+  onDone: () => {
+    api.notify('update')
+    scheduleReplicate()
+  }
+})
 state.mirror = await createMirrorHost({
   node,
   storage,
@@ -179,6 +226,7 @@ state.mirror = await createMirrorHost({
   feeds: env.PEARTUBE_MIRROR_FEEDS ? env.PEARTUBE_MIRROR_FEEDS.split(',').map(s => s.trim()).filter(Boolean) : [],
   replicate: replicateOpt,
   replicateMinFreeBytes: Math.max(0, Number(env.PEARTUBE_REPLICATE_FREE_GB ?? 20)) * 1024 * 1024 * 1024,
+  hiverelay: hiverelayOpt,
   pluginsDir: env.PEARTUBE_PLUGINS_DIR || join(storage, 'plugins'),
   onchange: () => api.notify('update')
 })
@@ -192,10 +240,3 @@ await state.cast.setLanHost(env.PEARTUBE_LAN_HOST || lanAddress(os.networkInterf
 
 console.log(JSON.stringify({ msg: 'relay ready', api: apiPort, ...node.status() }))
 setInterval(() => console.log(JSON.stringify({ msg: 'heartbeat', ...node.status() })), 60_000).unref()
-
-if (env.PEARTUBE_PRIVATE_RELAY && !env.PEARTUBE_DHT_PORT) {
-  setInterval(async () => {
-    const port = await readForwardedPort()
-    if (port > 0 && port !== dhtPort) await shutdown()
-  }, 15_000).unref()
-}

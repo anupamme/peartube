@@ -139,7 +139,7 @@ fun SettingsScreen(model: AppModel) {
                     Text("Private DHT routing", color = Ink, fontSize = 16.sp, modifier = Modifier.weight(1f))
                     Switch(checked = privateRouting, onCheckedChange = null, colors = SwitchDefaults.colors(checkedTrackColor = Brand))
                 }
-                Hint("Route peer connections over 4-hop encrypted relay circuits. Every peer you connect to must also run with private routing.")
+                Hint("Route peer connections over 2-hop encrypted guard circuits. Every peer you connect to must also run with private routing.")
             }
             }
             }

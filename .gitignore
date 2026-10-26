@@ -37,7 +37,10 @@ packages/.peartube/
 
 # Environment
 .env
-.env.local
+.env.*
+!.env.example
+!.env.sample
+!.env.template
 .claude
 
 # IDE
@@ -118,3 +121,22 @@ ios/PearTube.xcodeproj/project.xcworkspace/xcuserdata/
 
 # WebAssembly player build artifacts (compiled assets live in web/assets/)
 web/target/
+
+# Private packet captures and local capture bundles
+*.pcap*
+*.cap
+*.cap.*
+*.har*
+*-pcap/
+
+# Private runtime state and signing credentials
+receiver.json
+cast-receivers.json
+jobs.json
+settings.json
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore

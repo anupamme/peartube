@@ -1,19 +1,26 @@
 package com.peartube.app.player
 
 import android.app.Activity
+import android.app.UiModeManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.Gravity
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** The longest surfaceDestroyed waits for the native side to let go of its Surface. */
 private const val RELEASE_WAIT_MS = 1_000L
@@ -35,6 +42,8 @@ class PlayerHost(private val activity: Activity) {
     private val frame = IntArray(4)
     private var hasFrame = false
     private var aspect = 0f
+    private var frameRate = 0f
+    private var appliedModeId = 0
     private var closeStarted = 0L
     private var closeReported = false
     private val retirementPoll = Runnable { advance() }
@@ -44,6 +53,7 @@ class PlayerHost(private val activity: Activity) {
         if (destroyed) return
         wanted = true
         aspect = 0f
+        frameRate = 0f
         beginRetirement()
         advance()
     }
@@ -52,8 +62,12 @@ class PlayerHost(private val activity: Activity) {
     fun place(left: Int, top: Int, width: Int, height: Int) {
         val content = activity.findViewById<ViewGroup>(android.R.id.content)
         val origin = IntArray(2).also { content.getLocationInWindow(it) }
-        frame[0] = left - origin[0]
-        frame[1] = top - origin[1]
+        val nextLeft = left - origin[0]
+        val nextTop = top - origin[1]
+        // Never poke Android's layout pass unless the slot truly moved, so SurfaceFlinger stays locked on its hardware plane.
+        if (hasFrame && frame[0] == nextLeft && frame[1] == nextTop && frame[2] == width && frame[3] == height) return
+        frame[0] = nextLeft
+        frame[1] = nextTop
         frame[2] = width
         frame[3] = height
         hasFrame = true
@@ -62,14 +76,60 @@ class PlayerHost(private val activity: Activity) {
 
     /** The picture's width over its height. */
     fun fit(aspect: Float) {
+        if (kotlin.math.abs(this.aspect - aspect) < 0.0005f) return
         this.aspect = aspect
         views?.takeUnless { it.closing }?.fit(aspect)
+    }
+
+    /** Locks HDMI / panel VSYNC onto the stream's exact cadence (e.g. 3840x2160 @ 23.976 Hz) so 30 Hz never strobes 24p film. */
+    fun matchFrameRate(fps: Float) {
+        if (fps < 1f || fps > 240f || abs(this.frameRate - fps) < 0.005f) return
+        this.frameRate = fps
+        views?.takeUnless { it.closing }?.setSurfaceFrameRate(fps)
+        val isTv = activity.getSystemService(UiModeManager::class.java)?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
+        if (!isTv) return
+        val display: Display = if (Build.VERSION.SDK_INT >= 30) (activity.display ?: return) else @Suppress("DEPRECATION") activity.windowManager.defaultDisplay
+        val active = display.mode ?: return
+        val modes = display.supportedModes ?: return
+        val targetW = if (active.physicalWidth == 4096 && active.physicalHeight == 2160 && modes.any { it.physicalWidth == 3840 && it.physicalHeight == 2160 }) 3840 else active.physicalWidth
+        val sameRes = modes.filter { it.physicalWidth == targetW && it.physicalHeight == active.physicalHeight }
+        var best = sameRes.minByOrNull { m ->
+            val r = m.refreshRate
+            val k = (r / fps).roundToInt().coerceAtLeast(1)
+            val multErr = abs(r - fps * k) / k
+            if (abs(r - fps) <= 0.03f) abs(r - fps) else if (multErr <= 0.03f) 0.05f + multErr else 100f + abs(r - fps)
+        }?.takeIf { m ->
+            val k = (m.refreshRate / fps).roundToInt().coerceAtLeast(1)
+            abs(m.refreshRate - fps * k) / k <= 0.03f
+        }
+        // If 4K HDMI only reaches 30 Hz (HDMI 1.4 / Pi 4 default) and a 50/60p stream arrives, step down to 1080p60 so motion stays silk.
+        if (best == null && fps >= 47f && active.refreshRate < 47f) {
+            best = modes
+                .filter { it.physicalWidth == 1920 && it.physicalHeight == 1080 }
+                .minByOrNull { abs(it.refreshRate - fps) }
+                ?.takeIf { abs(it.refreshRate - fps) <= 0.5f }
+        }
+        if (best != null && best.modeId != active.modeId && best.modeId != appliedModeId) {
+            appliedModeId = best.modeId
+            activity.window.attributes = activity.window.attributes.apply { preferredDisplayModeId = best.modeId }
+        }
+    }
+
+    private fun restoreDisplayMode() {
+        frameRate = 0f
+        if (appliedModeId != 0) {
+            appliedModeId = 0
+            runCatching {
+                activity.window.attributes = activity.window.attributes.apply { preferredDisplayModeId = 0 }
+            }
+        }
     }
 
     /** Requests close without blocking the UI on native calls. */
     fun close() {
         wanted = false
         hasFrame = false
+        restoreDisplayMode()
         beginRetirement()
         advance()
     }
@@ -77,6 +137,7 @@ class PlayerHost(private val activity: Activity) {
     fun destroy() {
         destroyed = true
         wanted = false
+        restoreDisplayMode()
         handler.removeCallbacks(retirementPoll)
         // Framework destruction cannot wait for a stalled native call. Publish
         // invalidation and report pending cleanup; do not invent a receipt.
@@ -120,6 +181,7 @@ class PlayerHost(private val activity: Activity) {
         if (views == null && wanted) {
             views = PlayerViews(activity, this, handler).also {
                 it.fit(aspect)
+                if (frameRate > 0f) it.setSurfaceFrameRate(frameRate)
                 if (hasFrame) it.place(frame)
             }
         }
@@ -136,6 +198,11 @@ private class PlayerViews(activity: Activity, host: PlayerHost, handler: Handler
     private var slotWidth = 0
     private var slotHeight = 0
     private var aspect = 0f
+    private var appliedLeft = Int.MIN_VALUE
+    private var appliedTop = Int.MIN_VALUE
+    private var appliedVideoW = Int.MIN_VALUE
+    private var appliedVideoH = Int.MIN_VALUE
+    private var appliedVideoGravity = Int.MIN_VALUE
     var closing = false
         private set
 
@@ -157,31 +224,49 @@ private class PlayerViews(activity: Activity, host: PlayerHost, handler: Handler
 
     fun place(rect: IntArray) {
         if (closing) return
-        root.layoutParams = FrameLayout.LayoutParams(rect[2], rect[3]).apply {
-            leftMargin = rect[0]
-            topMargin = rect[1]
+        if (appliedLeft != rect[0] || appliedTop != rect[1] || slotWidth != rect[2] || slotHeight != rect[3]) {
+            appliedLeft = rect[0]
+            appliedTop = rect[1]
+            slotWidth = rect[2]
+            slotHeight = rect[3]
+            root.layoutParams = FrameLayout.LayoutParams(rect[2], rect[3]).apply {
+                leftMargin = rect[0]
+                topMargin = rect[1]
+            }
+            layoutVideo()
         }
-        slotWidth = rect[2]
-        slotHeight = rect[3]
-        layoutVideo()
-        root.visibility = View.VISIBLE
+        if (root.visibility != View.VISIBLE) root.visibility = View.VISIBLE
     }
 
     fun fit(aspect: Float) {
-        if (closing) return
+        if (closing || abs(this.aspect - aspect) < 0.0005f) return
         this.aspect = aspect
         layoutVideo()
+    }
+
+    fun setSurfaceFrameRate(fps: Float) {
+        if (closing) return
+        videoCallback.setDesiredFrameRate(fps)
     }
 
     // The largest rect of the picture's shape inside the slot, centred.
     // Resizing the view keeps its surface; only surfaceChanged follows.
     private fun layoutVideo() {
         val (w, h) = slotWidth to slotHeight
-        video.layoutParams = when {
+        val (targetW, targetH, gravity) = when {
             aspect <= 0f || w <= 0 || h <= 0 ->
-                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
-            w > h * aspect -> FrameLayout.LayoutParams(Math.round(h * aspect), h, Gravity.CENTER)
-            else -> FrameLayout.LayoutParams(w, Math.round(w / aspect), Gravity.CENTER)
+                Triple(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.NO_GRAVITY)
+            w > h * aspect -> Triple(Math.round(h * aspect), h, Gravity.CENTER)
+            else -> Triple(w, Math.round(w / aspect), Gravity.CENTER)
+        }
+        if (targetW == appliedVideoW && targetH == appliedVideoH && gravity == appliedVideoGravity) return
+        appliedVideoW = targetW
+        appliedVideoH = targetH
+        appliedVideoGravity = gravity
+        video.layoutParams = if (gravity == Gravity.NO_GRAVITY) {
+            FrameLayout.LayoutParams(targetW, targetH)
+        } else {
+            FrameLayout.LayoutParams(targetW, targetH, gravity)
         }
     }
 
@@ -225,16 +310,34 @@ private class SurfaceCallback(
     private var cleanupDeadline = 0L
     private var cleanupReported = false
     private var admissionError = "Player Surface is unavailable"
+    private var desiredFps = 0f
     private val retry = Runnable { admit() }
+
+    fun setDesiredFrameRate(fps: Float) {
+        desiredFps = fps
+        applySurfaceFrameRate()
+    }
+
+    private fun applySurfaceFrameRate() {
+        if (role != 1 || desiredFps <= 0f || Build.VERSION.SDK_INT < 30) return
+        val surface = holder?.surface?.takeIf { it.isValid } ?: return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 31) {
+                surface.setFrameRate(desiredFps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE, Surface.CHANGE_FRAME_RATE_ALWAYS)
+            } else {
+                surface.setFrameRate(desiredFps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            }
+        }
+    }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (closed) return
         this.holder = holder
+        applySurfaceFrameRate()
         admissionDeadline = 0L
         admissionFailed = false
         admit()
     }
-
     override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {

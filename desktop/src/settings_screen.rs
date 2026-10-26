@@ -183,7 +183,7 @@ impl PearTube {
                                             .child(
                                                 Checkbox::new("private-routing")
                                                     .checked(form.private_routing)
-                                                    .label("4-Hop Private DHT Circuits")
+                                                    .label("2-Hop Private Guard Circuits")
                                                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                                                         if let Screen::Settings(form) = &mut this.screen {
                                                             form.private_routing = *checked;

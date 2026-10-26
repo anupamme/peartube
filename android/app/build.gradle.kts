@@ -42,7 +42,7 @@ val workletTask = tasks.register<WorkletTask>("worklet") {
         File(checkout, "android/worklet.mjs"),
         File(worklet, "worker.js"), File(worklet, "pack.cjs"), File(worklet, "imports.json"), fileTree(File(worklet, "crypto")),
         fileTree(File(worklet, "vendor/bare-kit/android/arm64-v8a")),
-        fileTree(File(checkout, "src")), fileTree(File(checkout, "patches")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
+        fileTree(File(checkout, "src")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
     )
     assetsDir.set(layout.buildDirectory.dir("worklet/assets"))
     libsDir.set(layout.buildDirectory.dir("worklet/jniLibs"))

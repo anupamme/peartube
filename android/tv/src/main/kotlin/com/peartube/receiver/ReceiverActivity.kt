@@ -245,31 +245,42 @@ private fun Activity.setImmersive(on: Boolean, view: View) {
     }
 }
 
-private fun playerStateJson(st: PlayerState, endedOverride: Boolean = st.ended): JSONObject {
-    val tracks = JSONArray().apply {
-        st.tracks.forEach { t ->
-            put(
-                JSONObject()
-                    .put("stream", t.stream)
-                    .put("kind", t.kind)
-                    .put("codec", t.codec)
-                    .put("language", t.language ?: JSONObject.NULL)
-                    .put("title", t.title ?: JSONObject.NULL),
-            )
-        }
-    }
-    return JSONObject()
+private fun tracksSignature(st: PlayerState): String =
+    "${st.tracks.size}:${st.tracks.firstOrNull()?.stream ?: -1}:${st.tracks.lastOrNull()?.stream ?: -1}"
+
+private fun playerStateJson(
+    st: PlayerState,
+    endedOverride: Boolean = st.ended,
+    includeTracks: Boolean = true,
+): JSONObject {
+    val obj = JSONObject()
         .put("positionMs", st.positionMs)
         .put("durationMs", st.durationMs ?: JSONObject.NULL)
         .put("playing", st.playing && !endedOverride)
         .put("buffering", st.buffering && !endedOverride)
         .put("ended", endedOverride)
         .put("error", st.error ?: JSONObject.NULL)
-        .put("tracks", tracks)
         .put("audio", st.audio ?: -1)
         .put("subtitle", st.subtitle ?: -1)
         .put("videoDecoder", st.videoDecoder ?: JSONObject.NULL)
         .put("droppedFrames", st.droppedFrames)
+    // Only pack the full track catalog when it actually changed, sparing QuickJS and Kotlin repeated 48-track JSON churn.
+    if (includeTracks) {
+        val tracks = JSONArray().apply {
+            st.tracks.forEach { t ->
+                put(
+                    JSONObject()
+                        .put("stream", t.stream)
+                        .put("kind", t.kind)
+                        .put("codec", t.codec)
+                        .put("language", t.language ?: JSONObject.NULL)
+                        .put("title", t.title ?: JSONObject.NULL),
+                )
+            }
+        }
+        obj.put("tracks", tracks)
+    }
+    return obj
 }
 
 @Composable
@@ -577,31 +588,64 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
         }
     }
 
+    // Hold the freshest snapshot off-Compose so hidden-HUD movie playback causes zero UI recompositions.
+    val latestHolder = remember(handle) { object { var snap: PlayerState? = null; var reportedTracksSig: String = "" } }
+
+    LaunchedEffect(hudVisible, overlaySheet, handle) {
+        if ((hudVisible || overlaySheet != null) && handle != 0L) {
+            val snap = runCatching { PlayerState.parse(NativePlayer.state(handle)) }.getOrNull() ?: latestHolder.snap
+            if (snap != null) {
+                latestHolder.snap = snap
+                state = snap
+            }
+        }
+    }
+
     LaunchedEffect(handle) {
         val h = handle
         if (h == 0L) return@LaunchedEffect
         var ticks = 0
         while (handle == h) {
-            val snap = runCatching { PlayerState.parse(NativePlayer.state(h)) }.getOrNull()
-            if (snap != null) {
-                val w = snap.videoWidth
-                val ht = snap.videoHeight
-                if (w != null && ht != null && w > 0 && ht > 0) {
-                    host.fit(w.toFloat() / ht.toFloat())
-                }
-                state = snap
-                val seek = pendingSeekMs
-                if (seek != null && snap.durationMs != null) {
-                    pendingSeekMs = null
-                    NativePlayer.seek(h, seek)
-                }
-                if (snap.ended) {
-                    scope.launch { runCatching { worker.reportState(playerStateJson(snap, endedOverride = true)) } }
-                    closeStream()
-                    break
-                }
-                if (ticks % 2 == 0) {
-                    scope.launch { runCatching { worker.reportState(playerStateJson(snap)) } }
+            val uiOpen = hudVisible || overlaySheet != null
+            val fast = uiOpen || pendingSeekMs != null || state.buffering
+            if (fast || ticks % 4 == 0) {
+                val snap = runCatching { PlayerState.parse(NativePlayer.state(h)) }.getOrNull()
+                if (snap != null) {
+                    latestHolder.snap = snap
+                    val w = snap.videoWidth
+                    val ht = snap.videoHeight
+                    if (w != null && ht != null && w > 0 && ht > 0) {
+                        host.fit(w.toFloat() / ht.toFloat())
+                    }
+                    snap.videoFps?.let { host.matchFrameRate(it) }
+                    // Keep AndroidComposeView dead-still while the HUD is tucked away unless playback status visibly shifted.
+                    val visibleChange = uiOpen ||
+                        snap.playing != state.playing ||
+                        snap.error != state.error ||
+                        snap.ended != state.ended ||
+                        snap.audio != state.audio ||
+                        snap.subtitle != state.subtitle ||
+                        snap.tracks.size != state.tracks.size
+                    if (visibleChange) {
+                        state = snap
+                    }
+                    val seek = pendingSeekMs
+                    if (seek != null && snap.durationMs != null) {
+                        pendingSeekMs = null
+                        NativePlayer.seek(h, seek)
+                    }
+                    val sig = tracksSignature(snap)
+                    val includeTracks = sig != latestHolder.reportedTracksSig
+                    if (snap.ended) {
+                        latestHolder.reportedTracksSig = sig
+                        scope.launch { runCatching { worker.reportState(playerStateJson(snap, endedOverride = true, includeTracks = includeTracks)) } }
+                        closeStream()
+                        break
+                    }
+                    if (ticks % 4 == 0 || includeTracks) {
+                        latestHolder.reportedTracksSig = sig
+                        scope.launch { runCatching { worker.reportState(playerStateJson(snap, includeTracks = includeTracks)) } }
+                    }
                 }
             }
             ticks++
@@ -696,7 +740,7 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
 
     val effectiveMode = info?.mode ?: initialMode
     val badgeTxt = when (effectiveMode) {
-        "private-p2p" -> "PRIVATE 4-HOP P2P"
+        "private-p2p" -> "PRIVATE 2-HOP P2P"
         "p2p" -> "P2P SWARM PEER"
         else -> "LAN STREAM"
     }

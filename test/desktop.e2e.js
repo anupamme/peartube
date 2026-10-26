@@ -20,6 +20,7 @@ import { Readable } from 'node:stream'
 import createTestnet from 'hyperdht/testnet.js'
 import { createNode } from '../src/index.js'
 import { createLan, lanAddress } from '../src/lan.js'
+import { createPrivateGuard } from '../src/private-overlay.js'
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 const tmp = name => mkdtempSync(join(tmpdir(), `peartube-${name}-`))
@@ -74,6 +75,31 @@ test('the app worklet finds a relay on the LAN and streams from it', async t => 
   assert.ok(stages.streamed.relay.routes.lan.txBytes >= bytes.length, 'the file traveled over LAN')
   assert.equal(stages.streamed.relay.routes.public.txBytes + stages.streamed.relay.routes.private.txBytes, 0, 'no DHT stream carried it')
   save('lan-result.json', { test: 'app worklet finds a relay on the LAN and streams from it', host, published, relay, stages })
+})
+
+test('the app worklet streams and decodes over 2-hop stateless guards in privateRouting mode', async t => {
+  const testnet = await createTestnet(4)
+  const guards = [
+    await createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap }),
+    await createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap })
+  ]
+  const relay = await createNode({ storage: tmp('priv-relay'), bootstrap: testnet.bootstrap, privateRouting: true })
+  t.after(async () => {
+    await relay.close()
+    await Promise.all(guards.map(g => g.close()))
+    await testnet.destroy()
+  })
+  const bytes = media(tmp('priv-media'))
+  const published = await relay.publish({ id: 'imdb:tt0133093', title: 'Private QuickJS E2E' }, Readable.from([bytes]))
+
+  const bootstrap = testnet.bootstrap.map(node => `127.0.0.1:${node.port}`)
+  const { stages, secondKey } = await drive(t, relay, published, { bootstrap, lanDiscovery: true, privateRouting: true }, { PEARTUBE_PLAY: '1' })
+  verify(stages, relay, published, bytes, secondKey)
+  verifyPlayed(stages.streamed.played, bytes)
+  assert.ok(stages.streamed.relay.routes.private.txBytes >= bytes.length, 'bytes left seeder over 2-hop private guard circuits')
+  assert.equal(stages.streamed.relay.routes.public.txBytes, 0, 'zero public DHT bytes')
+  assert.equal(stages.streamed.relay.routes.lan.txBytes, 0, 'LAN discovery suppressed in privateRouting mode even when settings.lanDiscovery is true')
+  save('private-result.json', { test: 'app worklet streams and decodes over 2-hop stateless guards in privateRouting mode', published, relay, stages })
 })
 
 // Runs the app's P2P stack against relay with these settings. When the app has

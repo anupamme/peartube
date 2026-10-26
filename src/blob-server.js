@@ -239,11 +239,13 @@ export class BlobServer {
 
       const bs = uniformBlockSize(blob)
       const avgBs = bs > 0 ? bs : Math.max(4096, Math.round(blob.byteLength / Math.max(1, blob.blockLength)))
-      // Cap bytes-in-flight under Android's 256 KiB rmem_max so 1 Gbps Ethernet seeders never overflow Wi-Fi receivers.
-      const maxFlight = Math.max(4, Math.min(24, Math.floor(393216 / avgBs)))
+      // Fit inside Linux's doubled 512 KiB sk_rcvbuf (2 * 256 KiB rmem_max) while keeping enough blocks in flight for 4K UHD.
+      const minFlight = avgBs <= 131072 ? 6 : 4
+      const maxFlight = avgBs <= 131072 ? 8 : 8
       if (core.core && core.core._ptMaxFlight !== maxFlight) {
         core.core._ptMaxFlight = maxFlight
-        core.core.replicator?.setInflightRange(maxFlight, Math.min(32, maxFlight * 2))
+        core.core._ptMinFlight = minFlight
+        core.core.replicator?.setInflightRange(minFlight, maxFlight)
       }
       let blockIdx
       let relOffset
@@ -275,20 +277,24 @@ export class BlobServer {
       let sent = 0
       let remaining = contentLength
 
-      // Linear RangeRequest keeps 16 MiB streaming strictly in order without overflowing mobile UDP receive buffers.
-      const windowBlocks = Math.min(512, Math.max(16, Math.ceil((16 * 1048576) / avgBs)))
+      // Explicit sequential `blocks` skips Hypercore's `_addLastRangeBatch` 16 MiB tail-first hijack
+      // while keeping `win = 2` so `core.get()` never bypasses `setInflightRange` via `_queued`.
+      const windowBlocks = Math.min(256, Math.max(16, Math.ceil((12 * 1048576) / avgBs)))
       const stepBlocks = Math.max(8, windowBlocks >> 1)
       const advancePrefetch = () => {
         if (aborted || blockIdx >= endBlockExcl) return
         if (prefetch && prefetchEnd >= Math.min(endBlockExcl, blockIdx + stepBlocks)) return
         const prev = prefetch
         prefetchEnd = Math.min(endBlockExcl, blockIdx + windowBlocks)
-        prefetch = core.download({ start: blockIdx, end: prefetchEnd, linear: true })
+        const count = prefetchEnd - blockIdx
+        const blocks = new Array(count)
+        for (let i = 0; i < count; i++) blocks[i] = blockIdx + i
+        prefetch = core.download({ blocks })
         if (prev) prev.destroy()
       }
       const fillLookahead = () => {
         advancePrefetch()
-        const win = sent >= 1048576 ? 8 : 4
+        const win = 2
         while (!aborted && queue.size < win && nextFetch < endBlockExcl) {
           const idx = nextFetch++
           const p = core.get(idx)

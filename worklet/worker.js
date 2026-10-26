@@ -320,7 +320,7 @@ async function handle (line) {
     if (!method) throw new Error(`Unknown method ${msg.method}`)
     send({ id: msg.id, result: (await method(msg.params || {})) ?? null })
   } catch (err) {
-    send({ id: msg.id, error: err.message })
+    send({ id: msg.id, error: err?.message || String(err) })
   }
 }
 

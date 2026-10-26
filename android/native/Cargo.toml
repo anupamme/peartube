@@ -17,8 +17,8 @@ serde_json = "1"
 # The video player: peartube-media's engine, OxideAV codecs and the platform
 # video decoders. sync-player.py keeps this rev and the pins below in step
 # with desktop/Cargo.toml.
-player = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
+player = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
 oxideav-core = "*"
 
 # Stripped, fat LTO, one codegen unit. LTO drops code nothing references;
@@ -66,6 +66,13 @@ opt-level = 3
 [profile.release.package.oxideav-mp3]
 opt-level = 3
 [profile.release.package.codec-dca]
+opt-level = 3
+# Lossless 7.1 TrueHD (MLP) & FLAC + per-packet A/53 caption scan run hot on 4K Blu-ray remuxes.
+[profile.release.package.codec-mlp]
+opt-level = 3
+[profile.release.package.oxideav-flac]
+opt-level = 3
+[profile.release.package.subs-cc]
 opt-level = 3
 # DV at "s" decodes DVCPRO HD 1080 at the 2x HD floor; at 3 it has margin.
 # The Opus and AC-3 ports stay "s": 50x real time or more there.

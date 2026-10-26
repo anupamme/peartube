@@ -37,10 +37,21 @@ const pkg = 'com.peartube.app.dev'
 const activity = `${pkg}/dev.dioxus.main.MainActivity`
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const adb = (...args) => execFileSync('adb', ['-s', opts.serial, ...args], { encoding: 'utf8', maxBuffer: 64 << 20 })
-const shell = cmd => adb('shell', cmd)
+const shell = cmd => {
+  if (cmd.startsWith('input ') && cmd !== 'input keyevent KEYCODE_WAKEUP') requireAppWindow()
+  return adb('shell', cmd)
+}
 fs.rmSync(opts.out, { recursive: true, force: true })
 fs.mkdirSync(opts.out, { recursive: true })
 const shot = name => fs.writeFileSync(path.join(opts.out, name), execFileSync('adb', ['-s', opts.serial, 'exec-out', 'screencap', '-p'], { maxBuffer: 64 << 20 }))
+
+function requireAppWindow () {
+  const focus = adb('shell', 'dumpsys window').split('\n').find(line => line.includes('mCurrentFocus='))
+  if (!focus?.includes(`${pkg}/`)) {
+    shot('system-ui.png')
+    throw new Error('A system window is in front. Answer it on the phone, then run this again; no system UI was tapped.')
+  }
+}
 
 /** The screen's nodes (text, content description, class, centre and size), and its rotation. */
 function nodes () {
@@ -48,9 +59,13 @@ function nodes () {
   const list = [...xml.matchAll(/<node [^>]*>/g)].map(([tag]) => {
     const attr = name => (tag.match(new RegExp(` ${name}="([^"]*)"`)) || [])[1]?.replace(/&amp;/g, '&') ?? ''
     const [l, t, r, b] = attr('bounds').match(/\d+/g).map(Number)
-    return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), checked: attr('checked') === 'true', x: (l + r) >> 1, y: (t + b) >> 1, w: r - l, h: b - t }
+    return { text: attr('text'), desc: attr('content-desc'), cls: attr('class'), pkg: attr('package'), checkable: attr('checkable') === 'true', checked: attr('checked') === 'true', x: (l + r) >> 1, y: (t + b) >> 1, w: r - l, h: b - t }
   })
   list.rotation = Number(xml.match(/<hierarchy rotation="(\d)"/)?.[1] ?? 0)
+  if (!list.some(n => n.pkg === pkg)) {
+    shot('system-ui.png')
+    throw new Error('A system window is in front. Answer it on the phone, then run this again; no system UI was tapped.')
+  }
   return list
 }
 
@@ -79,15 +94,21 @@ async function scrollTo (what, find) {
 }
 
 const tap = node => shell(`input tap ${node.x} ${node.y}`)
+const switchFor = text => ns => {
+  const label = ns.find(n => n.text === text)
+  return label && ns.find(n => n.checkable && Math.abs(n.x - label.x) <= n.w / 2 && Math.abs(n.y - label.y) <= n.h / 2)
+}
 const checks = {}
 const result = { started: new Date().toISOString(), device: shell('getprop ro.product.model').trim(), relay: opts.relay || null, privateRouting: opts['private-routing'], checks }
 
 try {
   const tracker = opts.tracker || (await (await fetch(new URL('/v1/status', opts.relay))).json()).tracker
   result.tracker = tracker.slice(0, 8)
-  result.apk = { sha256: createHash('sha256').update(fs.readFileSync(opts.apk)).digest('hex') }
+  const apkPath = path.join(opts.out, 'installed.apk')
+  fs.copyFileSync(opts.apk, apkPath)
+  result.apk = { path: fs.realpathSync(opts.apk), installedPath: fs.realpathSync(apkPath), sha256: createHash('sha256').update(fs.readFileSync(apkPath)).digest('hex') }
 
-  adb('install', '-r', opts.apk)
+  adb('install', '-r', apkPath)
   shell(`pm clear ${pkg}`)
   shell('input keyevent KEYCODE_WAKEUP')
   shell(`am start -W -n ${activity}`)
@@ -100,10 +121,10 @@ try {
   shell('input keyevent KEYCODE_BACK') // hides the keyboard
   if (opts.lan || opts['private-routing']) {
     tap(await scrollTo('advanced network options', ns => ns.find(n => n.text === 'Advanced Network & Engine')))
-    const lanSwitch = await scrollTo('the LAN switch', ns => ns.find(n => n.text === 'Find relays on this network'))
+    const lanSwitch = await scrollTo('the LAN switch', switchFor('Find relays on this network'))
     if (lanSwitch.checked !== opts.lan) tap(lanSwitch)
     if (opts['private-routing']) {
-      const privateSwitch = await scrollTo('the private routing switch', ns => ns.find(n => n.text === 'Private DHT routing'))
+      const privateSwitch = await scrollTo('the private routing switch', switchFor('Private DHT routing'))
       if (!privateSwitch.checked) tap(privateSwitch)
     }
   }

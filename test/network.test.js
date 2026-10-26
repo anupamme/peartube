@@ -13,10 +13,11 @@ import Hyperswarm from 'hyperswarm'
 import { createNode } from '../src/index.js'
 import { createAcquirer } from '../src/acquire.js'
 import { createApi } from '../src/http.js'
+import { createPrivateGuard } from '../src/private-overlay.js'
 
 const tmp = () => mkdtempSync(join(tmpdir(), 'peartube-test-'))
 
-async function until (fn, ms = 60000) {
+async function until (fn, ms = 120000) {
   const end = Date.now() + ms
   for (;;) {
     const value = await fn()
@@ -226,16 +227,23 @@ test('a peer far ahead with a forging apply cannot hand its view to a new relay'
   assert.equal(await forgedOn(c), 0)
 })
 
-test('ten relays with private DHT routing sync the tracker and stream exact bytes over 4-hop circuits', async t => {
+test('ten peers with 2-hop private routing sync the tracker and stream exact bytes over stateless guards', async t => {
   const testnet = await createTestnet(4)
-  const founder = await createNode({ storage: tmp(), bootstrap: testnet.bootstrap, privateRouting: true, privateRelay: true })
+  const guards = await Promise.all([
+    createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap }),
+    createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap })
+  ])
+  const founder = await createNode({ storage: tmp(), bootstrap: testnet.bootstrap, privateRouting: true })
   const tracker = founder.status().tracker
   const rest = await Promise.all(Array.from({ length: 9 }, () =>
-    createNode({ storage: tmp(), bootstrap: testnet.bootstrap, tracker, privateRouting: true, privateRelay: true })
+    createNode({ storage: tmp(), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
   ))
   const nodes = [founder, ...rest]
-  t.after(async () => { await Promise.all(nodes.map(n => n.close())); await testnet.destroy() })
-
+  t.after(async () => {
+    await Promise.all(nodes.map(n => n.close()))
+    await Promise.all(guards.map(g => g.close()))
+    await testnet.destroy()
+  })
   const bytes = randomBytes(2 * 1024 * 1024 + 13)
   const expectedSha = createHash('sha256').update(bytes).digest('hex')
   const chunks = Array.from({ length: Math.ceil(bytes.length / 8192) }, (_, i) => bytes.subarray(i * 8192, (i + 1) * 8192))

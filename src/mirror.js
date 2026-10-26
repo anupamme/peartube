@@ -4,6 +4,7 @@
 //   - Mirrors local media folders (`watch-dir`, e.g. `/data/import` on Unraid) without re-ingesting unchanged files
 //   - Mirrors remote JSON manifests or peer relay `/v1/entries` catalogs (`feed-mirror`)
 //   - Greedy P2P Hyperblobs block replication (`p2p-replicate`) to stuff a replica disk full without duplicating catalog ops
+//   - Recruits existing HiveRelays (`hiverelay-seed`) via HTTP `/seed-core` and P2P `hiverelay-seed` DHT as supplemental seeders
 //   - Dynamically loads custom user plugins dropped into `/data/plugins/*.mjs` or `*.js`
 import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, statfsSync, writeFileSync } from 'node:fs'
 import { request as httpRequest } from 'node:http'
@@ -12,6 +13,7 @@ import { basename, extname, join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import b4a from 'b4a'
 import { parseUri } from './index.js'
+import { createHiverelaySeeder } from './hiverelay.js'
 
 const VALID_ID = /^[a-z0-9]+:[a-z0-9]+(:s\d{2}e\d{2,3})?$/
 const MEDIA_EXT = new Set(['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.ts', '.m2ts', '.mpg', '.mpeg', '.ogv', '.ogg', '.flac', '.mp3', '.opus', '.wav', '.aac'])
@@ -81,6 +83,7 @@ export async function createMirrorHost ({
   replicateMinFreeBytes = 20 * 1024 * 1024 * 1024,
   replicateConcurrency = 1,
   replicateStallMs = 20_000,
+  hiverelay = null,
   pluginsDir = join(storage, 'plugins'),
   pollIntervalMs = 60_000,
   onchange = null
@@ -213,6 +216,7 @@ export async function createMirrorHost ({
       try {
         const res = await node.rechunkLegacyBlobs({
           id: typeof payload?.id === 'string' && payload.id.trim() ? payload.id.trim() : null,
+          foreground: Boolean(payload?.foreground),
           limit: Number.isFinite(Number(payload?.limit)) && Number(payload.limit) > 0 ? Number(payload.limit) : Infinity,
           onMigrate: (oldTag, target) => { acquirer?.repointBlob?.(oldTag, target) },
           onProgress: p => { rechunkProgress = { running: true, ...p } }
@@ -696,6 +700,18 @@ export async function createMirrorHost ({
     })
   })
 
+  // 6. Built-in plugin: supplemental HiveRelay seeder bridge (operator HTTP `/seed-core` + zero-key P2P `hiverelay-seed` DHT).
+  const hrOpts = typeof hiverelay === 'boolean'
+    ? { discover: hiverelay }
+    : (typeof hiverelay === 'string' || Array.isArray(hiverelay))
+        ? { relays: hiverelay }
+        : (hiverelay && typeof hiverelay === 'object' ? hiverelay : {})
+  const hiverelayPlugin = register(createHiverelaySeeder({
+    node,
+    ...hrOpts,
+    onchange
+  }))
+
   // Load any external user plugins placed in `/data/plugins/*.mjs` or `*.js`.
   if (pluginsDir && existsSync(pluginsDir)) {
     for (const file of readdirSync(pluginsDir).sort()) {
@@ -726,6 +742,9 @@ export async function createMirrorHost ({
   }
   if (replicateEnabled) {
     run('p2p-replicate').catch(() => {})
+  }
+  if (hiverelayPlugin.enabled()) {
+    run('hiverelay-seed').catch(() => {})
   }
 
   const timer = pollIntervalMs > 0

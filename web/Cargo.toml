@@ -15,8 +15,8 @@ serde_json = "1"
 talc = { version = "4.4", default-features = false, features = ["lock_api"] }
 oxideav-core = "*"
 oxideav-pixfmt = "*"
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
-audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "fce62e096bd96bd24beba305d8e92195248066c2" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
+audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
 
 [profile.release]
 lto = "fat"

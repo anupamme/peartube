@@ -243,8 +243,10 @@ class ReceiverWorker(private val appContext: Context) {
         val msg = runCatching { JSONObject(line) }.getOrNull() ?: return
         if (msg.has("id")) {
             val reply = pending.remove(msg.getLong("id")) ?: return
-            if (msg.has("error")) reply.completeExceptionally(IllegalStateException(msg.optString("error")))
-            else reply.complete(msg.opt("result"))
+            if (msg.has("error")) {
+                android.util.Log.w("PearTubeTV", "RPC #${msg.optLong("id")} failed: ${msg.optString("error")}")
+                reply.completeExceptionally(IllegalStateException(msg.optString("error")))
+            } else reply.complete(msg.opt("result"))
             return
         }
         when (msg.optString("event")) {

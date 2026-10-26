@@ -8,12 +8,13 @@ import { Readable } from 'node:stream'
 import HyperDHT from 'hyperdht'
 import createTestnet from 'hyperdht/testnet.js'
 import { createNode } from '../src/index.js'
+import { createPrivateGuard } from '../src/private-overlay.js'
 
 const HELP = `Private-routing repeatable load/churn E2E (Node.js >=22)
 
 Usage: node test/private-scale.mjs [options]
   --readers N       Independent uncached readers (default 4; minimum 1)
-  --relays N        Private relay identities (default 4; minimum 4)
+  --relays N        Stateless private guard relays (default 3; minimum 2)
   --bytes N         Deterministic fixture bytes (default 1048593)
   --churn-ms N      Replace a relay every N ms; 0 disables churn (default 0)
   --duration-ms N   Keep optional churn active for at least N ms (default 0)
@@ -37,7 +38,7 @@ tc was actually applied; loopback cannot prove external impairment.
 `
 
 function parseArgs (argv) {
-  const values = { readers: 4, relays: 4, bytes: 1024 * 1024 + 17, churnMs: 0, durationMs: 0, timeoutMs: 120000, artifact: '/tmp/peartube-private-scale.json' }
+  const values = { readers: 4, relays: 3, bytes: 1024 * 1024 + 17, churnMs: 0, durationMs: 0, timeoutMs: 120000, artifact: '/tmp/peartube-private-scale.json' }
   const keys = { '--readers': 'readers', '--relays': 'relays', '--bytes': 'bytes', '--churn-ms': 'churnMs', '--duration-ms': 'durationMs', '--timeout-ms': 'timeoutMs', '--artifact': 'artifact' }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
@@ -55,7 +56,7 @@ function parseArgs (argv) {
     values[key] = Number(value)
   }
   if (values.readers < 1) throw new Error('--readers must be at least 1')
-  if (values.relays < 4) throw new Error('--relays must be at least 4')
+  if (values.relays < 2) throw new Error('--relays must be at least 2')
   if (values.bytes < 1) throw new Error('--bytes must be at least 1')
   if (values.timeoutMs < 1000) throw new Error('--timeout-ms must be at least 1000')
   if (values.churnMs > 0 && values.churnMs < 1000) throw new Error('--churn-ms must be 0 or at least 1000')
@@ -97,6 +98,7 @@ async function run (options) {
     fixture: null, tracker: null, relays: [], readers: [], churn: [], assertions: {}, passed: false, error: null
   }
   const nodes = new Map()
+  const guards = new Map()
   let testnet
   let churnTimer
   let observer
@@ -107,32 +109,29 @@ async function run (options) {
     churnBusy = true
     const startedAt = new Date().toISOString()
     try {
-      const old = nodes.get(`relay-${index}`)
+      const old = guards.get(`relay-${index}`)
       if (old) await old.close()
-      const node = await createNode({ storage: resolve(runDir, `relay-${index}`), bootstrap: testnet.bootstrap, tracker: artifact.tracker, privateRouting: true, privateRelay: true })
-      nodes.set(`relay-${index}`, node)
-      const snapshot = { index, startedAt, finishedAt: new Date().toISOString(), peers: node.status().routes.private.peers, rxBytes: node.status().routes.private.rxBytes, txBytes: node.status().routes.private.txBytes }
+      const guard = await createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap })
+      guards.set(`relay-${index}`, guard)
+      const snapshot = { index, startedAt, finishedAt: new Date().toISOString(), publicKey: Buffer.from(guard.publicKey).toString('hex'), ...guard.stats() }
       artifact.churn.push(snapshot)
       churnCount++
     } finally { churnBusy = false }
   }
   try {
     testnet = await createTestnet(options.relays + options.readers + 3)
-    const relay0 = await createNode({ storage: resolve(runDir, 'relay-0'), bootstrap: testnet.bootstrap, privateRouting: true, privateRelay: true })
-    nodes.set('relay-0', relay0)
-    artifact.tracker = relay0.status().tracker
-    artifact.relays.push({ index: 0, writer: relay0.status().writer, status: relay0.status() })
-    for (let i = 1; i < options.relays; i++) {
-      const relay = await createNode({ storage: resolve(runDir, `relay-${i}`), bootstrap: testnet.bootstrap, tracker: artifact.tracker, privateRouting: true, privateRelay: true })
-      nodes.set(`relay-${i}`, relay)
-      artifact.relays.push({ index: i, writer: relay.status().writer, status: relay.status() })
+    for (let i = 0; i < options.relays; i++) {
+      const guard = await createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap })
+      guards.set(`relay-${i}`, guard)
+      artifact.relays.push({ index: i, publicKey: Buffer.from(guard.publicKey).toString('hex'), stats: guard.stats() })
     }
 
     const bytes = fixture(options.bytes)
     const expectedHash = sha256(bytes)
     artifact.fixture = { bytes: bytes.length, sha256: expectedHash, generator: 'byte[i] = (i*31 + (i>>>8)*17 + 23) & 255' }
-    const seeder = await createNode({ storage: resolve(runDir, 'seeder'), bootstrap: testnet.bootstrap, tracker: artifact.tracker, privateRouting: true })
+    const seeder = await createNode({ storage: resolve(runDir, 'seeder'), bootstrap: testnet.bootstrap, privateRouting: true })
     nodes.set('seeder', seeder)
+    artifact.tracker = seeder.status().tracker
     const entry = await within(seeder.publish({ id: 'scale:fixture', title: 'Private scale fixture' }, Readable.from([bytes])), options.timeoutMs, 'Fixture publish')
     if (entry.sha256 !== expectedHash) throw new Error('Seeder published a fixture hash different from the generated fixture')
 
@@ -203,35 +202,46 @@ async function run (options) {
     if (options.churnMs > 0 && !artifact.churn.some(event => !event.error && outcomes.some(result =>
       Date.parse(event.startedAt) <= Date.parse(result.completedAt) && Date.parse(event.finishedAt) >= Date.parse(result.requestedAt)
     ))) throw new Error('No relay actually restarted during an active reader transfer')
-    observer = new HyperDHT({ bootstrap: testnet.bootstrap, port: 0 })
-    const topic = createHash('sha256').update('peartube/private/v1/').update(Buffer.from(artifact.tracker, 'hex')).update(String(Math.floor(Date.now() / 86_400_000))).digest()
+    observer = new HyperDHT({ host: '127.0.0.1', bootstrap: testnet.bootstrap, port: 0 })
+    for (const contentTopic of [seeder.tracker.discoveryKey]) {
+      const leaked = new Set()
+      for await (const reply of observer.lookup(contentTopic)) {
+        for (const peer of reply.peers) leaked.add(Buffer.from(peer.publicKey).toString('hex'))
+      }
+      if (leaked.size !== 0) throw new Error('Tracker discoveryKey had public DHT announcements in private mode')
+    }
     const announced = new Set()
-    for await (const reply of observer.lookup(topic)) {
-      for (const peer of reply.peers) announced.add(Buffer.from(peer.publicKey).toString('hex'))
+    for (let s = 0; s < 4; s++) {
+      const guardTopic = HyperDHT.hash(Buffer.from(`peartube/private-guard/v1/${s}`))
+      for await (const reply of observer.lookup(guardTopic)) {
+        for (const peer of reply.peers) announced.add(Buffer.from(peer.publicKey).toString('hex'))
+      }
     }
     const endpointKey = node => Buffer.from(node.swarm.keyPair.publicKey).toString('hex')
-    if (announced.has(endpointKey(seeder)) || readers.some(({ node }) => announced.has(endpointKey(node)))) throw new Error('A private seeder or reader appeared on the public tracker topic')
-    const relayAnnounced = [...nodes.entries()].some(([name, node]) => name.startsWith('relay-') && announced.has(endpointKey(node)))
-    if (!relayAnnounced) throw new Error('No designated relay announced the private tracker topic')
-    artifact.dhtExposure = { designatedRelayAnnounced: relayAnnounced, seederAnnounced: false, readersAnnounced: false, inspectedTopicPeerCount: announced.size }
+    if (announced.has(endpointKey(seeder)) || readers.some(({ node }) => announced.has(endpointKey(node)))) throw new Error('A private seeder or reader appeared in the guard directory')
+    const guardSet = new Set([...guards.values()].map(g => Buffer.from(g.publicKey).toString('hex')))
+    const relayAnnounced = [...announced].some(k => guardSet.has(k))
+    if (!relayAnnounced) throw new Error('No designated stateless guard announced in the global guard directory')
+    artifact.dhtExposure = { designatedRelayAnnounced: relayAnnounced, seederAnnounced: false, readersAnnounced: false, inspectedGuardCount: announced.size }
     artifact.circuitExposure = [...nodes.entries()].map(([name, node]) => ({ name, ...node.swarm.dht.privateRouting.exposureReport() }))
     if (artifact.circuitExposure.some(report => report.directDestinationSends !== 0)) throw new Error('A private endpoint contacted a destination directly')
     const seederStatus = seeder.status()
     if (seederStatus.routes.private.txBytes < bytes.length) throw new Error(`Seeder private txBytes ${seederStatus.routes.private.txBytes} is below fixture size ${bytes.length}`)
     if (seederStatus.routes.public.txBytes !== 0 || seederStatus.routes.lan.txBytes !== 0) throw new Error('Seeder used public or LAN transmit path')
-    artifact.relays = [...nodes.entries()].filter(([name]) => name.startsWith('relay-')).map(([name, node]) => ({ name, writer: node.status().writer, status: node.status() }))
+    artifact.relays = [...guards.entries()].map(([name, g]) => ({ name, publicKey: Buffer.from(g.publicKey).toString('hex'), stats: g.stats() }))
     artifact.seeder = { writer: seederStatus.writer, status: seederStatus }
     artifact.assertions = { everyReaderExactSha256: true, everyReaderPrivateRxAtLeastFixture: true, everyReaderPublicAndLanRxZero: true, everyReaderCountersReconcile: true, seederPrivateTxAtLeastFixture: true, seederPublicAndLanTxZero: true, dhtEndpointsUnannounced: true, directDestinationSendsZero: true, churnDuringTransfer: options.churnMs > 0 ? true : null }
     artifact.passed = true
   } catch (err) {
     artifact.error = errorText(err)
-    artifact.relays = [...nodes.entries()].filter(([name]) => name.startsWith('relay-')).map(([name, node]) => ({ name, status: safeStatus(node) }))
+    artifact.relays = [...guards.entries()].map(([name, g]) => ({ name, stats: g.stats() }))
     artifact.readers = artifact.readers.length ? artifact.readers : [...nodes.entries()].filter(([name]) => name.startsWith('reader-')).map(([name, node]) => ({ name, status: safeStatus(node) }))
     throw err
   } finally {
     clearInterval(churnTimer)
     if (churnBusy) await until(() => !churnBusy, options.timeoutMs, 'Relay churn shutdown').catch(() => {})
     for (const node of nodes.values()) await node.close().catch(err => { (artifact.cleanupErrors ||= []).push(errorText(err)) })
+    for (const guard of guards.values()) await guard.close().catch(err => { (artifact.cleanupErrors ||= []).push(errorText(err)) })
     await testnet?.destroy().catch(err => { (artifact.cleanupErrors ||= []).push(errorText(err)) })
     await observer?.destroy({ force: true }).catch(err => { (artifact.cleanupErrors ||= []).push(errorText(err)) })
     artifact.endedAt = new Date().toISOString()

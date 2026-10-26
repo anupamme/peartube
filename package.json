@@ -1,6 +1,6 @@
 {
   "name": "peartube",
-  "version": "0.4.32",
+  "version": "0.4.33",
   "description": "Decentralized CDN and debrid provider on the Holepunch stack",
   "license": "MIT",
   "type": "module",
@@ -69,11 +69,12 @@
   },
   "bin": {
     "peartube-relay": "bin/relay.js",
+    "peartube-private-relay": "bin/private-relay.js",
     "peartube-receiver": "bin/receiver.js"
   },
   "scripts": {
-    "postinstall": "cp patches/hyperdht-private/* node_modules/hyperdht/lib/private/ || true",
-    "start": "bare bin/relay.js",
+    "postinstall": "node -e \"const fs=require('fs'),p=require('path');if(fs.existsSync('node_modules')){for(const[k,v]of[['events','bare-events'],['dgram','bare-dgram'],['os','bare-os'],['net','bare-net'],['crypto','peartube-crypto'],['buffer','bare-buffer']])if(fs.existsSync(p.join('node_modules',v))){const t=p.join('node_modules',k);fs.rmSync(t,{recursive:true,force:true});fs.symlinkSync(v,t)}try{const b=require('bare-runtime')();fs.chmodSync(b,0o755);fs.mkdirSync('node_modules/.bin',{recursive:true});fs.rmSync('node_modules/.bin/bare',{force:true});fs.symlinkSync(p.relative('node_modules/.bin',b),'node_modules/.bin/bare')}catch{}}\"",
+    "start": "./node_modules/.bin/bare bin/relay.js",
     "receiver": "node bin/receiver.js",
     "test": "node --test test/*.test.js",
     "test:desktop": "node --test test/desktop.e2e.js",
@@ -100,7 +101,7 @@
     "bonjour-service": "^1.4.4",
     "corestore": "^7.12.6",
     "hyperblobs": "^2.12.1",
-    "hyperdht": "github:ayooooo123/hyperdht#39d8f8b0e862446ae3a045651ccda9210c6f2146",
+    "hyperdht": "^6.34.1",
     "hyperswarm": "^4.17.2",
     "peartube-crypto": "file:worklet/crypto",
     "sodium-native": "github:ayooooo123/sodium-native#562d642e1a78a8e124cf97bfbda77f01c02d1a7f",
@@ -111,7 +112,6 @@
     "bare-pack": "2.2.2"
   },
   "overrides": {
-    "hyperdht": "$hyperdht",
     "sodium-native": "$sodium-native"
   },
   "private": true

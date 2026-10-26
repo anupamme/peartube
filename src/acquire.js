@@ -64,9 +64,10 @@ export function createAcquirer (node, file, {
     try {
       if (!job.announce) {
         const res = await openSource(job.source.url, job.source.headers || {}, controller)
-        job.total = Number(res.headers['content-length']) || null
+        const cl = Number(res.headers['content-length'])
+        job.total = Number.isSafeInteger(cl) && cl >= 0 ? cl : null
         job.bytes = 0
-        const op = await node.put({ id: job.id, title: job.title }, res, bytes => { job.bytes = bytes })
+        const op = await node.put({ id: job.id, title: job.title, expectedSize: job.total }, res, bytes => { job.bytes = bytes })
         if (job.status === 'cancelled') throw new Error('Cancelled')
         await node.clearCache?.().catch(() => {})
         Object.assign(job, { status: 'announcing', announce: op, source: null })

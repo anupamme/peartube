@@ -12,3 +12,24 @@ web/src
 web/target
 web/Cargo.toml
 web/Cargo.lock
+
+# Keep local captures and credentials out of build contexts.
+**/*.pcap*
+**/*.cap
+**/*.cap.*
+**/*.har*
+**/*-pcap
+**/.evidence
+**/.artifacts
+**/.env
+**/.env.*
+**/receiver.json
+**/cast-receivers.json
+**/jobs.json
+**/settings.json
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore

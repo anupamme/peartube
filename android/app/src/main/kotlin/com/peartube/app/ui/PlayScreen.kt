@@ -186,6 +186,7 @@ fun PlayScreen(model: AppModel, host: PlayerHost, entry: Entry, startPositionMs:
                 shape = w to ht
                 host.fit(w.toFloat() / ht)
             }
+            st.videoFps?.let { host.matchFrameRate(it) }
             state = st
             if (resumePending && st.durationMs != null) {
                 resumePending = false

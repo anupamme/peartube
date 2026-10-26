@@ -21,6 +21,7 @@ import { createInterface } from 'node:readline'
 import { Readable } from 'node:stream'
 import createTestnet from 'hyperdht/testnet.js'
 import { createNode } from '../src/index.js'
+import { createPrivateGuard } from '../src/private-overlay.js'
 import { createCastController, createReceiver, formatReceiverUri, parseReceiverUri } from '../src/cast.js'
 import { mdnsBus } from './mdns.js'
 
@@ -305,26 +306,24 @@ test('cross-subnet Noise P2P keypair pairing casts and controls a remote receive
   }
 })
 
-test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop private P2P peer and seeds privately', { timeout: 240_000 }, async t => {
+test('private-routing cast initiator goes offline: TV receiver becomes a 2-hop private P2P peer, seeds privately, and fails closed on HTTP fallback', { timeout: 240_000 }, async t => {
   const testnet = await createTestnet(3)
   const bus = mdnsBus()
+  const guards = []
   const privateNodes = []
   t.after(async () => {
-    await Promise.allSettled(privateNodes.map(n => n.close()))
+    await Promise.all(privateNodes.map(n => n.close()))
+    await Promise.all(guards.map(g => g.close()))
     await testnet.destroy()
   })
 
-  // 4 private-routing relays form the 4-hop circuit mesh on the local testnet.
-  const anchor = await createNode({ storage: tmp('priv-anchor-0'), bootstrap: testnet.bootstrap, privateRouting: true, privateRelay: true })
-  privateNodes.push(anchor)
-  const tracker = anchor.status().tracker
-  for (let i = 1; i < 4; i++) {
-    const r = await createNode({ storage: tmp(`priv-anchor-${i}`), bootstrap: testnet.bootstrap, tracker, privateRouting: true, privateRelay: true })
-    privateNodes.push(r)
+  // Only 2 stateless Guard forwarders are needed — zero tracker-member anchor nodes!
+  for (let i = 0; i < 2; i++) {
+    guards.push(await createPrivateGuard({ host: '127.0.0.1', bootstrap: testnet.bootstrap }))
   }
-
-  const seeder = await createNode({ storage: tmp('priv-seeder'), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
+  const seeder = await createNode({ storage: tmp('priv-seeder'), bootstrap: testnet.bootstrap, privateRouting: true })
   privateNodes.push(seeder)
+  const tracker = seeder.status().tracker
   const initiator = await createNode({ storage: tmp('priv-initiator'), bootstrap: testnet.bootstrap, tracker, privateRouting: true })
   privateNodes.push(initiator)
 
@@ -353,8 +352,9 @@ test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop p
   assert.equal(existsSync(join(tvMetaDir, 'receiver.json')), true, 'private pairing identity stays on internal storage')
   assert.equal(existsSync(join(tvExternalSsd, 'receiver.json')), false, 'private pairing tokens never touch removable SSD')
 
+  const castDir = tmp('priv-initiator-cast')
   const cast = createCastController({
-    storage: tmp('priv-initiator-cast'),
+    storage: castDir,
     getNode: () => initiator,
     getLanHost: () => '127.0.0.1',
     adapter: bus()
@@ -363,26 +363,45 @@ test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop p
   t.after(() => cast.close())
 
   const bytes = randomBytes(1024 * 1024 + 55)
-  await seeder.publish({ id: 'imdb:tt0100001', title: 'Private 4-Hop Cast' }, Readable.from([bytes]))
+  await seeder.publish({ id: 'imdb:tt0100001', title: 'Private 2-Hop Cast' }, Readable.from([bytes]))
   const entry = await waitFor(async () => (await initiator.search('imdb:tt0100001'))[0], 'private initiator synced tracker', 90_000)
 
   const discoveredTv = await waitFor(() => cast.listReceivers().find(r => r.name === 'Private Bedroom TV'), 'discovered TV')
   await cast.pairReceiver({ id: discoveredTv.id, code: tv.info().pairCode })
-  await cast.castPlay({ receiverId: discoveredTv.id, key: entry.key, preferMode: 'auto' })
-  assert.equal(tv.state().mode, 'private-p2p', 'TV receiver matched initiator privateRouting and entered 4-hop private-p2p mode')
 
+  // Strict-private fail-closed check: if P2P watch setup fails while a raw httpStreamUrl is supplied
+  // under privateRouting: true & lan: false (or preferMode: 'p2p'), receiver MUST reject rather than play cleartext HTTP!
+  const savedReceivers = JSON.parse(readFileSync(join(castDir, 'cast-receivers.json'), 'utf8'))
+  const pairedToken = (Array.isArray(savedReceivers) ? savedReceivers[0]?.token : Object.values(savedReceivers || {})[0]?.token) || ''
+  assert.ok(pairedToken.length > 0, 'extracted paired bearer token from sender cast-receivers.json')
+  const failOpenProbe = await fetch(`http://127.0.0.1:${tv.info().port}/cast/v1/command`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${pairedToken}` },
+    body: JSON.stringify({
+      action: 'load',
+      preferMode: 'p2p',
+      httpStreamUrl: 'http://127.0.0.1:9/cleartext-origin-leak.mp4',
+      magnetUrl: 'peartube://watch/bad_hex_pointer',
+      network: { privateRouting: true, lan: false, bootstrap: testnet.bootstrap.map(b => `${b.host}:${b.port}`) }
+    })
+  })
+  assert.notEqual(failOpenProbe.status, 401, 'fail-open probe passed bearer authentication')
+  assert.notEqual(failOpenProbe.status, 200, 'strict-private Cast refuses to fail open to raw httpStreamUrl when P2P load fails')
+
+  await cast.castPlay({ receiverId: discoveredTv.id, key: entry.key, preferMode: 'auto' })
+  assert.equal(tv.state().mode, 'private-p2p', 'TV receiver matched initiator privateRouting and entered 2-hop private-p2p mode')
   // Shut down the cast initiator BEFORE the TV even starts reading the video!
   await cast.close()
   await initiator.close()
 
-  // TV streams 100% of the video over 4-hop encrypted private circuits with ZERO public or LAN bytes!
+  // TV streams 100% of the video over 2-hop encrypted private circuits with ZERO public or LAN bytes!
   const tvStreamed = await fetchRange(tvLoadedUrl)
   assert.equal(tvStreamed.status, 200)
   assert.equal(tvStreamed.body.length, bytes.length)
   assert.equal(tvStreamed.sha256, sha256(bytes))
 
   const tvPeerSt = tv.peerStatus()
-  assert.ok(tvPeerSt.routes.private.rxBytes >= bytes.length, 'TV received video bytes over 4-hop private circuits')
+  assert.ok(tvPeerSt.routes.private.rxBytes >= bytes.length, 'TV received video bytes over 2-hop private circuits')
   assert.equal(tvPeerSt.routes.public.rxBytes, 0, 'zero public DHT bytes on private cast receiver')
   assert.equal(tvPeerSt.routes.lan.rxBytes, 0, 'zero cleartext LAN bytes when initiator had LAN off')
 
@@ -397,7 +416,7 @@ test('private-routing cast initiator goes offline: TV receiver becomes a 4-hop p
   assert.equal(fromTvPrivately.status, 200)
   assert.equal(fromTvPrivately.body.length, bytes.length)
   assert.equal(fromTvPrivately.sha256, sha256(bytes), 'late private peer streamed exact bytes privately from the TV receiver')
-  assert.ok((tv.peerStatus()?.routes.private.txBytes || 0) >= bytes.length, 'TV receiver seeded full video over 4-hop private circuits')
+  assert.ok((tv.peerStatus()?.routes.private.txBytes || 0) >= bytes.length, 'TV receiver seeded full video over 2-hop private circuits')
   assert.equal(tv.peerStatus()?.routes.public.txBytes || 0, 0, 'TV receiver leaked zero public bytes while seeding privately')
 
   evidence.scenarios.privateP2PAutonomousSeeding = {

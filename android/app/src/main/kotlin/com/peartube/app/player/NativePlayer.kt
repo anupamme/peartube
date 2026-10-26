@@ -62,6 +62,7 @@ data class PlayerState(
     val subtitle: Int? = null,
     val videoWidth: Int? = null,
     val videoHeight: Int? = null,
+    val videoFps: Float? = null,
     val videoDecoder: String? = null,
     val droppedFrames: Long = 0,
 ) {
@@ -86,6 +87,7 @@ data class PlayerState(
                 subtitle = json.optInteger("subtitle"),
                 videoWidth = json.optInteger("videoWidth"),
                 videoHeight = json.optInteger("videoHeight"),
+                videoFps = if (json.isNull("videoFps")) null else json.optDouble("videoFps").toFloat().takeIf { it > 0f },
                 videoDecoder = json.optText("videoDecoder"),
                 droppedFrames = json.optLong("droppedFrames", 0L),
             )

@@ -8,6 +8,7 @@ import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from
 import { resolve, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { createNode } from '../src/index.js'
+import { createPrivateGuard } from '../src/private-overlay.js'
 import HyperDHT from 'hyperdht'
 import createTestnet from 'hyperdht/testnet.js'
 
@@ -25,9 +26,9 @@ const { values: opts, positionals: [role] } = parseArgs({
     help: { type: 'boolean', short: 'h' }
   }
 })
-const usage = 'node test/private-wan.mjs testnet|probe|anchor|seeder|reader [--tracker <64-hex-key>] [--bootstrap host:port,...] [--private-host auto|loopback] [--out fresh-directory] [--media mp4] [--sha256 <hex> --bytes N] [--seconds N]'
+const usage = 'node test/private-wan.mjs testnet|probe|guard|anchor|seeder|reader [--tracker <64-hex-key>] [--bootstrap host:port,...] [--private-host auto|loopback] [--out fresh-directory] [--media mp4] [--sha256 <hex> --bytes N] [--seconds N]'
 if (opts.help) { console.log(usage); process.exit(0) }
-if (!['testnet', 'probe', 'anchor', 'seeder', 'reader'].includes(role) || (['probe', 'seeder', 'reader'].includes(role) && !opts.tracker) ||
+if (!['testnet', 'probe', 'guard', 'anchor', 'seeder', 'reader'].includes(role) || (['probe', 'reader'].includes(role) && !opts.tracker) ||
     (opts.tracker && !/^[0-9a-f]{64}$/i.test(opts.tracker)) || (role !== 'seeder' && opts.media) ||
     (role === 'testnet' && (opts.tracker || opts.bootstrap)) || (role === 'probe' && !opts.bootstrap)) throw new Error(usage)
 if (role === 'reader' && (!/^[0-9a-f]{64}$/i.test(opts.sha256 || '') ||
@@ -91,8 +92,13 @@ async function main () {
         }
         return [...peers.values()]
       }
-      const directory = await keys(HyperDHT.hash(Buffer.from('hyperdht/private-route-relays/v7/0')))
-      const topic = createHash('sha256').update('peartube/private/v1/').update(Buffer.from(opts.tracker, 'hex')).update(String(Math.floor(Date.now() / 86_400_000))).digest()
+      const directoryMap = new Map()
+      for (let s = 0; s < 4; s++) {
+        for (const p of await keys(HyperDHT.hash(Buffer.from(`peartube/private-guard/v1/${s}`)))) directoryMap.set(p.key, p)
+      }
+      const directory = [...directoryMap.values()]
+      const epoch = String(Math.floor(Date.now() / 3_600_000))
+      const topic = createHash('sha256').update('peartube/private-rv/v1/').update(Buffer.from(opts.tracker, 'hex')).update(epoch).digest()
       const announced = await keys(topic)
       const info = { role, at: new Date().toISOString(), tracker: opts.tracker, directoryCount: directory.length,
         trackerTopicPeerCount: announced.length, directory, announced }
@@ -106,13 +112,30 @@ async function main () {
     ? Object.values(networkInterfaces()).flat().find(addr => (addr.family === 'IPv4' || addr.family === 4) && !addr.internal)?.address
     : undefined
   if (opts['private-host'] && !privateHost) throw new Error('No isolated IPv4 address to bind the private test node')
+  if (role === 'guard' || role === 'anchor') {
+    const guard = await createPrivateGuard({ host: privateHost, bootstrap })
+    let stopping = false
+    const quit = () => { stopping = true }
+    process.once('SIGINT', quit)
+    process.once('SIGTERM', quit)
+    const writeGuard = () => {
+      const proof = { at: new Date().toISOString(), phase: 'serving', role, publicKey: Buffer.from(guard.publicKey).toString('hex'), address: guard.address(), stats: guard.stats() }
+      writeFileSync(join(out, 'result.json'), JSON.stringify(proof, null, 2) + '\n')
+    }
+    writeGuard()
+    const pulse = setInterval(writeGuard, 5000)
+    try {
+      const until = seconds ? Date.now() + seconds * 1000 : Infinity
+      while (!stopping && Date.now() < until) await new Promise(resolve => setTimeout(resolve, Math.min(5000, until - Date.now())))
+    } finally { clearInterval(pulse); await guard.close() }
+    return
+  }
   const node = await createNode({
     storage: join(out, 'storage'),
     tracker: opts.tracker,
     bootstrap,
     privateHost,
-    privateRouting: true,
-    privateRelay: role === 'anchor'
+    privateRouting: true
   })
   let stopping = false
   const quit = () => { stopping = true }
@@ -121,7 +144,7 @@ async function main () {
   const started = new Date().toISOString()
   let listening = 'pending'
   node.swarm.listening?.then(() => { listening = 'ready' }, err => { listening = err.code || err.message })
-  const topic = createHash('sha256').update('peartube/private/v1/').update(Buffer.from(node.status().tracker, 'hex')).update(String(Math.floor(Date.now() / 86_400_000))).digest()
+  const epoch = () => String(Math.floor(Date.now() / 3_600_000))
   let phase = role === 'reader' ? 'discovering' : media ? 'publishing' : 'serving'
   let published = null
   let received = null
@@ -130,12 +153,13 @@ async function main () {
   const record = () => {
     const status = node.status()
     const exposure = node.swarm.dht.privateRouting.exposureReport()
+    const topic = createHash('sha256').update('peartube/private-rv/v1/').update(Buffer.from(status.tracker, 'hex')).update(epoch()).digest()
     const discovery = node.swarm.status(topic)
     const proof = { at: new Date().toISOString(), started, phase, error, role, tracker: status.tracker, published, received, progress,
       status, routingState: node.swarm.dht.privateRouting.status(), discovery: { listening, server: !!discovery?.isServer, client: !!discovery?.isClient },
       exposure, directTrackerAnnouncement: node.swarm.status(node.tracker.discoveryKey) !== null }
     writeFileSync(join(out, 'result.json'), JSON.stringify(proof, null, 2) + '\n')
-    if (exposure.directDestinationSends !== 0 || (role !== 'anchor' && proof.directTrackerAnnouncement)) throw new Error('Private-only endpoint leaked a direct destination or tracker announcement')
+    if (exposure.directDestinationSends !== 0 || proof.directTrackerAnnouncement) throw new Error('Private-only endpoint leaked a direct destination or tracker announcement')
   }
   record()
   const pulse = setInterval(record, 5000)

@@ -40,6 +40,110 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
   -d '{"id":"imdb:tt0111161","title":"Example","source":{"url":"https://example.com/video.mp4"}}'
 ```
 
+### Install on a system (agent quickstart)
+
+When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `peartube-relay` on a host, follow these rules so peers and players can actually reach it and the daemon survives after the agent turn ends:
+
+1. **Host & network capability check**:
+   - **Real Linux/macOS host, NAS, or VPS (including self-hosted remote `codex` CLI / SSH sessions)**: Supported. If the agent runs inside a command sandbox (such as Codex's `workspace-write` + `codex-network-proxy`), request unsandboxed/escalated execution: `HyperDHT` (`udx-native`) needs raw UDP sockets (cannot traverse an `HTTP_PROXY`), and the relay must be registered under Docker, `systemd`, or `launchd` so the agent's per-command process reaper does not kill it when the turn exits.
+   - **OpenAI-hosted Codex Cloud VMs (`Work in > Cloud`)**: **Cannot** host a live public or LAN `peartube-relay`—the cloud VM sits behind an HTTP/HTTPS-only egress proxy that blocks raw `HyperDHT`/`UDX` UDP (even with Tailscale attached), exposes no inbound TCP/UDP ports, and hibernates between turns. In Codex Cloud, either run loopback-only tests against `createTestnet()` (`PEARTUBE_BOOTSTRAP=127.0.0.1:<port>`), drive an external relay's HTTPS `/v1/acquire` API via a Codex Network secret, or deploy the container below onto a real VPS.
+2. **Required env vars before starting**:
+   - Detect the machine's reachable LAN, Tailscale, or public IPv4 (`HOST_IP`) and set `PEARTUBE_STREAM_HOST=$HOST_IP` (leaving the `127.0.0.1` default breaks playback on every other device). On a LAN host, also set `PEARTUBE_LAN_HOST=$HOST_IP` for zero-config mDNS discovery.
+   - Generate `PEARTUBE_API_TOKEN=$(openssl rand -hex 32)` on any non-loopback network (`GET` playback/Stremio/M3U routes stay open; `POST`/`DELETE` `/v1/*` require `Authorization: Bearer <token>`). Keep `PEARTUBE_STORAGE` mode `0700` and env files mode `0600`.
+   - Leave `PEARTUBE_TRACKER` unset to found a new catalog, or pass the user's existing `PEARTUBE_TRACKER` / `PEARTUBE_SOURCES` (add `PEARTUBE_REPLICATE=1` to mirror and seed remote blobs).
+3. **Install and detach as a persistent service**:
+
+   **Docker / Podman (fastest on Linux servers, NAS, or VPS; `linux/amd64` + `linux/arm64`)** — use `--network host` on Linux LAN hosts so `PEARTUBE_LAN_HOST` mDNS multicast (`224.0.0.251:5353`) and ephemeral LAN UDP ports reach the local network, or `-p 8174:8174 -p 8175:8175 -p 49737:49737/udp` with `-e PEARTUBE_DHT_PORT=49737` on a WAN VPS / macOS Docker Desktop:
+
+   ```sh
+   mkdir -p /srv/peartube-data && chmod 700 /srv/peartube-data
+   API_TOKEN=$(openssl rand -hex 32)
+   docker run -d --name peartube-relay --restart unless-stopped \
+     --network host \
+     -e PEARTUBE_STREAM_HOST=<lan-or-public-ip> \
+     -e PEARTUBE_LAN_HOST=<lan-ipv4-if-on-lan> \
+     -e PEARTUBE_API_TOKEN="$API_TOKEN" \
+     -v /srv/peartube-data:/data \
+     ghcr.io/ayooooo123/peartube-relay:latest
+   ```
+
+   **Native Linux (`systemd`, no Docker — requires Node >= 22, `git`, and `libatomic1` for `rocksdb-native`)**:
+
+   ```sh
+   sudo apt-get update && sudo apt-get install -y --no-install-recommends git curl ca-certificates libatomic1
+   sudo useradd --system --home-dir /var/lib/peartube --shell /usr/sbin/nologin peartube || true
+   sudo install -d -m 0700 -o peartube -g peartube /var/lib/peartube
+   sudo install -d -m 0755 /etc/peartube
+   sudo git clone https://github.com/ayooooo123/peartube.git /opt/peartube
+   sudo npm --prefix /opt/peartube ci --omit=dev
+   API_TOKEN=$(openssl rand -hex 32)
+   sudo tee /etc/peartube/relay.env >/dev/null <<EOF
+   PEARTUBE_STORAGE=/var/lib/peartube
+   PEARTUBE_STREAM_HOST=<lan-or-public-ip>
+   PEARTUBE_LAN_HOST=<lan-ipv4-if-on-lan>
+   PEARTUBE_API_TOKEN=$API_TOKEN
+   UV_THREADPOOL_SIZE=16
+   EOF
+   sudo chmod 0600 /etc/peartube/relay.env
+   sudo tee /etc/systemd/system/peartube-relay.service >/dev/null <<'EOF'
+   [Unit]
+   Description=PearTube P2P Relay
+   After=network-online.target
+   Wants=network-online.target
+
+   [Service]
+   Type=simple
+   User=peartube
+   Group=peartube
+   WorkingDirectory=/opt/peartube
+   EnvironmentFile=/etc/peartube/relay.env
+   ExecStart=/opt/peartube/node_modules/.bin/bare /opt/peartube/bin/relay.js
+   Restart=always
+   RestartSec=2
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   sudo systemctl daemon-reload && sudo systemctl enable --now peartube-relay
+   ```
+
+   **Native macOS (`launchd` LaunchAgent — requires Node >= 22 and `git`)**:
+
+   ```sh
+   mkdir -p ~/.local/share/peartube/data ~/Library/LaunchAgents && chmod 700 ~/.local/share/peartube/data
+   git clone https://github.com/ayooooo123/peartube.git ~/.local/share/peartube/app
+   npm --prefix ~/.local/share/peartube/app ci --omit=dev
+   API_TOKEN=$(openssl rand -hex 32)
+   cat > ~/Library/LaunchAgents/com.peartube.relay.plist <<EOF
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>Label</key><string>com.peartube.relay</string>
+     <key>WorkingDirectory</key><string>$HOME/.local/share/peartube/app</string>
+     <key>ProgramArguments</key><array>
+       <string>$HOME/.local/share/peartube/app/node_modules/.bin/bare</string>
+       <string>$HOME/.local/share/peartube/app/bin/relay.js</string>
+     </array>
+     <key>EnvironmentVariables</key><dict>
+       <key>PEARTUBE_STORAGE</key><string>$HOME/.local/share/peartube/data</string>
+       <key>PEARTUBE_STREAM_HOST</key><string><lan-ipv4></string>
+       <key>PEARTUBE_LAN_HOST</key><string><lan-ipv4></string>
+       <key>PEARTUBE_API_TOKEN</key><string>$API_TOKEN</string>
+     </dict>
+     <key>RunAtLoad</key><true/>
+     <key>KeepAlive</key><true/>
+     <key>StandardOutPath</key><string>$HOME/.local/share/peartube/relay.log</string>
+     <key>StandardErrorPath</key><string>$HOME/.local/share/peartube/relay.log</string>
+   </dict></plist>
+   EOF
+   chmod 600 ~/Library/LaunchAgents/com.peartube.relay.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.peartube.relay.plist
+   ```
+
+4. **Verify and report**:
+   - Poll `curl -fsS http://127.0.0.1:8174/v1/status` until `tracker` and `channel` are 64-character hex keys, and confirm `curl -fsSI http://127.0.0.1:8174/manifest.json` returns `200 OK`.
+   - Return the Web UI (`http://<host>:8174/`), Smart TV page (`http://<host>:8174/tv`), Stremio addon (`http://<host>:8174/manifest.json`), M3U playlist (`http://<host>:8174/v1/playlist.m3u`), public read-only channel URI (`peartube://channel/<status.channel>`), private shared tracker key (`<status.tracker>`), and the path holding `PEARTUBE_API_TOKEN`.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `PEARTUBE_TRACKER` | none (found new) | Tracker key to join |
@@ -50,9 +154,9 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 | `PEARTUBE_STREAM_PORT` | `8175` | Port used by players to stream video |
 | `PEARTUBE_DHT_PORT` | random | Fixed UDP port, only needed when manually port-forwarding behind a double-randomized NAT |
 | `PEARTUBE_BOOTSTRAP` | mainnet | Default public peer-discovery network; override with comma-separated `host:port` servers |
-| `PEARTUBE_PRIVATE_ROUTING` | off | **Early alpha (needs testing):** `1` routes swarm connections over four-hop private circuits; endpoint peer addresses are not announced to the tracker DHT topic |
-| `PEARTUBE_PRIVATE_RELAY` | off | `1`: run an embedded private-route hop; with private routing also enabled, publicly announce this relay as a discovery anchor (its egress IP is visible to the DHT) |
-| `PEARTUBE_PRIVATE_RELAY_PORT` | `PEARTUBE_DHT_PORT` | Dedicated UDP port for the embedded private-route relay |
+| `PEARTUBE_PRIVATE_ROUTING` | off | `1`: routes swarm connections over two-hop encrypted guard circuits on stock HyperDHT; endpoint peer addresses and tracker keys are never announced publicly |
+| `PEARTUBE_PRIVATE_RELAY` | off | `1`: run a standalone Corestore-free guard forwarder (`bin/private-relay.js` / `peartube-private-relay`); cannot be combined with tracker or content flags |
+| `PEARTUBE_PRIVATE_RELAY_PORT` | `PEARTUBE_DHT_PORT` | Dedicated UDP port for the standalone private guard forwarder |
 | `PEARTUBE_RELAY_THROUGH` | none | Comma-separated blind relay keys |
 | `PEARTUBE_LAN_HOST` | off | This machine's LAN IPv4; turns on mDNS discovery of relays on the local network |
 | `PEARTUBE_SOURCES` | none | Comma-separated extra channel/tracker keys or `peartube://` URIs to subscribe to |
@@ -62,6 +166,10 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 | `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON feed or peer `/v1/entries` URLs to import automatically |
 | `PEARTUBE_REPLICATE` | off | `1` (or comma-separated source/writer keys) to P2P-replicate all remote video blobs locally without duplicating catalog entries |
 | `PEARTUBE_REPLICATE_FREE_GB` | `20` | Minimum free disk GiB kept in reserve on `PEARTUBE_STORAGE` when `PEARTUBE_REPLICATE` is active |
+| `PEARTUBE_HIVERELAYS` | none | Optional comma-separated [HiveRelay](https://github.com/bigdestiny2/P2P-Hiverelay) (`v0.24.x`/`v0.26.x`) HTTP URLs (`http://host:9100=TOKEN` or bare URLs) recruited as supplemental public-channel & blob seeders |
+| `PEARTUBE_HIVERELAY_API_KEY` | none | Optional shared Bearer API key fallback for `PEARTUBE_HIVERELAYS` entries without an inline `=TOKEN` |
+| `PEARTUBE_HIVERELAY_DISCOVER` | off | `1`: discover open/allowlisted HiveRelays on the `hiverelay-discovery-v1` DHT topic and broadcast publisher-signed `hiverelay.seed-request.v3` requests (`publisherPubkey` exposed on `/v1/plugins`) |
+| `PEARTUBE_HIVERELAY_REPLICAS` | `3` | Target P2P HiveRelay replica count when `PEARTUBE_HIVERELAY_DISCOVER` or unauthenticated relay URLs are used |
 | `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |
@@ -71,7 +179,7 @@ curl -X POST http://127.0.0.1:8174/v1/acquire \
 
 HyperDHT cannot holepunch between two randomized NATs (it aborts the holepunch). Relays on the same network can still find each other: set `PEARTUBE_LAN_HOST` on each, and they discover one another over mDNS and connect directly over ephemeral UDP ports, with no internet path or port forward. This works across subnets when the router reflects mDNS and routes UDP between them. For relays on different networks, forward a UDP port and set `PEARTUBE_DHT_PORT`, or use a blind relay via `PEARTUBE_RELAY_THROUGH`.
 
-Private routing is **early alpha and needs real-world WAN testing**. It requires at least four reachable, distinct relay identities, and at least one relay must set both `PEARTUBE_PRIVATE_ROUTING=1` and `PEARTUBE_PRIVATE_RELAY=1` so private-only peers can find an anchor before exchanging their expiring peer keys through the tracker. Upgrade every peer before relying on this property: older builds still announce endpoint IPs directly.
+Private routing connects peers over **two-hop encrypted UDX-spliced guard circuits** on unmodified `hyperdht`. It requires at least two reachable, `/24`-diverse guard forwarders (`peartube-private-relay` / `node bin/private-relay.js`, or `PEARTUBE_PRIVATE_RELAY=1` alone with no tracker/content flags), which open zero Corestore or media state on disk and auto-discover over global DHT guard topics. Private endpoints auto-discover guards fresh on each boot, never announce endpoint IPs or `tracker.discoveryKey` publicly, disable LAN mDNS, and fail closed if fewer than two diverse guards are reachable.
 
 ## UI and API
 
@@ -92,7 +200,7 @@ One port serves the acquisitions page at `/`, the `/v1` API, the Stremio v3 addo
 | `POST /v1/cache/clear` `{key?}` | Clear cached video data for one entry or all non-local streams |
 | `GET /v1/events` | Server-Sent Events (`text/event-stream`) live update stream for external UIs |
 | `GET /manifest.json`, `/catalog/:type/:id.json`, `/stream/:type/:id.json` | Stremio v3 addon (`tt…`, `tt…:S:E`, `imdb:…`) |
-| `GET /v1/plugins`, `POST /v1/plugins/:name/run`, `POST /v1/mirror` | List or run import plugins (`http-acquire`, `channel-backfill`, `watch-dir`, `feed-mirror`, plus `/data/plugins/*.mjs` modules) |
+| `GET /v1/plugins`, `POST /v1/plugins/:name/run`, `POST /v1/mirror` | List or run import & seeder plugins (`http-acquire`, `channel-backfill`, `blob-rechunk`, `watch-dir`, `feed-mirror`, `p2p-replicate`, `hiverelay-seed`, plus `/data/plugins/*.mjs` modules) |
 | `GET /v1/playlist.m3u` | M3U8 playlist across followed channels and trackers (VLC, MPV, IINA, Kodi) |
 | `GET /tv`, `GET /cast/receiver` | Fullscreen TV page designed for remote controls (open in a TV browser; no install needed) |
 | `GET /v1/cast/status`, `POST /v1/cast/pair`, `DELETE /v1/cast/receivers/:id`, `POST /v1/cast/play`, `POST /v1/cast/attach`, `POST /v1/cast/control`, `POST /v1/cast/stop`, `POST /v1/cast/receiver/start` (`/stop`, `/rotate`) | Pair a TV, start playback, reconnect its remote control, or manage a local receiver |
@@ -118,14 +226,14 @@ Under the hood, trackers use multi-writer [Autobee](https://github.com/holepunch
 
 ### Cast & TV Receivers (`peartube-cast/v1`)
 
-Phones (Android: `android/app/`, `com.peartube.app`; iOS development target: `ios/`, `com.peartube.app.dev`) and Macs (`desktop/` `PearTube`) stay pure sender, library, and local-player apps. Mobile apps do not have a receive-cast screen or incoming-cast playback mode. Receiver functionality is reserved for the dedicated TV clients below, which expose zero library, channel, search, or settings UI while running a headless P2P / 4-hop `privateRouting` peer engine underneath (`src/cast.js`):
+Phones (Android: `android/app/`, `com.peartube.app`; iOS development target: `ios/`, `com.peartube.app.dev`) and Macs (`desktop/` `PearTube`) stay pure sender, library, and local-player apps. Mobile apps do not have a receive-cast screen or incoming-cast playback mode. Receiver functionality is reserved for the dedicated TV clients below, which expose zero library, channel, search, or settings UI while running a headless P2P / 2-hop `privateRouting` peer engine underneath (`src/cast.js`):
 
 1. **Android TV / Google TV / Fire TV / Pi Receiver APK (`android/tv/`, `com.peartube.receiver`)**: Standalone Leanback/launcher receiver APK (`sh android/release-tv.sh` → `PearTubeReceiver-<version>-arm64.apk`), showing only the 10-foot QR idle screen and decoding MKV/AVI/MP4/HEVC/XviD/FLAC/TrueHD/ASS/PGS natively through `libpeartube.so` with full local D-pad/media-remote controls (Play/Pause, ±10 s, focusable seek bar, Audio & Subtitle track pickers, decoder telemetry, smart Back-to-hide / Back-to-stop) synced back to the sender, plus screensaver wake-on-cast.
 2. **Desktop / HTPC Receiver Binary (`PearTubeReceiver`)**: Standalone macOS/HTPC dumb-receiver binary (`cargo run --manifest-path desktop/Cargo.toml --bin PearTubeReceiver`) backed by `peartube-media`'s hardware/software decoder pipeline with full local seek, Play/Pause, ±10 s, Audio/Subtitle track menus, Fullscreen, and Stop controls.
 3. **Smart TV Web Receiver (`/tv`)**: Zero-install HTML5/SSE fullscreen dumb receiver for LG webOS, Samsung Tizen, game consoles, and TV browsers—open `http://<sender-or-relay-lan-ip>:8177/tv` (or `:8174/tv` on a relay, `:8176/tv` on `peartube-receiver`) with local D-pad/pointer Play/Pause, ±10 s, seek, Mute, Fullscreen, and Stop controls.
 4. **Portable Receiver Daemon (`bin/receiver.js` / `npm run receiver`)**: Runs in full Hybrid P2P+HTTP mode or `--thin` network-only mode (`--player web|mpv|vlc|headless|cmd:…`), and serves as the reference implementation for thin media platforms (tvOS Swift, Roku BrightScript, Kodi, set-top boxes):
    - **Discovery & Pairing**: Advertises `_peartube-cast._tcp` over LAN mDNS (`txt`: `v=1`, `id`, `name`, `h=<lanIp>`, `pk=<noisePubKey>`, `p2p=1|0`, `auth=code|open`) and displays a 6-character TV pairing code (`POST /cast/v1/pair {code}` → persistent bearer `token` stored privately in `cast-receivers.json`). P2P-capable receivers also listen on HyperDHT with a persistent Noise keypair (`peartube://receiver/<64-hex-pubkey>?token=…`) so paired senders can cast and control across subnets, VLANs, or NATs.
-   - **Autonomous P2P & Private-Routing Peer Handoff**: Once a cast starts on a P2P-capable receiver (`p2p=1`), the receiver adopts the initiator's network mode—joining as a normal public/LAN swarm peer (`mode: "p2p"`) or automatically spinning up a 4-hop encrypted private-routing peer (`mode: "private-p2p"`, zero public DHT or cleartext LAN exposure when `privateRouting` is enabled on the initiator). Native P2P receivers stream directly from their local `BlobServer` (`32 MiB` rolling playhead prefetch window) while browser Web TVs use the LAN `/cast/v1/hybrid/` Range splice, continuing to play and seed cached blocks after the initiator disconnects (`POST /v1/cast/attach` reconnects a remote control later; `Detach` leaves the TV playing on its own).
+   - **Autonomous P2P & Private-Routing Peer Handoff**: Once a cast starts on a P2P-capable receiver (`p2p=1`), the receiver adopts the initiator's network mode—joining as a normal public/LAN swarm peer (`mode: "p2p"`) or automatically spinning up a 2-hop encrypted private-routing peer (`mode: "private-p2p"`, failing closed with zero public DHT or cleartext HTTP/LAN exposure when `privateRouting` is enabled on the initiator). Native P2P receivers stream directly from their local `BlobServer` (`32 MiB` rolling playhead prefetch window) while browser Web TVs use the LAN `/cast/v1/hybrid/` Range splice, continuing to play and seed cached blocks after the initiator disconnects (`POST /v1/cast/attach` reconnects a remote control later; `Detach` leaves the TV playing on its own).
    - **Wire Endpoints (Thin Receiver Contract)**: `GET /cast/v1/info`, `POST /cast/v1/pair`, `POST /cast/v1/command` (`load`, `play`, `pause`, `togglePlay`, `seek`, `skip`, `selectAudio`, `selectSubtitle`, `volume`, `stop`, `status`), and `GET /cast/v1/events` (`text/event-stream` pushing `{event: "state", state}`), mirrored identically as NDJSON over HyperDHT Noise `SecretStream`.
 
 Job status: `queued` → `running` (fetching; `bytes` of `total`) → `announcing` (stored, being published to the tracker) → `done`; or `failed` / `cancelled`. A job is `done` only once its announce is on disk; after a restart, `announcing` jobs re-announce without re-fetching.
@@ -138,7 +246,7 @@ Ids look like `imdb:tt0111161` for movies and `imdb:tt0944947:s01e02` for episod
 
 Replication serves any stored core a peer can name, so the Corestore holds only public data: the tracker and the blobs. Acquire jobs, with their source URLs and headers, live in `jobs.json` in the data directory and are never replicated.
 
-Private-only peers put a ten-minute, periodically renewed swarm public key in the tracker so other peers can dial their private listener without a public DHT peer announcement. This key, like the tracker and blob metadata, is public; source URLs and headers remain private. Only designated discovery relays announce on the tracker DHT topic. Ordinary DHT bootstrap and lookups still use the direct overlay and can reveal an endpoint's IP and tracker interest. LAN discovery is a separate direct path. Neither this alpha protocol nor several VPN exits on one physical host protects against traffic correlation or a colluding relay operator.
+Private-only peers exchange ten-minute, periodically renewed inner Noise public keys inside the tracker and seal route descriptors (`G_S` + expiring `routeToken`) behind `crypto_secretbox` keys derived from the tracker or peer public key. Consenting stateless guard forwarders (`bin/private-relay.js`) forward encrypted UDX packets in RAM (`relayTo`) with zero Corestore or Hypercore protocol participation, and every endpoint dials both inbound and outbound strictly through `/24`-diverse guards (`Peer_A -> G_A <-> G_B <- Peer_B`), rejecting endpoint or unadvertised direct hop-open attempts. Because guards are auto-discovered on the open DHT, `/24` diversity enforces network-prefix separation rather than proving independent operators: a monitor running its own advertised `/24` guard can act as `G_A` to reach `G_B` across one non-controlled guard (still never seeing the seeder's IP unless `G_B` also colludes or is seized), and this topology does not provide legal immunity or defeat provider flow logs or global traffic correlation.
 
 Those counters measure replication connections, not bootstrap UDP, specific files, or anonymity. If LAN and private routing are both on, the same video can arrive over LAN while private metadata traffic rises. Prove a private **blob** transfer with a fresh tracker, uncached reader, LAN disabled, exact file hash, private receive bytes at least as large as the file, and zero public/LAN receive bytes; inspect the seeder's transmit counters and the DHT peer topic too. These checks cannot rule out timing correlation, a malicious bootstrap, or colluding route relays.
 
@@ -329,6 +437,20 @@ Version 0.4.31 adjusts socket buffers, startup pacing, and parallel block reques
 
 Version 0.4.32 spreads the whole Holepunch cinema stack wide open for Master's cock: unforgeable single-writer Hyperbee channels, `peartube-cast/v1` LAN + Noise P2P casting with multicast-isolated `/24` auto-discovery, mid-stream HTTP-to-P2P splice failover, dedicated Android TV / macOS `PearTubeReceiver` binaries with automatic external USB SSD seed storage (`--peer-storage`) and behind-playhead low-disk eviction, stock `hypercore@11.39.0` zero-patch `O(1)` Range streaming (`src/blob-server.js`) with 1-RTT Merkle pre-seeding on legacy cores, SIMD128 + WebGL YUV420P browser WASM playback (`web/`), Pixel 9 gesture-bar seek fixes, and the native SwiftUI iOS client (`ios/`) on QuickJS `BareKit`.
 
+Version 0.4.33 handles Android HDMI density and smallest-screen-size changes
+in place, so matching a movie's refresh rate does not recreate the activity and discard
+its player. Software YV12 output carries the source's color range and dataspace;
+VC-1 workers deliver completed pictures even when packet input pauses.
+Packet lanes maintain buffered duration and byte totals incrementally, avoiding
+repeated full-queue scans on the demux thread for high-rate TrueHD streams.
+Check both startup and seeking on the target TV: decoder reference tests alone
+do not establish sustained real-time playback or zero dropped frames.
+
+It also publishes the current application snapshot: private routing over stock
+HyperDHT, the supplemental HiveRelay seeder bridge, per-video blob storage
+changes, and their accompanying client and test updates. These networking
+changes are separate from the forced-HTTP TV playback measurement above.
+
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
 ```sh
@@ -355,9 +477,9 @@ node ios/project.mjs && sh ios/package.sh   # iOS dev target: generate Xcode pro
 
 Run `node test/private-scale.mjs --readers 4 --relays 5 --bytes 8388625 --churn-ms 1500 --artifact android/build/e2e-private-scale/overlap-churn.json` for a fresh local tracker, five real private relay identities, four uncached readers and relay restarts **during** transfer. The JSON keeps discovery/first-byte/transfer times, hashes, path counters, DHT topic exposure and overlap evidence. It is a co-located loopback test, **not** an independent-WAN or loss measurement.
 
-On a Linux box with rootless Podman and an existing PearTube image containing Node, `tc`, and the same dependencies as this checkout, run `node test/private-netem.mjs --media /path/to/fixture.mp4 --readers 1 --relays 4 --delay-ms 20 --jitter-ms 5 --loss-percent 0.1 --shared-namespace --out android/build/e2e-private-netem/run-a`. It creates disposable test containers with fresh Corestores and private relay identities in **one isolated network namespace**, and applies `tc netem` to that namespace's loopback device. The JSON records the applied qdisc, exact media hash and private-only bytes; failed checks are saved in `result.json`, then only this run's containers and network are removed. Increase `--readers` and `--relays`, then add `--churn`, to probe load separately from link impairment. This is one physical host and one shared qdisc, **not** independent egress or production VPN traffic.
+On a host with a running Podman or Docker daemon and an existing PearTube image containing Node, `tc`, and the same dependencies as this checkout, run `node test/private-netem.mjs --media /path/to/fixture.mp4 --readers 1 --relays 3 --delay-ms 20 --jitter-ms 5 --loss-percent 0.1 --shared-namespace --out android/build/e2e-private-netem/run-a`. The harness detects the container engine and records it with the topology in `result.json`. It creates disposable containers with fresh Corestores and stateless guard identities in **one isolated network namespace**, and applies `tc netem` to that namespace's loopback device. The JSON records the applied qdisc, exact media hash and private-only bytes; failed checks are saved before this run's containers and network are removed. Add `--churn` to replace a guard during transfer. This is one physical host and one shared qdisc, **not** independent egress or production VPN traffic.
 
-To test separate network namespaces, omit `--shared-namespace`: a disposable Podman bridge carries packets and each reader shapes its own `eth0`. On the rootless Podman bridge available here, four identities appeared in the relay directory but the tracker never became announced, so that topology produced **no** throughput result. The failure artifact records the public directory, reader state and exact stage; do not confuse it with a measured stream. The shared-namespace variant gets a reproducible impairment test without touching production, but every reader shares an IP and qdisc, not an independent WAN path. Compare with an otherwise identical `--delay-ms 0 --jitter-ms 0 --loss-percent 0` control run before making claims about slow routing.
+To test separate network namespaces, omit `--shared-namespace`: containers use one isolated bridge with addresses in distinct `/24` prefix buckets, and each reader shapes its own `eth0` inside its separate network namespace. The harness verifies distinct guard prefix buckets before starting the seeder. A Docker run with three guards, two uncached readers, 80 ± 15 ms reader-egress delay, 1% loss and live guard replacement passed exact SHA-256/private-only-byte checks (`desktop/target/e2e/netem-2hop-labeled/result.json`). This is still a single-host impairment test, **not** independent WAN or cellular evidence. Compare with an otherwise identical `--delay-ms 0 --jitter-ms 0 --loss-percent 0` control before making performance claims.
 
 The matched single-reader NUC runs used the same uncached 13,776,925-byte video. A 10,000-packet `netem` limit prevented *unrequested* queue overflow; `tc -s qdisc show` recorded actual drops. Shaping began **after** seeding. These are individual runs, not WAN estimates or statistically stable benchmarks:
 
@@ -371,7 +493,9 @@ Even without packet loss, compounded per-hop latency increases time to first byt
 
 With the corrected queue, five relays, four simultaneous readers and one relay replacement during transfer, **all four** independently hashed the full video over private paths with zero public/LAN received bytes. Their first bytes took 1.6–13.5 seconds and transfers 63–69 seconds; the shared qdisc dropped 999 of 958,102 packets (about 0.1%). This is a successful churn/byte-integrity test but still a substantial per-reader slowdown on one host. The JSON also retains the reader's one-MiB arrival milestones, exposing long stalls followed by bursts. Reproduce on genuinely independent network sites before choosing hop-count or transport changes.
 
-For the independent-network phone check, run `node test/private-wan.mjs anchor` on a reachable test host, then run three more anchors with `--tracker` set to its printed fresh key on independent egresses. Run `node test/private-wan.mjs seeder --tracker <key>` on a separate host; without `--media` it generates a one-minute MP4 using ffmpeg and publishes it through private routing. Their separate `--out` directories retain each peer's `result.json` and the fixture's hash/size; do not use production storage or a tracker already used by the library. Once the fixture appears, connect the test phone over **USB ADB**, have a person switch it to cellular or unrelated Wi-Fi, then run `node android/e2e.mjs --serial <usb-serial> --tracker <key> --private-routing --apk <current-dev-apk> --out android/build/e2e-private-wan`. That script touches only `com.peartube.app.dev` (clears its test data), never the signed production app; stop for any Android system dialog and let the person answer it. Its pass condition includes advancing video/audio plus at least 256 KiB received privately and zero bytes on public-DHT/LAN replication paths. Record the seeder's proof and the phone's `result.json` and screenshots together. A USB connection matters: Wi-Fi ADB usually drops when the person switches to cellular. Without independent reachable relays, a fresh app build, and a person-operated phone network switch, do not report this as a WAN result.
+For an independent-network phone check, run `node test/private-wan.mjs guard --out <fresh-directory>` on at least two reachable hosts with independent `/24` egresses. Guards are stateless forwarders: they do not create trackers and take no tracker key. Run `node test/private-wan.mjs seeder --out <fresh-directory>` on a separate host; without `--media` it generates a one-minute MP4 and publishes it privately under a fresh tracker. Keep its printed key and `result.json`, including the fixture hash/size. Once it is serving, connect the phone over **USB ADB**, have a person switch it to cellular or unrelated Wi-Fi, then run `node android/e2e.mjs --serial <usb-serial> --tracker <key> --private-routing --apk <current-dev-apk> --out android/build/e2e-private-wan`. The script clears only `com.peartube.app.dev`, never the production app. If a system window appears, it saves `system-ui.png` and stops; a person must answer the prompt before rerunning. A pass requires advancing video/audio, at least 256 KiB received privately and zero public-DHT/LAN replication bytes. Keep the seeder proof with the phone result and screenshots. Wi-Fi ADB usually drops when switching to cellular. Without independent reachable guards and a person-operated network switch, do not report a WAN result.
+
+For a local native release smoke, build with `cd android && ./gradlew -Ppeartube.dev :app:assembleRelease`, then run `node android/e2e.mjs --serial <serial> --relay http://<isolated-lan-relay>:8174 --lan --apk android/app/build/outputs/apk/release/app-release.apk --out android/build/e2e-release`. The harness copies the supplied APK into the result directory before hashing and installing it, recording both resolved paths so concurrent builds cannot silently replace the tested artifact. It reads the enclosing checkable switch rather than its text label, and checks the focused application before every tap, swipe, text entry or Back key. The Pixel 5a run in `android/build/e2e-release-pixel5a-final/result.json` passed catalog discovery, video/audio (153 frames in five seconds), clock advancement, orientation changes and return to the library. Its retained `installed.apk` and a copy pulled back from the phone (`device.apk`) both hash to `68a7b9fe02a22895a077c9bc1987a63665c05476652dc4cc04e9eaa0e2b0d00f`. Screenshots and `android/build/phone-final-source/result.json` retain the fresh tracker and source-side LAN-byte proof. This verifies the dev-flavored release over LAN, not the production package or private routing over cellular.
 
 `desktop/bundle.sh`, which `npm run app` runs, puts BareKit and the worklet's
 native addons in the app's `Contents/Frameworks` and signs it ad hoc. A
@@ -405,7 +529,7 @@ CI runs core and Cast E2E suites and publishes the multi-arch `ghcr.io/ayooooo12
 
 - Most everyday testing so far has been native playback and basic P2P streaming. Casting (`peartube-cast/v1`), Stremio, M3U playlists, folder/feed import plugins, and multi-catalog directories pass automated end-to-end tests, but have had little real-world use yet.
 - There is no browser upload button, and shared trackers (`peartube://tracker/…`) have no moderation yet: anyone with a tracker key can add duplicate or unwanted listings that crowd out other results. Share `peartube://channel/…` links publicly and keep tracker keys to trusted relays for now.
-- Private routing (`PEARTUBE_PRIVATE_ROUTING=1`) is early alpha and does not make you anonymous. It needs testing across separate internet connections, requires at least four reachable relay hops, adds delay, and still exposes discovery/bootstrap traffic (see [Privacy rule](#privacy-rule)).
+- Private routing (`PEARTUBE_PRIVATE_ROUTING=1`) is early alpha and does not make you anonymous. It needs testing across separate internet connections, requires at least two reachable prefix-diverse guards, adds delay, and still exposes discovery/bootstrap traffic (see [Privacy rule](#privacy-rule)).
 - Common video, audio, and subtitle formats play in `peartube-media`, but compatibility is not yet as broad as VLC's.
 - Platform and access limits: `ios/` is a sideload development target; the Mac app (`arm64`) is not notarized yet, so macOS requires an extra step on first open; Windows and Linux desktop apps are not built yet; `/v1` authentication is just an optional single Bearer token on `POST`/`DELETE`.
 
