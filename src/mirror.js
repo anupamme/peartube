@@ -388,23 +388,23 @@ export async function createMirrorHost ({
         if (!merged.length || s > merged[merged.length - 1][1]) merged.push([s, e])
         else if (e > merged[merged.length - 1][1]) merged[merged.length - 1][1] = e
       }
-      const bf = core.core.bitfield
+      let cleared = false
       let cursor = 0
       for (const [s, e] of merged) {
-        if (s > cursor && bf.firstSet(cursor) >= 0 && bf.firstSet(cursor) < Math.min(s, core.length)) {
-          await core.clear(cursor, Math.min(s, core.length))
-          clearedAny = true
+        const gapEnd = Math.min(s, core.length)
+        if (gapEnd > cursor && await core.count(cursor, gapEnd) > 0) {
+          await core.clear(cursor, gapEnd)
+          cleared = true
         }
         cursor = Math.max(cursor, e)
       }
-      if (cursor < core.length && bf.firstSet(cursor) >= 0) {
+      if (cursor < core.length && await core.count(cursor, core.length) > 0) {
         await core.clear(cursor, core.length)
-        clearedAny = true
+        cleared = true
       }
-      if (clearedAny) {
-        core._ptBlocks = core.length > 0 ? bf.countSet(0, core.length) : 0
-        core._ptSeq = (core._ptSeq || 0) + 1
-        core._ptSlices?.clear()
+      if (cleared) {
+        clearedAny = true
+        await node.refreshBlockCount(core)
       }
     }
     if (clearedAny) await node.gcStorage?.({ full: false }).catch(() => {})
@@ -422,25 +422,24 @@ export async function createMirrorHost ({
     if (start > now) await new Promise(resolve => setTimeout(resolve, start - now))
   }
 
+  // Blocks of a slice this node stores, via Hypercore's public count().
+  const countLocal = (core, offset, length) => core.length > offset
+    ? core.count(offset, Math.min(offset + length, core.length))
+    : Promise.resolve(0)
+
   // Double-buffered 16 MiB linear windows stay sequential on spinning platters while the pacer spaces them out.
   async function downloadReplicaSlice (core, slice, minFreeBytes, stallMs, onProgress = null) {
     const endBlock = slice.blockOffset + slice.blockLength
-    const countHave = () => core.length > slice.blockOffset
-      ? core.core.bitfield.countSet(slice.blockOffset, Math.min(slice.blockLength, core.length - slice.blockOffset))
-      : 0
-    let lastHave = countHave()
+    const countHave = () => countLocal(core, slice.blockOffset, slice.blockLength)
+    let lastHave = await countHave()
     if (lastHave >= slice.blockLength) return { ok: true, bytes: slice.size }
     const avgBlock = slice.blockLength > 0 ? Math.max(4096, slice.size / slice.blockLength) : 65536
     const winBlocks = Math.max(16, Math.min(256, Math.ceil((16 * 1024 * 1024) / avgBlock)))
-    let cursor = slice.blockOffset
-    if (core.length > cursor) {
-      const unset = core.core.bitfield.firstUnset(cursor)
-      if (unset >= cursor && unset < endBlock) cursor = unset
-    }
+    const cursor = slice.blockOffset
     const openWin = async start => {
       if (start >= endBlock) return null
       const end = Math.min(endBlock, start + winBlocks)
-      const have = core.length > start ? core.core.bitfield.countSet(start, Math.min(end, core.length) - start) : 0
+      const have = await countLocal(core, start, end - start)
       await paceReplica((end - start - have) * avgBlock)
       if (closed) return null
       const handle = { start, end, range: core.download({ start, end, linear: true }), done: false, err: null }
@@ -460,7 +459,7 @@ export async function createMirrorHost ({
       while (cur && !closed) {
         while (!cur.done && !closed) {
           await new Promise(resolve => setTimeout(resolve, 250))
-          const nowHave = countHave()
+          const nowHave = await countHave()
           if (nowHave > lastHave) {
             lastHave = nowHave
             lastProgressAt = Date.now()
@@ -473,7 +472,7 @@ export async function createMirrorHost ({
           }
         }
         if (cur.err || closed) return { ok: false, reason: closed ? 'closed' : 'error' }
-        const nowHave = countHave()
+        const nowHave = await countHave()
         if (nowHave > lastHave) {
           lastHave = nowHave
           lastProgressAt = Date.now()
@@ -483,7 +482,7 @@ export async function createMirrorHost ({
         cur = next
         next = cur && cur.end < endBlock ? await openWin(cur.end) : null
       }
-      return { ok: countHave() >= slice.blockLength, bytes: slice.size }
+      return { ok: await countHave() >= slice.blockLength, bytes: slice.size }
     } finally {
       closeWin(cur)
       closeWin(next)
@@ -560,9 +559,7 @@ export async function createMirrorHost ({
     for (const s of slices) {
       const core = cores.get(s.blobs)
       if (!core) { skippedDead++; continue }
-      const have = core.length > s.blockOffset
-        ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
-        : 0
+      const have = await countLocal(core, s.blockOffset, s.blockLength)
       if (have >= s.blockLength) {
         doneEntries++
         doneBytes += s.size
@@ -591,9 +588,7 @@ export async function createMirrorHost ({
           repState.skippedUnavailable = skippedDead
           continue
         }
-        const have = core.length > s.blockOffset
-          ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
-          : 0
+        const have = await countLocal(core, s.blockOffset, s.blockLength)
         if (have >= s.blockLength) {
           doneEntries++
           repState.replicatedEntries = doneEntries
@@ -630,9 +625,7 @@ export async function createMirrorHost ({
               repState.replicatedBytes = doneBytes
             }
           })
-          const afterHave = core.length > s.blockOffset
-            ? core.core.bitfield.countSet(s.blockOffset, Math.min(s.blockLength, core.length - s.blockOffset))
-            : 0
+          const afterHave = await countLocal(core, s.blockOffset, s.blockLength)
           const afterBytes = afterHave >= s.blockLength
             ? s.size
             : (afterHave > 0 ? Math.min(s.size, Math.round((afterHave / s.blockLength) * s.size)) : 0)

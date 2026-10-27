@@ -1,4 +1,4 @@
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import b4a from 'b4a'
@@ -252,8 +252,19 @@ export function createApi (state) {
       return
     }
     if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname === '/v1/blob' && state.node?.blobServer) {
-      req.url = '/' + url.search
-      state.node.blobServer._onrequest(req, res)
+      // Same-origin path to the node's hypercore-blob-server for the web player: forward the Range request over loopback.
+      const headers = req.headers.range ? { range: req.headers.range } : {}
+      const up = httpRequest({ host: '127.0.0.1', port: state.node.blobServer.port, path: '/' + url.search, method: req.method, headers }, upRes => {
+        const out = { ...CORS }
+        for (const h of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+          if (upRes.headers[h] !== undefined) out[h] = upRes.headers[h]
+        }
+        res.writeHead(upRes.statusCode || 502, out)
+        upRes.pipe(res)
+      })
+      up.once('error', () => { if (!res.headersSent) res.writeHead(502, CORS); res.end() })
+      res.once('close', () => up.destroy())
+      up.end()
       return
     }
     if (req.method === 'GET' && (url.pathname === '/tv' || url.pathname === '/cast/receiver') && state.cast) {

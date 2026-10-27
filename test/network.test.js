@@ -340,7 +340,7 @@ test('streaming cache cleanup reclaims behind-playhead blocks in bounded steps w
   const cleanupStarted = performance.now()
   try {
     for (let step = 0; step < 8; step++) {
-      await viewer.evictBehind(published.blobs, published.blob, keepBehind)
+      await viewer.evictBehind(published.blobs, published.blob, { playheadByte: bytes.length - 524288, keepBehindBytes: keepBehind })
       const now = viewer.status().cachedBytes
       assert.ok(now <= remaining, 'cleanup cannot add cached blocks')
       assert.ok(remaining - now <= 32 * 1024 * 1024, 'one cleanup pass cannot hold the core lock for a movie-sized span')

@@ -9,7 +9,7 @@ import os from 'node:os'
 import { randomBytes } from 'node:crypto'
 import Corestore from 'corestore'
 import HyperDHT from 'hyperdht'
-import { BlobServer } from './blob-server.js'
+import BlobServer from 'hypercore-blob-server'
 import b4a from 'b4a'
 import { createNode, formatWatchUri, parseUri } from './index.js'
 import { createLan, interfaceAdapter, selfAddressAdapter } from './lan.js'
@@ -271,46 +271,29 @@ function estimateBlobBlock (blob, byteStart) {
   return blob.blockOffset + Math.min(blob.blockLength - 1, Math.floor(Math.max(0, byteStart) / avgBs))
 }
 
-function hasBlockCached (core, blob, byteStart) {
+async function hasBlockCached (core, blob, byteStart) {
   if (!core?.opened || !blob || blob.blockLength <= 0) return false
   const blockIdx = estimateBlobBlock(blob, byteStart)
-  return core.length > blockIdx && Boolean(core.core?.bitfield?.get(blockIdx))
+  return core.length > blockIdx && core.has(blockIdx)
 }
 
-function hasActiveReplicationPeer (core, blob, bytePos = 0) {
-  if (!core?.opened || !blob || !Array.isArray(core.peers)) return false
-  const endIdx = blob.blockOffset + blob.blockLength
-  const curIdx = estimateBlobBlock(blob, bytePos)
-  const midIdx = blob.blockOffset + (blob.blockLength >> 1)
-  return core.peers.some(p =>
-    p.remoteContiguousLength >= endIdx ||
-    (p.remoteLength > curIdx && Boolean(p.remoteBitfield?.get?.(curIdx)) && Boolean(p.remoteBitfield?.get?.(midIdx)))
-  )
+// A remote holding the whole video (per-video cores start at block 0) makes P2P the right plane.
+function hasActiveReplicationPeer (core, blob) {
+  if (!core?.opened || !blob) return false
+  return core.remoteContiguousLength >= blob.blockOffset + blob.blockLength
 }
 
-function countCachedBlobBytes (core, blob, totalSize) {
+// Cached for 3 s per core so the 1 s status loop doesn't recount a 150k-block video every tick.
+const cachedCounts = new WeakMap() // core -> { at, key, val }
+async function countCachedBlobBytes (core, blob, totalSize) {
   if (!core?.opened || !blob || blob.blockLength <= 0 || core.length <= blob.blockOffset) return 0
-  const now = Date.now()
-  // Spare QuickJS from walking 1.2M legacy bitfield bits every second when nothing new landed.
-  if (
-    core._ptCachedAt &&
-    now - core._ptCachedAt < 3000 &&
-    core._ptCachedOff === blob.blockOffset &&
-    core._ptCachedLen === core.length &&
-    core._ptCachedContig === core.contiguousLength &&
-    core._ptCachedSeq === (core._ptSeq || 0)
-  ) {
-    return core._ptCachedVal
-  }
-  const len = Math.min(blob.blockLength, core.length - blob.blockOffset)
-  const blocks = core.core?.bitfield?.countSet(blob.blockOffset, len) || 0
+  const key = `${blob.blockOffset}:${core.length}`
+  const hit = cachedCounts.get(core)
+  if (hit && hit.key === key && Date.now() - hit.at < 3000) return hit.val
+  const end = Math.min(blob.blockOffset + blob.blockLength, core.length)
+  const blocks = await core.count(blob.blockOffset, end)
   const val = blocks <= 0 ? 0 : (blocks >= blob.blockLength ? totalSize : Math.min(totalSize, Math.round((blocks / blob.blockLength) * totalSize)))
-  core._ptCachedAt = now
-  core._ptCachedOff = blob.blockOffset
-  core._ptCachedLen = core.length
-  core._ptCachedContig = core.contiguousLength
-  core._ptCachedSeq = core._ptSeq || 0
-  core._ptCachedVal = val
+  cachedCounts.set(core, { at: Date.now(), key, val })
   return val
 }
 
@@ -456,11 +439,11 @@ async function serveSpliceStream (media, req, res, onModeUpgrade) {
   while (cursor <= end && !clientClosed) {
     const canHttp = Boolean(media.senderHttpAlive && media.httpStreamUrl)
     const spanEnd = Math.min(end, cursor + 4 * 1048576)
-    const spanCached = hasBlockCached(media.core, media.blob, cursor) && hasBlockCached(media.core, media.blob, spanEnd)
+    const spanCached = await hasBlockCached(media.core, media.blob, cursor) && await hasBlockCached(media.core, media.blob, spanEnd)
     const useP2P = Boolean(media.localP2PUrl) && !forceHttpFallback && (
       !canHttp ||
       spanCached ||
-      hasActiveReplicationPeer(media.core, media.blob, cursor)
+      hasActiveReplicationPeer(media.core, media.blob)
     )
     if (useP2P) {
       onModeUpgrade?.(media.p2pMode)
@@ -902,7 +885,7 @@ export async function createReceiver ({
     // BlobServer URL — avoiding a second QuickJS HTTP copy at 75+ Mbps 4K UHD bitrates.
     // External Smart TV Web browsers (!onCommand) use the LAN-reachable /cast/v1/hybrid/<token> proxy.
     const directLocalP2P = Boolean(onCommand && localP2PUrl)
-    const startOnP2P = Boolean(localP2PUrl && (directLocalP2P || !allowColdHttp || hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
+    const startOnP2P = Boolean(localP2PUrl && (directLocalP2P || !allowColdHttp || await hasBlockCached(core, blob, 0) || hasActiveReplicationPeer(core, blob)))
     const initialMode = startOnP2P ? p2pMode : 'http'
     activeMedia = {
       token: loadToken,
@@ -945,7 +928,7 @@ export async function createReceiver ({
     if (action === 'load') {
       const prepared = await prepareMediaLoad(cmd)
       const startPositionMs = Math.max(0, Number(cmd.startPositionMs) || 0)
-      const cachedBytes = countCachedBlobBytes(activeMedia?.core, activeMedia?.blob, prepared.entry.size)
+      const cachedBytes = await countCachedBlobBytes(activeMedia?.core, activeMedia?.blob, prepared.entry.size)
       const stNode = activeMedia?.peerNode?.status()
       const p2pPeers = stNode ? (stNode.peers + stNode.lanPeers) : 0
       updateState({
@@ -1203,20 +1186,31 @@ export async function createReceiver ({
   }
 
   await refreshMdns()
-  const peerStatsTimer = setInterval(() => {
-    if (closing || !activeMedia?.peerNode || !state.entry) return
-    const st = activeMedia.peerNode.status()
-    const p2pPeers = (st.peers || 0) + (st.lanPeers || 0)
-    const cachedBytes = countCachedBlobBytes(activeMedia.core, activeMedia.blob, state.entry.size || activeMedia.blob?.byteLength || 0)
-    const seeding = cachedBytes > 0
-    const nextMode = (cachedBytes > 0 || hasActiveReplicationPeer(activeMedia.core, activeMedia.blob)) ? activeMedia.p2pMode : state.mode
-    if (p2pPeers !== state.p2pPeers || cachedBytes !== state.cachedBytes || seeding !== state.seeding || nextMode !== state.mode) {
-      updateState({ p2pPeers, cachedBytes, seeding, mode: nextMode })
-    }
-    if (activeMedia.coreKeyHex && activeMedia.blob && !evicting && Date.now() - lastEvictAt >= 6_000 && freeDiskBytes(peerRoot) < LOW_DISK_STREAM_BYTES) {
-      evicting = true
-      lastEvictAt = Date.now()
-      activeMedia.peerNode.evictBehind?.(activeMedia.coreKeyHex, activeMedia.blob).catch(() => {}).finally(() => { evicting = false })
+  let statsBusy = false
+  const peerStatsTimer = setInterval(async () => {
+    if (closing || statsBusy || !activeMedia?.peerNode || !state.entry) return
+    statsBusy = true
+    try {
+      const media = activeMedia
+      const st = media.peerNode.status()
+      const p2pPeers = (st.peers || 0) + (st.lanPeers || 0)
+      const size = state.entry.size || media.blob?.byteLength || 0
+      const cachedBytes = await countCachedBlobBytes(media.core, media.blob, size)
+      if (media !== activeMedia) return
+      const seeding = cachedBytes > 0
+      const nextMode = (cachedBytes > 0 || hasActiveReplicationPeer(media.core, media.blob)) ? media.p2pMode : state.mode
+      if (p2pPeers !== state.p2pPeers || cachedBytes !== state.cachedBytes || seeding !== state.seeding || nextMode !== state.mode) {
+        updateState({ p2pPeers, cachedBytes, seeding, mode: nextMode })
+      }
+      if (media.coreKeyHex && media.blob && !evicting && Date.now() - lastEvictAt >= 6_000 && freeDiskBytes(peerRoot) < LOW_DISK_STREAM_BYTES) {
+        evicting = true
+        lastEvictAt = Date.now()
+        // The player's position maps to a byte offset; eviction keeps everything after it.
+        const playheadByte = state.durationMs > 0 ? Math.floor((state.positionMs / state.durationMs) * size) : 0
+        media.peerNode.evictBehind?.(media.coreKeyHex, media.blob, { playheadByte }).catch(() => {}).finally(() => { evicting = false })
+      }
+    } catch {} finally {
+      statsBusy = false
     }
   }, 1000)
   peerStatsTimer.unref?.()
@@ -1338,6 +1332,7 @@ export function createCastController ({
     if (castBlobServer) return castBlobServer
     const node = getNode()
     if (!node) throw new Error('Node not started')
+    // Stock hypercore-blob-server; its default random token keeps LAN links unguessable.
     const srv = new BlobServer(node.store.session(), {
       host: getLanHost() || '127.0.0.1',
       address: '0.0.0.0',
@@ -1346,9 +1341,6 @@ export function createCastController ({
       resolve: key => allowedCastBlobs.has(b4a.toString(key, 'hex')) ? { key } : null
     })
     await srv.listen()
-    srv.server?.prependListener?.('request', (_req, res) => {
-      for (const [k, v] of Object.entries(CORS)) res.setHeader(k, v)
-    })
     castBlobServer = srv
     return srv
   }

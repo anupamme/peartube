@@ -773,31 +773,23 @@ export function createHiverelaySeeder ({
       try { node.swarm.leavePeer(b4a.from(pubkey, 'hex')) } catch {}
     }
     joinedPeers.clear()
-    for (const [, h] of epochHandles) {
-      if (h) h._needsUnannounce = false
-      h?.destroy?.().catch?.(() => {})
-    }
+    // Shutdown path: start the public leave/destroy calls but don't wait on DHT unannounces;
+    // the node's swarm.destroy({ force: true }) right after ends them.
+    for (const [, h] of epochHandles) h?.destroy?.().catch?.(() => {})
     epochHandles.clear()
     if (discoveryHandle) {
-      discoveryHandle._needsUnannounce = false
-      await discoveryHandle.destroy?.().catch(() => {})
+      discoveryHandle.destroy?.().catch?.(() => {})
       discoveryHandle = null
     }
     for (const peer of seedChannels.values()) {
       try { peer.channel.close() } catch {}
     }
     seedChannels.clear()
-    for (const { discKey } of beaconDbs.values()) {
-      const d = node.swarm.status(discKey)
-      if (d) d._needsUnannounce = false
-      await node.swarm.leave(discKey).catch(() => {})
-    }
+    for (const { discKey } of beaconDbs.values()) node.swarm.leave(discKey).catch(() => {})
     beaconDbs.clear()
     beaconAppToCore.clear()
     if (beaconBlobs) {
-      const d = node.swarm.status(beaconBlobs.discoveryKey)
-      if (d) d._needsUnannounce = false
-      await node.swarm.leave(beaconBlobs.discoveryKey).catch(() => {})
+      node.swarm.leave(beaconBlobs.discoveryKey).catch(() => {})
       await beaconBlobs.close().catch(() => {})
       beaconBlobs = null
     }

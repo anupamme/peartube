@@ -25,25 +25,10 @@ const libs = path.join(jniLibs, abi)
 fs.mkdirSync(assets, { recursive: true })
 fs.mkdirSync(libs, { recursive: true })
 
-// bare-pack runs under Bare (worklet/pack.cjs); its lexer addon crashes under Node 22.
-const run = (...args) => execFileSync(process.execPath, args, { cwd: root, stdio: 'inherit' })
+// Pack and link one entry graph with the same builtin overrides.
 const bundle = path.join(assets, 'worker.bundle')
-run(path.join(root, 'node_modules/bare/bin/bare'), path.join(worklet, 'pack.cjs'),
-  '--linked', '--host', host, '--imports', path.join(worklet, 'imports.json'),
-  '--out', bundle, path.join(worklet, 'worker.js'))
-
-// The bundle starts with "<len>\n<json>\n", len counting both newlines. Its
-// resolutions map each addon's binding.js, at the package root, to a
-// `linked:` library.
-const bytes = fs.readFileSync(bundle)
-const newline = bytes.indexOf(10)
-const len = Number(bytes.subarray(0, newline).toString())
-const header = JSON.parse(bytes.subarray(newline, newline + len).toString())
-for (const [file, imports] of Object.entries(header.resolutions)) {
-  if (imports['.']?.addon?.startsWith('linked:')) {
-    run(path.join(root, 'node_modules/bare-link/bin.js'), '--host', host, '--out', scratch, path.join(root, path.dirname(file)))
-  }
-}
+execFileSync(process.execPath, [path.join(worklet, 'build.mjs'), host, bundle, scratch],
+  { cwd: root, stdio: 'inherit' })
 
 const linked = path.join(scratch, abi)
 for (const name of fs.existsSync(linked) ? fs.readdirSync(linked) : []) {

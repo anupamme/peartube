@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, cpSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, cpSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ios = dirname(fileURLToPath(import.meta.url))
@@ -35,19 +35,8 @@ if (!existsSync(stampPath) || readFileSync(stampPath, 'utf8') !== stamp) {
   const importsPath = join(out, 'imports.json')
   const bundle = join(out, 'worker.bundle')
   writeFileSync(importsPath, JSON.stringify(imports))
-  run('node', ['node_modules/bare/bin/bare', 'worklet/pack.cjs', '--linked', '--host', host, '--imports', importsPath, '--out', bundle, 'worklet/worker.js'])
-  const bytes = readFileSync(bundle)
-  const newline = bytes.indexOf(10)
-  const length = Number(bytes.subarray(0, newline).toString())
-  const header = JSON.parse(bytes.subarray(newline, newline + length).toString())
   const frameworks = join(out, 'Frameworks')
-  rmSync(frameworks, { recursive: true, force: true })
-  mkdirSync(frameworks, { recursive: true })
-  const packages = new Set()
-  for (const [file, imports] of Object.entries(header.resolutions)) {
-    if (imports?.['.']?.addon?.startsWith('linked:')) packages.add(resolve(root, dirname(file.replace(/^\//, ''))))
-  }
-  for (const pkg of packages) run('node', ['node_modules/bare-link/bin.js', '--host', host, '--out', frameworks, pkg])
+  run('node', ['worklet/build.mjs', host, bundle, frameworks, importsPath])
   cpSync(join(root, 'worklet/vendor/bare-kit', host, 'BareKit.framework'), join(frameworks, 'BareKit.framework'), { recursive: true })
   writeFileSync(stampPath, stamp)
 }

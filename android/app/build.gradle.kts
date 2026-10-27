@@ -40,7 +40,7 @@ val workletTask = tasks.register<WorkletTask>("worklet") {
     repo.set(checkout)
     sources.from(
         File(checkout, "android/worklet.mjs"),
-        File(worklet, "worker.js"), File(worklet, "pack.cjs"), File(worklet, "imports.json"), fileTree(File(worklet, "crypto")),
+        File(worklet, "worker.js"), File(worklet, "build.mjs"), File(worklet, "pack.cjs"), File(worklet, "imports.json"), fileTree(File(worklet, "crypto")),
         fileTree(File(worklet, "vendor/bare-kit/android/arm64-v8a")),
         fileTree(File(checkout, "src")), File(checkout, "package.json"), File(checkout, "package-lock.json"),
     )

@@ -8,7 +8,7 @@
 //! rpaths: in place for `cargo run`, and in Contents/Frameworks once
 //! desktop/bundle.sh has copied them into PearTube.app.
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
     let worklet = root.join("worklet");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
 
-    for path in ["worker.js", "pack.cjs", "imports.json", "crypto", "vendor/bare-kit"] {
+    for path in ["worker.js", "build.mjs", "pack.cjs", "imports.json", "crypto", "vendor/bare-kit"] {
         println!("cargo:rerun-if-changed={}", worklet.join(path).display());
     }
     for path in ["src", "patches", "package.json", "package-lock.json"] {
@@ -29,22 +29,15 @@ fn main() {
         ("macos", "x86_64") => "darwin-x64",
         target => panic!("PearTube's desktop app builds for macOS only, not {target:?}"),
     };
-    // imports.json maps the Node builtins that LAN discovery's mDNS dependencies
-    // require (dgram, os, ...) to their bare-* modules. Bare starts from its
-    // launcher script: bare, bare-runtime and its platform package all claim
-    // the `bare` bin, and npm 10 then links none of them.
+    // Pack and link one entry graph with identical builtin overrides.
     let bundle = out.join("worker.bundle");
-    run(Command::new("node")
-        .arg(root.join("node_modules/bare/bin/bare"))
-        .arg(worklet.join("pack.cjs"))
-        .args(["--linked", "--host", host, "--imports"])
-        .arg(worklet.join("imports.json"))
-        .arg("--out")
-        .arg(&bundle)
-        .arg(worklet.join("worker.js"))
-        .current_dir(root));
     let addons = manifest.join("target/bare-addons").join(host);
-    link_addons(root, &bundle, host, &addons);
+    run(Command::new("node")
+        .arg(worklet.join("build.mjs"))
+        .arg(host)
+        .arg(&bundle)
+        .arg(&addons)
+        .current_dir(root));
 
     let kit = worklet.join("vendor/bare-kit/darwin");
     if !kit.join("BareKit.framework").exists() {
@@ -54,24 +47,6 @@ fn main() {
     println!("cargo:rustc-link-lib=framework=BareKit");
     for rpath in [kit.display().to_string(), addons.display().to_string(), "@executable_path/../Frameworks".into()] {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{rpath}");
-    }
-}
-
-/// bare-link every addon the bundle loads. The bundle header maps each
-/// addon's binding.js, at its package root, to a `linked:` library.
-fn link_addons(root: &Path, bundle: &Path, host: &str, out: &Path) {
-    // "<len>\n<json>\n", where len counts both newlines.
-    let bytes = std::fs::read(bundle).unwrap();
-    let newline = bytes.iter().position(|&b| b == b'\n').unwrap();
-    let len: usize = std::str::from_utf8(&bytes[..newline]).unwrap().parse().unwrap();
-    let header: serde_json::Value = serde_json::from_slice(&bytes[newline..newline + len]).unwrap();
-    let _ = std::fs::remove_dir_all(out);
-    for (file, imports) in header["resolutions"].as_object().unwrap() {
-        let linked = imports["."]["addon"].as_str().is_some_and(|addon| addon.starts_with("linked:"));
-        if linked {
-            let package = root.join(Path::new(file.trim_start_matches('/')).parent().unwrap());
-            run(Command::new("node").arg(root.join("node_modules/bare-link/bin.js")).args(["--host", host, "--out"]).arg(out).arg(package));
-        }
     }
 }
 

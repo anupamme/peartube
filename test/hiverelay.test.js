@@ -335,7 +335,7 @@ async function startMockHiveRelay ({ bootstrap, apiKey = 'hr-secret', acceptMode
     for (const k of keys) {
       const e = seededCores.get(k)
       if (!e || e.core.length === 0) return false
-      if (e.core.core.bitfield.countSet(0, e.core.length) < e.core.length) return false
+      if (!(await e.core.has(0, e.core.length))) return false
     }
     return true
   }
@@ -350,8 +350,6 @@ async function startMockHiveRelay ({ bootstrap, apiKey = 'hr-secret', acceptMode
       try { e.range.destroy() } catch {}
       await e.core.close().catch(() => {})
     }
-    for (const d of swarm.topics()) d._needsUnannounce = false
-    await swarm.clear()
     await swarm.destroy({ force: true })
     await store.close()
   }

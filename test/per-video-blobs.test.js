@@ -170,14 +170,15 @@ async function startCappedHiveRelay ({ bootstrap, availableBytes }) {
     pubkey: b4a.toString(publicKey, 'hex'),
     seeded,
     get maxBurstSeen () { return maxBurstSeen },
-    hasAllBlocks: keys => keys.every(k => {
-      const e = seeded.get(k)
-      return e && e.core.length > 0 && e.core.core.bitfield.countSet(0, e.core.length) === e.core.length
-    }),
+    hasAllBlocks: async keys => {
+      for (const k of keys) {
+        const e = seeded.get(k)
+        if (!e || e.core.length === 0 || !(await e.core.has(0, e.core.length))) return false
+      }
+      return true
+    },
     async close () {
       for (const e of seeded.values()) { try { e.range.destroy() } catch {} await e.core.close().catch(() => {}) }
-      for (const d of swarm.topics()) d._needsUnannounce = false
-      await swarm.clear()
       await swarm.destroy({ force: true })
       await store.close()
     }
@@ -332,12 +333,13 @@ test('1-Hypercore-per-video ingests, lazy wakeup, shared-ref purge guard, and le
   }
   const heldAbort = new AbortController()
   const unseededRangeUrl = pub.blobServer.getLink(randomBytes(32), { blob: { blockOffset: 0, blockLength: 4, byteOffset: 0, byteLength: 2097152 } })
-  const heldFetch = fetch(unseededRangeUrl, { headers: { Range: 'bytes=0-524287' }, signal: heldAbort.signal }).catch(() => {})
-  await until(() => pub.blobServer.sessions.size >= 1, 5000, 'active Range session registered on BlobServer')
+  let heldSettled = false
+  const heldFetch = fetch(unseededRangeUrl, { headers: { Range: 'bytes=0-524287' }, signal: heldAbort.signal }).then(() => { heldSettled = true }, () => { heldSettled = true })
+  await until(() => pub.blobServer.connections.size >= 1, 5000, 'Range request reached the blob server')
   let mig
   try {
     mig = await mirror.run('blob-rechunk', { foreground: true })
-    assert.ok(pub.blobServer.sessions.size >= 1, 'Range session remained open throughout foreground rechunk')
+    assert.equal(heldSettled, false, 'Range request stayed open throughout foreground rechunk')
   } finally {
     heldAbort.abort()
     await heldFetch

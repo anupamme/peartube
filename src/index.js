@@ -2,10 +2,11 @@ import Autobee from 'autobee'
 import Hyperbee from 'hyperbee2'
 import ProtomuxWakeup from 'protomux-wakeup'
 import Corestore from 'corestore'
+import CoreStorage from 'hypercore-storage'
 import Hyperswarm from 'hyperswarm'
 import Hyperblobs from 'hyperblobs'
 import hypercoreCrypto from 'hypercore-crypto'
-import { BlobServer } from './blob-server.js'
+import BlobServer from 'hypercore-blob-server'
 import b4a from 'b4a'
 import { createHash } from 'node:crypto'
 import { pipelinePromise, Readable, Transform } from 'streamx'
@@ -154,14 +155,17 @@ export async function createNode ({
     throw new Error('Embedded privateRelay was removed; run standalone peartube-private-relay (bin/private-relay.js) so guard forwarders never open Corestore or tracker state')
   }
   const csDir = join(storage, 'corestore')
-  let store = new Corestore(csDir)
+  // The node owns its hypercore-storage so compaction and core lookups go through that instance, not Corestore internals.
+  let coreStorage = new CoreStorage(csDir)
+  let store = new Corestore(coreStorage)
   try {
     await store.ready()
   } catch (err) {
     if (!/Invalid device file/i.test(err?.message || '')) throw err
     await store.close().catch(() => {})
     try { unlinkSync(join(csDir, 'CORESTORE')) } catch {}
-    store = new Corestore(csDir)
+    coreStorage = new CoreStorage(csDir)
+    store = new Corestore(coreStorage)
     await store.ready()
   }
   const wakeup = new ProtomuxWakeup()
@@ -185,8 +189,9 @@ export async function createNode ({
     throw err
   }
   const isWorklet = typeof globalThis.BareKit !== 'undefined'
+  // Per-peer request window for video cores, passed as Hypercore's documented `inflightRange` when a core opens;
+  // the reciprocity tier picks the window for cores opened from then on.
   let inflightRange = isWorklet ? [6, 8] : [12, 32]
-  store.watch(core => core.replicator.setInflightRange(inflightRange[0], inflightRange[1]))
   const usePrimaryTracker = Boolean(trackerKey) || initialSources.length === 0
   if (!trackerKey && usePrimaryTracker && tracker.local.length === 0) {
     await tracker.append(b4a.from(JSON.stringify({ type: 'init' })))
@@ -360,7 +365,7 @@ export async function createNode ({
     }
   }
   for (const s of blobSlots) {
-    if (s.core.length > 0 && s.core.core.bitfield.countSet(0, s.core.length) > 0) joinContentSwarm(s.key)
+    if (s.core.length > 0 && await s.core.count(0, s.core.length) > 0) joinContentSwarm(s.key)
   }
   for (const hex of ownedBlobs.keys()) {
     if (contentTopics.size >= MAX_CONTENT_TOPICS) break
@@ -549,11 +554,18 @@ export async function createNode ({
   }
   await setLan(createLan)
 
-  const server = new BlobServer(store, {
+  // Stock hypercore-blob-server on its own store session (its close() closes the store it is given).
+  // resolve() opens the video core first, so the core is created with our inflightRange before the server's session.
+  const server = new BlobServer(store.session(), {
     host: streamHost,
     port: streamPort,
     token: null,
-    resolve: (key, info) => { if (info?.keyHex) { joinContentSwarm(info.keyHex); if (!isOwnedBlob(info.keyHex)) blobCore(info.keyHex).catch(() => {}) } return { key } }
+    resolve: async key => {
+      const hex = b4a.toString(key, 'hex')
+      joinContentSwarm(hex)
+      if (!isOwnedBlob(hex)) await blobCore(hex).catch(() => {})
+      return { key }
+    }
   })
   await server.listen()
 
@@ -561,18 +573,24 @@ export async function createNode ({
     return server.getLink(b4a.from(entry.blobs, 'hex'), { blob: entry.blob })
   }
 
-  function syncBlockCounter (core) {
-    core._ptBlocks = core.length > 0 ? core.core.bitfield.countSet(0, core.length) : 0
-    core._ptSeq = (core._ptSeq || 0) + 1
-    core._ptSlices?.clear()
+  // Local block counts per core, kept beside Hypercore from its public count() and download/append events.
+  const blockCounts = new WeakMap() // core -> { blocks, slices: Map<'offset:len', blocks>, ready }
+  async function syncBlockCounter (core) {
+    const c = blockCounts.get(core)
+    if (!c) return
+    c.slices.clear()
+    c.blocks = core.length > 0 ? await core.count(0, core.length) : 0
   }
+  const localBlocks = core => blockCounts.get(core)?.blocks || 0
 
   function ensureBlockCounter (core) {
-    if (core._ptBlocks !== undefined) return
-    core._ptSlices = new Map()
-    syncBlockCounter(core)
-    core.on('download', () => { core._ptBlocks++; core._ptSeq++; core._ptSlices.clear() })
-    core.on('append', () => syncBlockCounter(core))
+    let c = blockCounts.get(core)
+    if (c) return c
+    c = { blocks: 0, slices: new Map(), ready: null }
+    blockCounts.set(core, c)
+    c.ready = syncBlockCounter(core).catch(() => {})
+    core.on('download', () => { c.blocks++; c.slices.clear() })
+    core.on('append', () => { syncBlockCounter(core).catch(() => {}) })
     // Fan 8 MiB ahead across libuv workers on upload so stock Hypercore's serial receiverQueue hits RAM instead of spinning-disk latency.
     let warmUpTo = -1
     core.on('upload', (index, byteLen) => {
@@ -587,17 +605,18 @@ export async function createNode ({
       warmUpTo = end - 1
       for (let i = start; i < end; i++) core.get(i, { wait: false }).catch(() => {})
     })
+    return c
   }
   for (const s of blobSlots) ensureBlockCounter(s.core)
   async function blobCore (hex) {
     let core = blobCores.get(hex)
     if (!core) {
       const slot = blobSlots.find(s => s.key === hex)
-      core = slot ? slot.core : store.get({ key: b4a.from(hex, 'hex') })
+      core = slot ? slot.core : store.get({ key: b4a.from(hex, 'hex'), inflightRange })
       blobCores.set(hex, core)
     }
     if (!core.opened) await core.ready()
-    ensureBlockCounter(core)
+    await ensureBlockCounter(core).ready
     return core
   }
 
@@ -616,13 +635,6 @@ export async function createNode ({
     }
     const { blockOffset, blockLength, byteLength } = entry.blob
     const avgBs = Math.max(4096, Math.round((byteLength || BLOB_BLOCK_SIZE) / Math.max(1, blockLength)))
-    const minFlight = avgBs <= 131072 ? 6 : 4
-    const maxFlight = avgBs <= 131072 ? 8 : 8
-    if (core.core && core.core._ptMaxFlight !== maxFlight) {
-      core.core._ptMaxFlight = maxFlight
-      core.core._ptMinFlight = minFlight
-      core.core.replicator?.setInflightRange(minFlight, maxFlight)
-    }
     const scale = avgBs <= 16384 ? 3 : avgBs <= 131072 ? 2 : 1
     const endBlock = blockOffset + blockLength
     const headEnd = Math.min(endBlock, blockOffset + 8 * scale)
@@ -631,18 +643,19 @@ export async function createNode ({
     warmRanges.set(tag, ranges)
   }
 
-  function entryCachedBytes (core, entry) {
+  async function entryCachedBytes (core, entry) {
     const { blockOffset, blockLength } = entry.blob
     if (!core?.opened || blockLength <= 0 || core.length <= blockOffset) return 0
-    ensureBlockCounter(core)
-    if (core._ptBlocks === 0) return 0
+    const c = ensureBlockCounter(core)
+    await c.ready
+    if (c.blocks === 0) return 0
     const len = Math.min(blockLength, core.length - blockOffset)
     const tag = `${blockOffset}:${len}`
-    let blocks = core._ptSlices.get(tag)
+    let blocks = c.slices.get(tag)
     if (blocks === undefined) {
-      blocks = core.core.bitfield.countSet(blockOffset, len)
-      if (core._ptSlices.size >= 512) core._ptSlices.clear()
-      core._ptSlices.set(tag, blocks)
+      blocks = await core.count(blockOffset, blockOffset + len)
+      if (c.slices.size >= 512) c.slices.clear()
+      c.slices.set(tag, blocks)
     }
     if (blocks <= 0) return 0
     return blocks >= blockLength ? entry.size : Math.min(entry.size, Math.round((blocks / blockLength) * entry.size))
@@ -704,16 +717,14 @@ export async function createNode ({
     const candidates = [...new Set(raw.map(r => r.entry.blobs))].filter(h => !ownedBlobs.has(h))
     await Promise.all(candidates.map(async h => {
       if (blobCores.has(h) || slotSet.has(h)) return blobCore(h)
-      if (store.storage?.hasCore) {
-        const exists = await store.storage.hasCore(hypercoreCrypto.discoveryKey(b4a.from(h, 'hex'))).catch(() => false)
-        if (!exists) return null
-      }
+      const exists = await coreStorage.hasCore(hypercoreCrypto.discoveryKey(b4a.from(h, 'hex'))).catch(() => false)
+      if (!exists) return null
       return blobCore(h)
     }))
-    return raw.map(({ key, entry, source, sourceKind }) => {
+    return Promise.all(raw.map(async ({ key, entry, source, sourceKind }) => {
       const owned = ownedBlobs.get(entry.blobs)
       const core = owned ? null : blobCores.get(entry.blobs)
-      const cached = owned ? entry.size : entryCachedBytes(core, entry)
+      const cached = owned ? entry.size : await entryCachedBytes(core, entry)
       if (cached > 0 && !owned) joinContentSwarm(entry.blobs)
       return {
         key,
@@ -728,7 +739,7 @@ export async function createNode ({
         source,
         sourceKind
       }
-    })
+    }))
   }
 
   let discoveredCache = null
@@ -793,32 +804,19 @@ export async function createNode ({
   }
 
   async function clearDownloadedSpans (core) {
-    const bf = core.core.bitfield
-    const len = core.length
-    let pos = 0
-    while (pos < len) {
-      const start = bf.firstSet(pos)
-      if (start < 0 || start >= len) break
-      const unset = bf.firstUnset(start)
-      const end = unset < 0 || unset > len ? len : unset
-      await core.clear(start, end)
-      pos = end
-    }
+    if (core.length > 0) await core.clear(0, core.length)
   }
 
   let gcQueue = Promise.resolve()
   function gcStorage ({ full = false, streaming = false } = {}) {
     const run = async () => {
-      const st = store.storage
-      if (closing || !st || st.closed) return { beforeBytes: 0, afterBytes: 0, reclaimedBytes: 0 }
+      if (closing || coreStorage.closed) return { beforeBytes: 0, afterBytes: 0, reclaimedBytes: 0 }
       const beforeBytes = dbDiskBytes()
-      await st.ready?.().catch(() => {})
-      await st.rocks?.flush?.().catch(() => {})
-      await st.db?.flush?.().catch(() => {})
-      if (!closing && !st.closed && typeof st.compact === 'function') {
-        const hasLocalBlobs = ownedBlobs.size > 0 || blobSlots.some(s => s.core.length > 0 && s.core.core.bitfield.countSet(0, s.core.length) > 0)
+      await coreStorage.flush().catch(() => {})
+      if (!closing && !coreStorage.closed) {
+        const hasLocalBlobs = ownedBlobs.size > 0 || blobSlots.some(s => localBlocks(s.core) > 0)
         // A playing receiver must never request exclusive compaction; readers keep their lane open.
-        await st.compact(full && !hasLocalBlobs && !streaming
+        await coreStorage.compact(full && !hasLocalBlobs && !streaming
           ? { exclusive: true, blobGarbageCollectionPolicy: 1, blobGarbageCollectionAgeCutoff: 1.0, bottommostLevelCompaction: 2 }
           : { exclusive: false, blobGarbageCollectionPolicy: streaming ? 1 : 0, blobGarbageCollectionAgeCutoff: 1.0, bottommostLevelCompaction: streaming ? 0 : 1 }
         )
@@ -884,24 +882,27 @@ export async function createNode ({
   }
 
   // Drains spent blocks behind the playhead so tiny TV disks swallow 100 GB remuxes without choking on ENOSPC.
-  async function evictBehind (blobsHex, blob, keepBehindBytes = 64 * 1024 * 1024) {
+  // `playheadByte` is the player's position within the blob; the caller (the TV receiver) knows it.
+  async function evictBehind (blobsHex, blob, { playheadByte = 0, keepBehindBytes = 64 * 1024 * 1024 } = {}) {
     const core = blobCores.get(blobsHex)
     if (!core?.opened || !blob || blob.blockLength <= 16 || isOwnedBlob(blobsHex) || core.writable) return 0
-    const playhead = core.core?._ptLastReadBlock || 0
     const bs = Math.max(65536, Math.round((blob.byteLength || BLOB_BLOCK_SIZE) / blob.blockLength))
+    const playhead = blob.blockOffset + Math.floor(Math.max(0, playheadByte) / bs)
     const keepBlocks = Math.max(16, Math.ceil(keepBehindBytes / bs))
     const headGuard = blob.blockOffset + Math.max(8, Math.ceil((4 * 1024 * 1024) / bs))
     const tailGuard = blob.blockOffset + blob.blockLength - Math.max(4, Math.ceil((2 * 1024 * 1024) / bs))
-    const clearTo = Math.min(tailGuard, playhead - keepBlocks)
+    const clearTo = Math.min(tailGuard, core.length, playhead - keepBlocks)
     if (clearTo <= headGuard) return 0
-    const first = core.core.bitfield.firstSet(headGuard)
-    if (first < 0 || first >= clearTo) return 0
-    // A single movie-sized clear gags the playback session mutex; bite off at most 32 MiB per pass.
+    // A single movie-sized clear gags the playback session mutex; clear the first cached 32 MiB stretch per pass.
     const maxBlocks = Math.max(1, Math.floor((32 * 1024 * 1024) / bs))
-    const end = Math.min(clearTo, first + maxBlocks)
-    await core.clear(first, end)
-    syncBlockCounter(core)
-    return (await gcStorage({ streaming: true })).reclaimedBytes
+    for (let start = headGuard; start < clearTo; start += maxBlocks) {
+      const end = Math.min(clearTo, start + maxBlocks)
+      if (await core.count(start, end) === 0) continue
+      await core.clear(start, end)
+      await syncBlockCounter(core)
+      return (await gcStorage({ streaming: true })).reclaimedBytes
+    }
+    return 0
   }
 
   async function clearCache (key = null, { keepBlobsHex = null } = {}) {
@@ -914,11 +915,11 @@ export async function createNode ({
         warmRanges.delete(tag)
       }
       const core = await blobCore(entry.blobs)
-      const clearedBytes = entryCachedBytes(core, entry)
+      const clearedBytes = await entryCachedBytes(core, entry)
       let reclaimedBytes = 0
       if (clearedBytes > 0 && entry.blob.blockLength > 0 && core.length > entry.blob.blockOffset) {
         await core.clear(entry.blob.blockOffset, Math.min(core.length, entry.blob.blockOffset + entry.blob.blockLength))
-        syncBlockCounter(core)
+        await syncBlockCounter(core)
         reclaimedBytes = (await gcStorage({ full: false })).reclaimedBytes
         update()
       }
@@ -933,12 +934,12 @@ export async function createNode ({
     let clearedBytes = 0
     for (const [hex, core] of blobCores) {
       if (hex === keepBlobsHex || isOwnedBlob(hex) || core.writable || !core.opened || core.length === 0) continue
-      ensureBlockCounter(core)
-      const blocks = core._ptBlocks
+      await ensureBlockCounter(core).ready
+      const blocks = localBlocks(core)
       if (blocks > 0) {
         clearedBytes += Math.min(core.byteLength, Math.round((blocks / core.length) * core.byteLength))
         await clearDownloadedSpans(core)
-        syncBlockCounter(core)
+        await syncBlockCounter(core)
       }
     }
     const { reclaimedBytes } = await gcStorage({ full: true })
@@ -1170,14 +1171,13 @@ export async function createNode ({
     const uniformByHash = new Map()
     const legacyGroups = new Map()
     const slotMap = new Map(blobSlots.map(s => [s.key, s]))
-    const hasAllBlocks = (slot, blob) => {
+    const hasAllBlocks = async (slot, blob) => {
       if (!slot || blob.blockLength <= 0) return blob.byteLength === 0
       const end = blob.blockOffset + blob.blockLength
       if (slot.core.length < end) return false
-      const unset = slot.core.core.bitfield.firstUnset(blob.blockOffset)
-      return unset === -1 || unset >= end
+      return slot.core.has(blob.blockOffset, end)
     }
-    const addRef = (op, kind, fullKey) => {
+    const addRef = async (op, kind, fullKey) => {
       if (!slotMap.has(op.blobs)) {
         if (ownedBlobs.has(op.blobs) && op.blob?.blockOffset === 0 && isUniform512(op.blob)) {
           uniformByHash.set(`${op.sha256}:${op.size}`, { blobs: op.blobs, blob: op.blob })
@@ -1185,7 +1185,7 @@ export async function createNode ({
         return
       }
       const slot = slotMap.get(op.blobs)
-      if (!hasAllBlocks(slot, op.blob)) return
+      if (!(await hasAllBlocks(slot, op.blob))) return
       const oldTag = `${op.blobs}:${op.blob.blockOffset}`
       let g = legacyGroups.get(oldTag)
       if (!g) {
@@ -1202,14 +1202,14 @@ export async function createNode ({
         const key = b4a.toString(n.key)
         if (key.startsWith('peer/') || key.startsWith('source/')) continue
         const op = decodeOp(n.value)
-        if (op?.type === 'announce' && key.split('/')[1] === writer) addRef(op, 'tracker', key)
+        if (op?.type === 'announce' && key.split('/')[1] === writer) await addRef(op, 'tracker', key)
       }
     }
     if (localChannel.core.length > 0) {
       for await (const n of localChannel.createReadStream({ gte: b4a.from('entry/'), lt: b4a.from('entry/\xff') })) {
         const subKey = b4a.toString(n.key)
         const op = decodeOp(n.value)
-        if (op?.type === 'announce') addRef(op, 'channel', subKey)
+        if (op?.type === 'announce') await addRef(op, 'channel', subKey)
       }
     }
 
@@ -1224,7 +1224,7 @@ export async function createNode ({
       const sample = g.trackerOps[0]?.op || g.channelOps[0]?.op
       onProgress?.({ total: queue.length, migrated, deduped, remaining: queue.length - migrated, migratedBytes, currentId: sample.id, currentTitle: sample.title })
       const oldSlot = slotMap.get(g.blobs)
-      if (!oldSlot || !hasAllBlocks(oldSlot, g.blob)) continue
+      if (!oldSlot || !(await hasAllBlocks(oldSlot, g.blob))) continue
 
       let target = uniformByHash.get(`${g.sha256}:${g.size}`)
       if (target && !ownedBlobs.has(target.blobs)) target = null
@@ -1240,7 +1240,8 @@ export async function createNode ({
             const pump = () => {
               if (closing) return cb(new Error('Node closing'))
               status()
-              if (!foreground && (server.sessions.size > 0 || upBps > 65536)) { setTimeout(pump, 1500).unref?.(); return }
+              // Background migration yields while this node is moving data for peers or viewers.
+              if (!foreground && (downBps > 65536 || upBps > 65536)) { setTimeout(pump, 1500).unref?.(); return }
               const batchEnd = Math.min(endIdx, idx + 64)
               const reqs = []
               while (idx < batchEnd) reqs.push(oldSlot.core.get(idx++, { wait: false }))
@@ -1293,7 +1294,7 @@ export async function createNode ({
       if (clearEnd > g.blob.blockOffset) {
         await oldSlot.core.clear(g.blob.blockOffset, clearEnd)
         ensureBlockCounter(oldSlot.core)
-        syncBlockCounter(oldSlot.core)
+        syncBlockCounter(oldSlot.core).catch(() => {})
       }
       migrated++
       migratedBytes += g.size
@@ -1341,13 +1342,7 @@ export async function createNode ({
       : isWorklet
         ? [6, 8]
         : (tier === 'seeder' ? [16, 48] : tier === 'peer' ? [12, 32] : [8, 24])
-    if (next[1] !== inflightRange[1]) {
-      inflightRange = next
-      for (const c of store.cores) {
-        if (c._ptMaxFlight && !dht) c.replicator?.setInflightRange(c._ptMinFlight || c._ptMaxFlight, c._ptMaxFlight)
-        else c.replicator?.setInflightRange(next[0], next[1])
-      }
-    }
+    inflightRange = next
     const ratio = rxBytes > 0 ? Math.round((txBytes / rxBytes) * 100) / 100 : (txBytes > 0 ? 1 : 0)
     return { tier, seededBytes, contributingPeers, ratio, inflightMax: next[1] }
   }
@@ -1387,11 +1382,12 @@ export async function createNode ({
       prevRx = rxBytes; prevTx = txBytes; prevAt = now
     }
     let inflightBlocks = 0, cachedBytes = 0
-    for (const c of store.cores) { const peers = c.replicator?.peers; if (peers) for (const p of peers) inflightBlocks += p.inflight || 0 }
     for (const [k, c] of blobCores) {
+      // Display only: Hypercore has no public in-flight count, so read it off the documented `core.peers`.
+      for (const p of c.peers) inflightBlocks += p.inflight || 0
       if (!isOwnedBlob(k) && c.opened && c.length > 0 && c.byteLength > 0) {
         ensureBlockCounter(c)
-        const blocks = c._ptBlocks
+        const blocks = localBlocks(c)
         if (blocks > 0) {
           cachedBytes += Math.min(coreByteLen(c), Math.round((blocks / c.length) * coreByteLen(c)))
           joinContentSwarm(k)
@@ -1403,7 +1399,7 @@ export async function createNode ({
     const blobBytes = ownedVideoBytes + blobSlots.reduce((sum, s) => {
       if (s.core.length === 0 || s.core.byteLength === 0) return sum
       ensureBlockCounter(s.core)
-      const blocks = s.core._ptBlocks
+      const blocks = localBlocks(s.core)
       if (blocks <= 0) return sum
       return sum + (blocks >= s.core.length ? s.core.byteLength : Math.round((blocks / s.core.length) * s.core.byteLength))
     }, 0)
@@ -1441,7 +1437,7 @@ export async function createNode ({
       if (v.length > 0) out.push({ key, kind: 'blobs', length: v.length, byteLength: v.byteLength })
     }
     for (const s of blobSlots) {
-      if (s.core.length > 0 && s.core.core.bitfield.countSet(0, s.core.length) > 0) {
+      if (s.core.length > 0 && localBlocks(s.core) > 0) {
         out.push({ key: s.key, kind: 'blobs', length: s.core.length, byteLength: s.core.byteLength })
       }
     }
@@ -1449,7 +1445,7 @@ export async function createNode ({
       for (const [k, c] of blobCores) {
         if (isOwnedBlob(k) || !c.opened || c.length === 0 || c.byteLength === 0) continue
         ensureBlockCounter(c)
-        if (c._ptBlocks >= c.length) out.push({ key: k, kind: 'blobs', length: c.length, byteLength: c.byteLength })
+        if (localBlocks(c) >= c.length) out.push({ key: k, kind: 'blobs', length: c.length, byteLength: c.byteLength })
       }
     }
     return out
@@ -1466,8 +1462,9 @@ export async function createNode ({
       for (const ranges of warmRanges.values()) for (const r of ranges) r.destroy()
       warmRanges.clear()
       await lan?.destroy()
-      for (const d of swarm.topics()) d._needsUnannounce = false
-      await swarm.clear()
+      // The private overlay's clear() withdraws its rendezvous routes so readers stop dialing a dead peer.
+      // Hyperswarm's would only unannounce each topic; force skips that on the way out.
+      if (dht) await swarm.clear()
       await swarm.destroy({ force: true })
       for (const s of extraSources.values()) { s.dl?.destroy(); await s.bee.close().catch(() => {}) }
       extraSources.clear()
@@ -1493,6 +1490,7 @@ export async function createNode ({
     lanEndpoint: () => lan?.port && lan?.host ? { host: lan.host, port: lan.port, publicKey: b4a.toString(swarm.keyPair.publicKey, 'hex') } : null,
     dialLanPeer: ep => { if (ep?.publicKey && ep?.host && ep?.port) lan?.dialDirect?.(ep.publicKey, ep.host, ep.port) },
     evictBehind,
+    refreshBlockCount: core => syncBlockCounter(core),
     joinSourceSwarm: keyHex => {
       if (dht || closing || !str(keyHex, HEX64)) return
       const sk = b4a.from(keyHex, 'hex')
