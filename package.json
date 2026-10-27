@@ -85,9 +85,9 @@
     "node": ">=22"
   },
   "dependencies": {
-    "autobee": "2.10.1",
+    "autobee": "2.12.1",
     "b4a": "^1.8.0",
-    "bare": "1.34.0",
+    "bare": "1.36.0",
     "bare-buffer": "^3.7.1",
     "bare-dgram": "1.1.1",
     "bare-events": "^2.9.1",
