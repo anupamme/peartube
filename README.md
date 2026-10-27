@@ -171,7 +171,7 @@ When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `p
 | `PEARTUBE_HIVERELAY_API_KEY` | none | Optional shared Bearer API key fallback for `PEARTUBE_HIVERELAYS` entries without an inline `=TOKEN` |
 | `PEARTUBE_HIVERELAY_DISCOVER` | off | `1`: discover open/allowlisted HiveRelays on the `hiverelay-discovery-v1` DHT topic and broadcast publisher-signed `hiverelay.seed-request.v3` requests (`publisherPubkey` exposed on `/v1/plugins`) |
 | `PEARTUBE_HIVERELAY_REPLICAS` | `3` | Target P2P HiveRelay replica count when `PEARTUBE_HIVERELAY_DISCOVER` or unauthenticated relay URLs are used |
-| `PEARTUBE_HIVERELAY_UPLOAD_MBPS` | `50` | Shared upload cap for recruited HiveRelays (bulk replicas); while over it their connections are paused and viewers keep the seeder's full rate; `0` removes the cap |
+| `PEARTUBE_HIVERELAY_UPLOAD_MBPS` | `50` | Shared upload cap for bulk peers: HiveRelays and replica relays (peers that open `hiverelay-seed` without sending seed requests). While over it their connections are paused; viewer apps are never capped. `0` removes the cap |
 | `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |

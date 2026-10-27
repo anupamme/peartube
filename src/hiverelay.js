@@ -345,8 +345,8 @@ export function createHiverelaySeeder ({
   let beaconBlobs = null
   const beaconDbs = new Map() // coreKeyHex -> { key, discKey, byteLength, lastLen }
   const beaconAppToCore = new Map() // beaconAppKeyHex -> coreKeyHex
-  // Recruited HiveRelays are bulk replicas: they share one upload budget so they never starve viewers.
-  // Over budget, their connections are paused, so their block requests wait; viewers keep the seeder's full rate.
+  // Bulk peers (HiveRelays and replica relays: they open `hiverelay-seed` but never request) share one upload
+  // budget; over it their connections are paused so their requests wait. Viewer apps never open the channel.
   const bulkBytesPerTick = uploadMbps > 0 ? uploadMbps * 125_000 / 4 : 0
   const bulkConns = new Map() // conn -> raw bytes written at the last tick
   let bulkTokens = bulkBytesPerTick
@@ -375,6 +375,11 @@ export function createHiverelaySeeder ({
       bulkTimer = setInterval(throttleBulk, 250)
       bulkTimer.unref?.()
     }
+  }
+  // A publisher (another PearTube relay) opens the same channel but sends seed requests; HiveRelays never do.
+  function unmarkBulk (conn) {
+    if (!bulkConns.delete(conn)) return
+    if (bulkPaused) conn.resume()
   }
   function syncEpochTopics () {
     if (closed || !dhtDiscover || node.privateRouting) return
@@ -413,6 +418,7 @@ export function createHiverelaySeeder ({
         if (closed) { channel.close(); return }
         const peerRec = { channel, sendMsg, lastSentAt: 0 }
         seedChannels.set(remoteHex, peerRec)
+        markBulk(conn)
         if (currentSeedRequests.length && sendMsg) {
           peerRec.lastSentAt = Date.now()
           for (const req of currentSeedRequests.slice(0, P2P_PAGE_SIZE)) {
@@ -427,7 +433,7 @@ export function createHiverelaySeeder ({
       }
     })
     if (!channel) return
-    sendMsg = channel.addMessage({ encoding: seedRequestEncoding })
+    sendMsg = channel.addMessage({ encoding: seedRequestEncoding, onmessage () { unmarkBulk(conn) } })
     channel.addMessage({
       encoding: seedAcceptEncoding,
       onmessage (msg) {
@@ -797,7 +803,8 @@ export function createHiverelaySeeder ({
     }
   }
 
-  if (enabled()) ensureSwarmWiring()
+  // Detect HiveRelays on every relay, not only recruiting ones: they pull replicated channels from any seeder.
+  if (enabled() || bulkBytesPerTick) ensureSwarmWiring()
 
   return {
     name: 'hiverelay-seed',
