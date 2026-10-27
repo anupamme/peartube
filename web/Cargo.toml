@@ -15,8 +15,8 @@ serde_json = "1"
 talc = { version = "4.4", default-features = false, features = ["lock_api"] }
 oxideav-core = "*"
 oxideav-pixfmt = "*"
-codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
-audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "5d2f0c9562b47c633ff7bf1cad93937508df6477" }
+codecs = { git = "https://github.com/ayooooo123/peartube-media", rev = "7c3e57094cd357c964ee9fcbce34cf7a037f2059" }
+audio-trim = { git = "https://github.com/ayooooo123/peartube-media", rev = "7c3e57094cd357c964ee9fcbce34cf7a037f2059" }
 
 [profile.release]
 lto = "fat"
@@ -53,7 +53,7 @@ oxideav-iff = { git = "https://github.com/ayooooo123/oxideav-iff", rev = "50e0fc
 oxideav-image-filter = { git = "https://github.com/OxideAV/oxideav-image-filter", rev = "601f4fe832e31fdd9dc3f2bf171389cc09f0dd68" }
 oxideav-indeo = { git = "https://github.com/ayooooo123/oxideav-indeo", rev = "34d5d899b74bd4add72e0572813458bd9fa9a853" }
 oxideav-mjpeg = { git = "https://github.com/ayooooo123/oxideav-mjpeg", rev = "f0ec865380f1dffd79468587497ce50aea7a138d" }
-oxideav-mkv = { git = "https://github.com/ayooooo123/oxideav-mkv", rev = "8229c91fc7abf03adc185c8b50077e9e9af99d63" }
+oxideav-mkv = { git = "https://github.com/ayooooo123/oxideav-mkv", rev = "5a34d4334761b515114df19a8fc29566a3cbba78" }
 oxideav-mov = { git = "https://github.com/ayooooo123/oxideav-mov", rev = "d6af48d7db0428583b60ae52b0f2bbc0901d4318" }
 oxideav-mp2 = { git = "https://github.com/ayooooo123/oxideav-mp2", rev = "503367c83790c2e6d9d41cc545bee26ea70d21b0" }
 oxideav-mp3 = { git = "https://github.com/ayooooo123/oxideav-mp3", rev = "9f353eabd1d7a7980c1fc8b5ef9fa1b5515f5bf4" }

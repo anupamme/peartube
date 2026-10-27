@@ -174,7 +174,8 @@ const hiverelayOpt = {
   apiKey: env.PEARTUBE_HIVERELAY_API_KEY || null,
   discover: Boolean(env.PEARTUBE_HIVERELAY_DISCOVER || env.PEARTUBE_HIVERELAY === '1' || env.PEARTUBE_HIVERELAY === 'true'),
   replicas: Number(env.PEARTUBE_HIVERELAY_REPLICAS || 3),
-  includeCached: Boolean(replicateOpt)
+  includeCached: Boolean(replicateOpt),
+  uploadMbps: Math.max(0, Number(env.PEARTUBE_HIVERELAY_UPLOAD_MBPS ?? 50))
 }
 const hiverelayEnabled = Boolean(hiverelayOpt.relays || hiverelayOpt.discover)
 let replicateDebounce = null
@@ -226,6 +227,7 @@ state.mirror = await createMirrorHost({
   feeds: env.PEARTUBE_MIRROR_FEEDS ? env.PEARTUBE_MIRROR_FEEDS.split(',').map(s => s.trim()).filter(Boolean) : [],
   replicate: replicateOpt,
   replicateMinFreeBytes: Math.max(0, Number(env.PEARTUBE_REPLICATE_FREE_GB ?? 20)) * 1024 * 1024 * 1024,
+  replicateMbps: Math.max(0, Number(env.PEARTUBE_REPLICATE_MBPS ?? 80)),
   hiverelay: hiverelayOpt,
   pluginsDir: env.PEARTUBE_PLUGINS_DIR || join(storage, 'plugins'),
   onchange: () => api.notify('update')

@@ -307,6 +307,7 @@ export function createHiverelaySeeder ({
   replicas = 3,
   ttlDays = 30,
   includeCached = false,
+  uploadMbps = 0,
   onchange = null
 }) {
   const parsed = parseHiverelayConfig(relays, apiKey, discover)
@@ -344,6 +345,37 @@ export function createHiverelaySeeder ({
   let beaconBlobs = null
   const beaconDbs = new Map() // coreKeyHex -> { key, discKey, byteLength, lastLen }
   const beaconAppToCore = new Map() // beaconAppKeyHex -> coreKeyHex
+  // Recruited HiveRelays are bulk replicas: they share one upload budget so they never starve viewers.
+  // Over budget, their connections are paused, so their block requests wait; viewers keep the seeder's full rate.
+  const bulkBytesPerTick = uploadMbps > 0 ? uploadMbps * 125_000 / 4 : 0
+  const bulkConns = new Map() // conn -> raw bytes written at the last tick
+  let bulkTokens = bulkBytesPerTick
+  let bulkPaused = false
+  let bulkTimer = null
+  const rawWritten = conn => conn.rawBytesWritten || conn.rawStream?.bytesTransmitted || 0
+  function throttleBulk () {
+    let sent = 0
+    for (const [conn, prev] of bulkConns) {
+      if (conn.destroyed) { bulkConns.delete(conn); continue }
+      const now = rawWritten(conn)
+      sent += Math.max(0, now - prev)
+      bulkConns.set(conn, now)
+    }
+    bulkTokens = Math.min(bulkBytesPerTick * 2, bulkTokens + bulkBytesPerTick - sent)
+    const pause = bulkTokens < 0
+    if (pause === bulkPaused) return
+    bulkPaused = pause
+    for (const conn of bulkConns.keys()) pause ? conn.pause() : conn.resume()
+  }
+  function markBulk (conn) {
+    if (!bulkBytesPerTick || closed || conn.destroyed || bulkConns.has(conn)) return
+    bulkConns.set(conn, rawWritten(conn))
+    if (bulkPaused) conn.pause()
+    if (!bulkTimer) {
+      bulkTimer = setInterval(throttleBulk, 250)
+      bulkTimer.unref?.()
+    }
+  }
   function syncEpochTopics () {
     if (closed || !dhtDiscover || node.privateRouting) return
     const bucket = Math.floor(Date.now() / DISCOVERY_EPOCH_MS)
@@ -368,6 +400,7 @@ export function createHiverelaySeeder ({
     const remoteBuf = conn.remotePublicKey
     if (!remoteBuf || remoteBuf.byteLength !== 32) return
     const remoteHex = b4a.toString(remoteBuf, 'hex')
+    if (acceptedP2P.has(remoteHex) || [...urlPubkeys.values()].includes(remoteHex)) markBulk(conn)
     let mux
     try { mux = Protomux.from(conn) } catch { return }
     if (mux.opened({ protocol: SEED_PROTOCOL_NAME })) return
@@ -413,6 +446,7 @@ export function createHiverelaySeeder ({
           acceptedAt: Date.now(),
           cores
         })
+        markBulk(conn)
         onchange?.()
       }
     })
@@ -527,6 +561,9 @@ export function createHiverelaySeeder ({
         nextRejoin = Date.now() + 10_000
       }
       await new Promise(resolve => setTimeout(resolve, 150))
+    }
+    for (const conn of node.swarm.connections) {
+      if (conn.remotePublicKey && b4a.toString(conn.remotePublicKey, 'hex') === pubkey) markBulk(conn)
     }
     return pubkey
   }
@@ -705,6 +742,9 @@ export function createHiverelaySeeder ({
       configuredRelays: targets.map(t => ({ url: t.url, hasApiKey: Boolean(t.apiKey), pubkey: urlPubkeys.get(t.url) || null })),
       httpPinnedCores: httpPinned.size,
       p2pConnectedRelays: seedChannels.size,
+      bulkUploadMbps: uploadMbps,
+      bulkPeers: bulkConns.size,
+      bulkPaused,
       p2pAcceptedRelays: [...acceptedP2P.entries()].map(([pubkey, { cores: _c, ...v }]) => ({ pubkey, ...v })),
       p2pDeniedRelays: [...new Map([...deniedP2P.values()].map(({ core: _c, ...v }) => [v.pubkey, v])).values()]
     }
@@ -714,6 +754,11 @@ export function createHiverelaySeeder ({
     closed = true
     clearInterval(epochTimer)
     epochTimer = null
+    clearInterval(bulkTimer)
+    bulkTimer = null
+    for (const conn of bulkConns.keys()) conn.resume()
+    bulkConns.clear()
+    bulkPaused = false
     if (attachedSwarm) {
       node.swarm.off('connection', attachConnection)
       attachedSwarm = false

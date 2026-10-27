@@ -194,7 +194,7 @@ private fun formatStorageFree(bytes: Long, external: Boolean): String? {
     val gb = bytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
     val sizeTxt = if (gb >= 950.0) String.format(Locale.US, "%.2f TB", gb / 1024.0)
     else String.format(Locale.US, "%.1f GB", gb)
-    return if (external) "$sizeTxt external seed drive ready" else "$sizeTxt storage free"
+    return if (external) "$sizeTxt external seed drive ready" else "$sizeTxt internal seed storage · external drive not in use"
 }
 
 private fun prettyCodec(raw: String): String = when (raw.lowercase(Locale.ROOT)) {
@@ -621,6 +621,7 @@ private fun DumbTvReceiverScreen(activity: Activity, worker: ReceiverWorker, hos
                     // Keep AndroidComposeView dead-still while the HUD is tucked away unless playback status visibly shifted.
                     val visibleChange = uiOpen ||
                         snap.playing != state.playing ||
+                        snap.buffering != state.buffering ||
                         snap.error != state.error ||
                         snap.ended != state.ended ||
                         snap.audio != state.audio ||

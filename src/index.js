@@ -807,7 +807,7 @@ export async function createNode ({
   }
 
   let gcQueue = Promise.resolve()
-  function gcStorage ({ full = false } = {}) {
+  function gcStorage ({ full = false, streaming = false } = {}) {
     const run = async () => {
       const st = store.storage
       if (closing || !st || st.closed) return { beforeBytes: 0, afterBytes: 0, reclaimedBytes: 0 }
@@ -817,9 +817,10 @@ export async function createNode ({
       await st.db?.flush?.().catch(() => {})
       if (!closing && !st.closed && typeof st.compact === 'function') {
         const hasLocalBlobs = ownedBlobs.size > 0 || blobSlots.some(s => s.core.length > 0 && s.core.core.bitfield.countSet(0, s.core.length) > 0)
-        await st.compact(full && !hasLocalBlobs
+        // A playing receiver must never request exclusive compaction; readers keep their lane open.
+        await st.compact(full && !hasLocalBlobs && !streaming
           ? { exclusive: true, blobGarbageCollectionPolicy: 1, blobGarbageCollectionAgeCutoff: 1.0, bottommostLevelCompaction: 2 }
-          : { exclusive: false, blobGarbageCollectionPolicy: 0, bottommostLevelCompaction: 1 }
+          : { exclusive: false, blobGarbageCollectionPolicy: streaming ? 1 : 0, blobGarbageCollectionAgeCutoff: 1.0, bottommostLevelCompaction: streaming ? 0 : 1 }
         )
       }
       const afterBytes = dbDiskBytes()
@@ -895,9 +896,12 @@ export async function createNode ({
     if (clearTo <= headGuard) return 0
     const first = core.core.bitfield.firstSet(headGuard)
     if (first < 0 || first >= clearTo) return 0
-    await core.clear(first, clearTo)
+    // A single movie-sized clear gags the playback session mutex; bite off at most 32 MiB per pass.
+    const maxBlocks = Math.max(1, Math.floor((32 * 1024 * 1024) / bs))
+    const end = Math.min(clearTo, first + maxBlocks)
+    await core.clear(first, end)
     syncBlockCounter(core)
-    return (await gcStorage({ full: true })).reclaimedBytes
+    return (await gcStorage({ streaming: true })).reclaimedBytes
   }
 
   async function clearCache (key = null, { keepBlobsHex = null } = {}) {

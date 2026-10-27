@@ -166,10 +166,12 @@ When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `p
 | `PEARTUBE_MIRROR_FEEDS` | none | Optional comma-separated JSON feed or peer `/v1/entries` URLs to import automatically |
 | `PEARTUBE_REPLICATE` | off | `1` (or comma-separated source/writer keys) to P2P-replicate all remote video blobs locally without duplicating catalog entries |
 | `PEARTUBE_REPLICATE_FREE_GB` | `20` | Minimum free disk GiB kept in reserve on `PEARTUBE_STORAGE` when `PEARTUBE_REPLICATE` is active |
+| `PEARTUBE_REPLICATE_MBPS` | `80` | Shared download cap for `PEARTUBE_REPLICATE` backfill, so a replica never takes the seeder capacity (or its own disk) that viewers need; `0` removes the cap |
 | `PEARTUBE_HIVERELAYS` | none | Optional comma-separated [HiveRelay](https://github.com/bigdestiny2/P2P-Hiverelay) (`v0.24.x`/`v0.26.x`) HTTP URLs (`http://host:9100=TOKEN` or bare URLs) recruited as supplemental public-channel & blob seeders |
 | `PEARTUBE_HIVERELAY_API_KEY` | none | Optional shared Bearer API key fallback for `PEARTUBE_HIVERELAYS` entries without an inline `=TOKEN` |
 | `PEARTUBE_HIVERELAY_DISCOVER` | off | `1`: discover open/allowlisted HiveRelays on the `hiverelay-discovery-v1` DHT topic and broadcast publisher-signed `hiverelay.seed-request.v3` requests (`publisherPubkey` exposed on `/v1/plugins`) |
 | `PEARTUBE_HIVERELAY_REPLICAS` | `3` | Target P2P HiveRelay replica count when `PEARTUBE_HIVERELAY_DISCOVER` or unauthenticated relay URLs are used |
+| `PEARTUBE_HIVERELAY_UPLOAD_MBPS` | `50` | Shared upload cap for recruited HiveRelays (bulk replicas); while over it their connections are paused and viewers keep the seeder's full rate; `0` removes the cap |
 | `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |
@@ -293,163 +295,10 @@ bundled font files. Select a subtitle track below the picture, or with the CC bu
 supports shaping, bidirectional text and style overrides; its libass reference
 checks establish bounded pixel agreement, not byte-identical rendering.
 
-Version 0.4.7 integrates the producer-keyed native player lifecycle and fixes
-MP4 opening through the worklet's HTTP read-ahead source. Android close and
-surface replacement retain the views until native retirement is confirmed;
-forced activity destruction reports pending cleanup rather than claiming it
-finished. The release keeps the existing `com.peartube.app` package and signing
-identity so an in-place upgrade preserves settings and private media data.
-Physical-device checks cover hardware H.264, paused backward seek/resume,
-background/surface recreation, repeated close/reopen and EOS. These are scoped
-lifecycle checks, not full codec compatibility or A/V timing certification.
-
-Version 0.4.8 preserves surround dialogue on Android speakers by explicitly
-mixing multichannel PCM to stereo, including the center channel in both outputs.
-Mono and stereo stay unchanged. Channel layouts survive decoder output and
-audio reopen/trim paths; bounded partial writes preserve sample timing.
-
-Version 0.4.9 fixes an Android background-return race: delayed output
-notifications no longer invalidate a decoder that has already restarted.
-Native Player/AAudio/MediaCodec checks cover Surface recreation and an
-intentionally delayed resume notification through EOS. The five-second
-active recovery deadline is unchanged; the 0.4.8 dialogue fix is retained.
-
-Version 0.4.10 moves first-use subtitle font discovery into cue decoding,
-ahead of timed presentation. This corrects a reproduced cold-start case where
-a selected SubRip cue was drawn only after expiry, then immediately cleared.
-Embedded SubRip/ASS selection and a standalone Player caption smoke cover
-host pixels and timing; Android overlay and actual-show confirmation remain
-pending while the test phone is disconnected. The dialogue and background
-resume corrections above are retained.
-
-Version 0.4.11 fixes playback stopping for good about a minute after a seek
-or the start of a long video. The player's 32 MiB read-ahead stopped refilling
-once full, so a movie froze when playback reached the end of that window, and
-later seeks or a return to the app could fail with "no presentable picture".
-It also hid subtitles: in the tested movie the first English cue comes after
-playback had already stopped. On the phone, the same movie now plays past the
-old stop point with its PGS captions on screen.
-
-Version 0.4.12 fixes audio disappearing after seeking in older DivX/MP3 AVI
-videos. The AVI reader now confirms an MPEG-audio frame boundary before using
-the post-seek timestamp, rather than mistaking compressed payload bytes for a
-header. Physical-device checks cover the affected episode in the actual app,
-plus native Player playback from local and HTTP sources. The 0.4.11 subtitle
-and read-ahead corrections remain included.
-
-Version 0.4.13 prevents sustained software-video lateness from leaving a frozen
-picture while audio and captions continue: playback holds the shared clock
-until video catches up, with bounded recovery. It retains the existing late
-frame cutoff rather than displaying increasingly stale pictures. Missing video
-decoders no longer stop otherwise playable audio. The temporary diagnostic
-counter row and per-frame profiling scaffolding are removed from the release.
-
-Android UI updates after background/resume used Tao 0.34.8 with the upstream
-[lost-wake correction](https://github.com/tauri-apps/tao/commit/beb8824915150aebd3938aa46895a9bbf930c212)
-backported, which kept the elapsed-time display and play/pause icon from
-freezing while native playback continued. The Kotlin app that replaced the
-Dioxus Android app does not use Tao, so the backport is gone.
-
-Version 0.4.14 prepares Android software-video pixels before their presentation
-deadline and reduces VC-1 chroma interpolation overhead. Decoded pixels, audio
-sync, the 100 ms late-frame cutoff and bounded catch-up recovery are unchanged.
-Verification includes complete-frame playback comparisons, seek/pause/retry
-regressions, Android ownership tests and native Surface checks on a Pixel 5a.
-This is a prerelease for playback feedback: continuous movie smoothness has not
-yet been verified, and the changes do not promise zero dropped frames.
-
-Version 0.4.15 shows each video at its own shape. The video view used to fill
-the 16:9 player box, so a 2.4:1 movie came out 35% too tall and a 4:3 show a
-third too wide. It now keeps the picture's shape inside the box, with black
-bars, and captions stay on the picture. A seek whose data peers take longer
-than five seconds to send now waits for it instead of failing with "no
-presentable picture before the seek deadline": time spent waiting on the
-network no longer counts against the decoder's five seconds.
-
-Version 0.4.16 plays every frame of videos stamped in decode order. Some MP4
-files with B-frames have no `ctts` box, so each frame carries its decode time
-instead of its display time. Those times run backwards once the decoder puts the
-frames in display order, and the player dropped about half of them as late: 12
-of 24 frames a second on a Pixel 5a. The player now works out each frame's
-display time from the H.264 or HEVC picture order and shows every frame. Files
-with normal timestamps play as before.
-
-Version 0.4.17 is the first release of the native Android app (Kotlin and
-Jetpack Compose). It replaces the Dioxus app on Android with the same package,
-signing key and data, so it updates 0.4.16 in place. The player controls sit over
-the picture, there is a fullscreen mode, and the app takes about 37 MB on a Pixel
-5a instead of about 65 MB. MPEG-4 video such as XviD decodes 1.43x faster: 35 to
-50 frames a second for a 720p XviD episode on a Pixel 5a. A hot phone slows its
-CPU, and at 1.4 GHz the old decoder fell below the 25 frames a second that
-episode needs, so playback kept pausing. Going Home while the phone's hardware
-decoder played a video no longer leaves a black picture and "platform video
-output recovery timed out" on return. With subtitles on, going Home no longer
-stalls for a second.
-
-Version 0.4.18 roughly halves the time MPEG-4 Part 2 (XviD, DivX) decoding takes
-on Android. The player library now uses mimalloc instead of Android's own
-allocator. The decoder allocates and frees a lot each frame: a 720p XviD episode
-took 23 ms a frame on a Pixel 5a with Android's allocator and 11 ms with mimalloc.
-The player's other software decoders use mimalloc too; their speed was not
-measured. The MPEG-4 Part 2 decoder also rebuilds each frame's pixels on two
-threads, which made it 13% faster again. In the app, the first minute of that
-episode used a quarter less CPU outside the P2P worker than with 0.4.17.
-
-Version 0.4.19 is the same app as 0.4.18, built from `main`, which now carries
-the Kotlin Android app. It is the first full release since 0.4.6; 0.4.7 to
-0.4.18 were prereleases.
-
-The Mac app is now a GPUI app (`desktop/`), replacing the Dioxus webview app.
-It keeps that app's settings and stores. The Dioxus code is gone from the
-repository, including the old Dioxus iOS target (a native SwiftUI iOS target now lives in `ios/`).
-
-Version 0.4.20 brings the player fixes made since 0.4.19 and two P2P changes.
-A seek in a Vorbis track, in Matroska or Ogg, lands where it should; before,
-playback stood still or went silent. 24-bit PCM sound in Matroska plays instead
-of noise, and MP3 sound inside MP4 plays (it was taken for AAC and stayed
-silent). A seek onto an open-GOP HEVC picture (a CRA) with the software decoder
-plays on instead of stopping with "reference picture is missing". LAN discovery
-no longer depends on which of two peers has the smaller key: when that peer
-cannot reach the other, the other one now connects after 3 s. The Holepunch
-libraries are on their latest versions (hypercore 11.39, corestore 7.15,
-hyperdht 6.34.1, protomux 3.13); none of the updates changes how NATs are
-crossed.
-
-Version 0.4.21 fixes the Android player's back button after fullscreen. Leaving
-fullscreen from a sideways picture moved the back button down by about the
-status bar's height; it now stays where it was.
-
-Version 0.4.22 moves both apps to the latest player. On the Mac, Dolby Vision
-(profiles 5, 7 and 8) plays through Apple's player, E-AC-3 Atmos is passed
-on, 10-bit HDR plays on the software route, and closed captions show on the
-Apple route too. On both apps: a seek into the last second of a Theora+Vorbis
-video keeps its sound, Ogg Vorbis no longer plays its end padding, an HEVC
-picture without a timestamp no longer takes another's, AMR sound in MP4 plays,
-and a damaged video packet costs only its own picture instead of stopping the
-video. The Android app's native libraries no longer
-carry the build machine's temp-folder path.
-
-Version 0.4.29 groups imported streams into larger 512 KiB pieces (`put()`), updates how 4-hop `privateRouting` relays forward streams (`UDX` splicing), and drops stale relay records so offline nodes do not stall connection setup.
-
-Version 0.4.30 fixes mid-file seeking in large (23 GB+) files, keeps read-ahead buffering alive across concurrent HTTP Range probes, tunes buffering for high-latency multi-hop routes, and adds live P2P transfer stats plus cache clearing (`POST /v1/cache/clear`) in the apps and relay UI.
-
-Version 0.4.31 adjusts socket buffers, startup pacing, and parallel block requests on private routes.
-
-Version 0.4.32 spreads the whole Holepunch cinema stack wide open for Master's cock: unforgeable single-writer Hyperbee channels, `peartube-cast/v1` LAN + Noise P2P casting with multicast-isolated `/24` auto-discovery, mid-stream HTTP-to-P2P splice failover, dedicated Android TV / macOS `PearTubeReceiver` binaries with automatic external USB SSD seed storage (`--peer-storage`) and behind-playhead low-disk eviction, stock `hypercore@11.39.0` zero-patch `O(1)` Range streaming (`src/blob-server.js`) with 1-RTT Merkle pre-seeding on legacy cores, SIMD128 + WebGL YUV420P browser WASM playback (`web/`), Pixel 9 gesture-bar seek fixes, and the native SwiftUI iOS client (`ios/`) on QuickJS `BareKit`.
-
-Version 0.4.33 handles Android HDMI density and smallest-screen-size changes
-in place, so matching a movie's refresh rate does not recreate the activity and discard
-its player. Software YV12 output carries the source's color range and dataspace;
-VC-1 workers deliver completed pictures even when packet input pauses.
-Packet lanes maintain buffered duration and byte totals incrementally, avoiding
-repeated full-queue scans on the demux thread for high-rate TrueHD streams.
-Check both startup and seeking on the target TV: decoder reference tests alone
-do not establish sustained real-time playback or zero dropped frames.
-
-It also publishes the current application snapshot: private routing over stock
-HyperDHT, the supplemental HiveRelay seeder bridge, per-video blob storage
-changes, and their accompanying client and test updates. These networking
-changes are separate from the forced-HTTP TV playback measurement above.
+Local investigations and capture references live in the private Obsidian
+vault: `PearTube Client Release History`, `PearTube TV Playback Diagnostics`
+and `PearTube Private Network Experiments`. This README describes the
+current app and repeatable commands.
 
 Build needs Rust, `npm install` at the repo root, and for `worklet/bare-kit.sh` cmake 4+, ninja and Node 22.21+ or 24.9+. Android also needs the Android SDK with NDK 29.0.14206865 and JDK 17; the Mac app needs Xcode:
 
@@ -473,29 +322,23 @@ node --test test/private-discovery.test.js   # private seeder-to-reader byte pro
 node ios/project.mjs && sh ios/package.sh   # iOS dev target: generate Xcode project and unsigned arm64 IPA for AltStore/SideStore (see ios/README.md)
 ```
 
-### Low-cost private-routing experiments
+On TVs with adopted external storage, install upgrades onto the existing
+volume (`pm install -r --force-uuid <volume-UUID> <on-device-apk>`), then
+verify `/cast/v1/info` still reports the same receiver identity and
+`externalStorage: true`. An ordinary `adb install -r` can move the app
+back to internal storage, stranding its identity and cached blobs.
 
-Run `node test/private-scale.mjs --readers 4 --relays 5 --bytes 8388625 --churn-ms 1500 --artifact android/build/e2e-private-scale/overlap-churn.json` for a fresh local tracker, five real private relay identities, four uncached readers and relay restarts **during** transfer. The JSON keeps discovery/first-byte/transfer times, hashes, path counters, DHT topic exposure and overlap evidence. It is a co-located loopback test, **not** an independent-WAN or loss measurement.
+For an upcoming TV/P2P test, start device-side packet evidence **before** playback (not during someone else's run):
 
-On a host with a running Podman or Docker daemon and an existing PearTube image containing Node, `tc`, and the same dependencies as this checkout, run `node test/private-netem.mjs --media /path/to/fixture.mp4 --readers 1 --relays 3 --delay-ms 20 --jitter-ms 5 --loss-percent 0.1 --shared-namespace --out android/build/e2e-private-netem/run-a`. The harness detects the container engine and records it with the topology in `result.json`. It creates disposable containers with fresh Corestores and stateless guard identities in **one isolated network namespace**, and applies `tc netem` to that namespace's loopback device. The JSON records the applied qdisc, exact media hash and private-only bytes; failed checks are saved before this run's containers and network are removed. Add `--churn` to replace a guard during transfer. This is one physical host and one shared qdisc, **not** independent egress or production VPN traffic.
+```sh
+node android/capture-network.mjs --serial <rooted-TV-adb-serial> --receiver http://<tv-ip>:8176 --out android/build/e2e-captures/tv-run-1 --seconds 7200
+# Or wrap a fresh automated run; use a different directory from android/e2e.mjs --out, which clears its own output:
+node android/capture-network.mjs --serial <rooted-TV-adb-serial> --receiver http://<tv-ip>:8176 --out android/build/e2e-captures/phone-tv-run-1 -- node android/e2e.mjs --serial <phone-adb-serial> --relay http://<relay>:8174
+```
 
-To test separate network namespaces, omit `--shared-namespace`: containers use one isolated bridge with addresses in distinct `/24` prefix buckets, and each reader shapes its own `eth0` inside its separate network namespace. The harness verifies distinct guard prefix buckets before starting the seeder. A Docker run with three guards, two uncached readers, 80 ± 15 ms reader-egress delay, 1% loss and live guard replacement passed exact SHA-256/private-only-byte checks (`desktop/target/e2e/netem-2hop-labeled/result.json`). This is still a single-host impairment test, **not** independent WAN or cellular evidence. Compare with an otherwise identical `--delay-ms 0 --jitter-ms 0 --loss-percent 0` control before making performance claims.
+The runner requires a root ADB shell and `tcpdump` **on each captured device**, and refuses to run the test if capture cannot start. A rooted Pi 4 receiver has both; a stock Pixel 9 does not, so capture its traffic from a rooted peer or a router mirror rather than pretending a host-side Wi-Fi capture sees all unicast. Each run keeps a 128-byte-snaplen `peer-N.pcap` (network and loopback packet timing without full movie payload), epoch-time `peer-N.logcat.txt`, optional second-by-second `receiver.ndjson` with P2P route byte counters and buffering, and `capture.json` with clocks, versions, SHA-256 hashes and command exit. SIGINT and normal completion stop only the capture's remote `tcpdump` PID. The packet headers, logs and receiver state can disclose addresses or pairing URLs: keep these private artifacts under `android/build/`, never attach them to a public release. Capturing packets adds some load; compare with a run without capture before attributing small cadence losses to the player.
 
-The matched single-reader NUC runs used the same uncached 13,776,925-byte video. A 10,000-packet `netem` limit prevented *unrequested* queue overflow; `tc -s qdisc show` recorded actual drops. Shaping began **after** seeding. These are individual runs, not WAN estimates or statistically stable benchmarks:
-
-| Test-namespace `lo` netem | First byte | Exact-byte transfer | Kernel drops |
-|---|---:|---:|---:|
-| 0 ms, 0% loss | 88 ms | 397 ms | 0 |
-| 20 ± 5 ms, 0% loss | 2,383 ms | 3,329 ms | 0 |
-| 20 ± 5 ms, 0.1% loss | 1,316 ms | 5,823 ms | 133 / 127,343 packets |
-
-Even without packet loss, compounded per-hop latency increases time to first byte and transfer time; the 20 ms runs report 283–295 ms peer RTT. The initial *default* 1,000-packet `netem` queue had instead produced 34–40-second transfers and about 3% drops under four readers despite requesting only 0.1% loss. Those runs are evidence of a **bad test queue**, not a measured VPN or routing regression. At 80 ± 15 ms and 1% loss with that small queue, one reader reached four private peers but had not seen the fixture after 120 seconds; the result **failed** and is not a throughput sample. The separate-namespace bridge failed before shaping began.
-
-With the corrected queue, five relays, four simultaneous readers and one relay replacement during transfer, **all four** independently hashed the full video over private paths with zero public/LAN received bytes. Their first bytes took 1.6–13.5 seconds and transfers 63–69 seconds; the shared qdisc dropped 999 of 958,102 packets (about 0.1%). This is a successful churn/byte-integrity test but still a substantial per-reader slowdown on one host. The JSON also retains the reader's one-MiB arrival milestones, exposing long stalls followed by bursts. Reproduce on genuinely independent network sites before choosing hop-count or transport changes.
-
-For an independent-network phone check, run `node test/private-wan.mjs guard --out <fresh-directory>` on at least two reachable hosts with independent `/24` egresses. Guards are stateless forwarders: they do not create trackers and take no tracker key. Run `node test/private-wan.mjs seeder --out <fresh-directory>` on a separate host; without `--media` it generates a one-minute MP4 and publishes it privately under a fresh tracker. Keep its printed key and `result.json`, including the fixture hash/size. Once it is serving, connect the phone over **USB ADB**, have a person switch it to cellular or unrelated Wi-Fi, then run `node android/e2e.mjs --serial <usb-serial> --tracker <key> --private-routing --apk <current-dev-apk> --out android/build/e2e-private-wan`. The script clears only `com.peartube.app.dev`, never the production app. If a system window appears, it saves `system-ui.png` and stops; a person must answer the prompt before rerunning. A pass requires advancing video/audio, at least 256 KiB received privately and zero public-DHT/LAN replication bytes. Keep the seeder proof with the phone result and screenshots. Wi-Fi ADB usually drops when switching to cellular. Without independent reachable guards and a person-operated network switch, do not report a WAN result.
-
-For a local native release smoke, build with `cd android && ./gradlew -Ppeartube.dev :app:assembleRelease`, then run `node android/e2e.mjs --serial <serial> --relay http://<isolated-lan-relay>:8174 --lan --apk android/app/build/outputs/apk/release/app-release.apk --out android/build/e2e-release`. The harness copies the supplied APK into the result directory before hashing and installing it, recording both resolved paths so concurrent builds cannot silently replace the tested artifact. It reads the enclosing checkable switch rather than its text label, and checks the focused application before every tap, swipe, text entry or Back key. The Pixel 5a run in `android/build/e2e-release-pixel5a-final/result.json` passed catalog discovery, video/audio (153 frames in five seconds), clock advancement, orientation changes and return to the library. Its retained `installed.apk` and a copy pulled back from the phone (`device.apk`) both hash to `68a7b9fe02a22895a077c9bc1987a63665c05476652dc4cc04e9eaa0e2b0d00f`. Screenshots and `android/build/phone-final-source/result.json` retain the fresh tracker and source-side LAN-byte proof. This verifies the dev-flavored release over LAN, not the production package or private routing over cellular.
+The trace spools to `/data/local/tmp` on the rooted receiver while recording, excludes ADB's TCP/5555 feedback traffic, and is pulled to the private result directory only after capture stops. Keep the Pi connected until that final pull finishes; on failure `capture.json` retains the on-device path for recovery.
 
 `desktop/bundle.sh`, which `npm run app` runs, puts BareKit and the worklet's
 native addons in the app's `Contents/Frameworks` and signs it ad hoc. A

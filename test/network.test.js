@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash, randomBytes } from 'node:crypto'
 import { Readable } from 'node:stream'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import createTestnet from 'hyperdht/testnet.js'
@@ -294,4 +294,89 @@ test('clearCache flushes RocksDB WAL and BlobDB so on-disk corestore bytes shrin
   assert.ok(res.reclaimedBytes >= 14 * 1024 * 1024, `expected >= 14 MiB reclaimed, got ${res.reclaimedBytes}`)
   assert.ok(afterDisk < 1024 * 1024, `expected < 1 MiB on disk after clearCache compaction, got ${afterDisk}`)
   assert.equal(viewer.status().cachedBytes, 0)
+})
+
+test('streaming cache cleanup reclaims behind-playhead blocks in bounded steps without touching the live tail', { timeout: 240_000 }, async t => {
+  const testnet = await createTestnet(3)
+  const source = await createNode({ storage: tmp(), bootstrap: testnet.bootstrap })
+  const viewDir = tmp()
+  const viewer = await createNode({ storage: viewDir, bootstrap: testnet.bootstrap, tracker: source.status().tracker })
+  t.after(async () => { await viewer.close(); await source.close(); await testnet.destroy() })
+
+  const bytes = randomBytes(64 * 1024 * 1024)
+  const published = await source.publish({ id: 'imdb:tt0209144', title: 'Memento' }, Readable.from([bytes]))
+  const [entry] = await until(async () => (await viewer.search('imdb:tt0209144')).length && viewer.search('imdb:tt0209144'))
+  assert.deepEqual(Buffer.from(await (await fetch(entry.streamUrl)).arrayBuffer()), bytes)
+  const initial = viewer.status().cachedBytes
+  assert.equal(initial, bytes.length)
+  const diskBytes = dir => readdirSync(dir, { withFileTypes: true }).reduce((sum, f) => {
+    const p = join(dir, f.name)
+    return sum + (f.isDirectory() ? diskBytes(p) : statSync(p).size)
+  }, 0)
+  const dbDir = join(viewDir, 'corestore', 'db')
+  await viewer.gcStorage({ full: true })
+  const beforeDisk = diskBytes(dbDir)
+
+  const keepBehind = 8 * 1024 * 1024
+  const tailStart = bytes.length - keepBehind
+  const range = `bytes=${bytes.length - 524288}-${bytes.length - 1}`
+  let probing = true
+  let probes = 0
+  let slowestRangeMs = 0
+  const probeStarts = []
+  const liveTail = (async () => {
+    while (probing) {
+      const start = performance.now()
+      probeStarts.push(start)
+      const response = await fetch(entry.streamUrl, { headers: { Range: range } })
+      assert.equal(response.status, 206)
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes.subarray(bytes.length - 524288))
+      slowestRangeMs = Math.max(slowestRangeMs, performance.now() - start)
+      probes++
+      await new Promise(resolve => setTimeout(resolve, 75))
+    }
+  })()
+  let remaining = initial
+  const cleanupStarted = performance.now()
+  try {
+    for (let step = 0; step < 8; step++) {
+      await viewer.evictBehind(published.blobs, published.blob, keepBehind)
+      const now = viewer.status().cachedBytes
+      assert.ok(now <= remaining, 'cleanup cannot add cached blocks')
+      assert.ok(remaining - now <= 32 * 1024 * 1024, 'one cleanup pass cannot hold the core lock for a movie-sized span')
+      if (now === remaining) break
+      remaining = now
+    }
+  } finally {
+    probing = false
+    await liveTail
+  }
+  const cleanupEnded = performance.now()
+  const cadence = [cleanupStarted, ...probeStarts.filter(at => at > cleanupStarted), cleanupEnded]
+  const slowestCadenceMs = Math.max(...cadence.slice(1).map((at, i) => at - cadence[i]))
+  assert.ok(remaining <= 16 * 1024 * 1024, 'repeated bounded passes eventually reclaim the spent prefix')
+
+  assert.ok(probes > 0, 'concurrent Range requests reached the active receiver')
+  assert.ok(slowestRangeMs < 2500, `live cached Range stalled for ${Math.round(slowestRangeMs)} ms during cleanup`)
+  assert.ok(slowestCadenceMs < 750, `live receiver made no new Range attempt for ${Math.round(slowestCadenceMs)} ms`)
+  const afterDisk = diskBytes(dbDir)
+  assert.ok(beforeDisk - afterDisk >= 24 * 1024 * 1024, 'cleanup must reclaim physical BlobDB bytes, not just clear a bitfield')
+
+  const tail = await fetch(entry.streamUrl, { headers: { Range: `bytes=${tailStart}-${bytes.length - 1}` } })
+  assert.equal(tail.status, 206)
+  assert.deepEqual(Buffer.from(await tail.arrayBuffer()), bytes.subarray(tailStart))
+  assert.equal(viewer.status().cachedBytes, remaining, 'the protected playhead tail was already local')
+  const artifactDir = join('desktop', 'target', 'e2e')
+  mkdirSync(artifactDir, { recursive: true })
+  writeFileSync(join(artifactDir, 'cache-reclaim-result.json'), JSON.stringify({
+    publishedSha256: published.sha256,
+    cachedBefore: initial,
+    cachedAfter: remaining,
+    diskBytesBefore: beforeDisk,
+    diskBytesAfter: afterDisk,
+    concurrentRanges: probes,
+    slowestRangeMs: Math.round(slowestRangeMs),
+    cleanupMs: Math.round(cleanupEnded - cleanupStarted),
+    slowestCadenceMs: Math.round(slowestCadenceMs)
+  }, null, 2) + '\n')
 })

@@ -83,6 +83,7 @@ export async function createMirrorHost ({
   replicateMinFreeBytes = 20 * 1024 * 1024 * 1024,
   replicateConcurrency = 1,
   replicateStallMs = 20_000,
+  replicateMbps = 0,
   hiverelay = null,
   pluginsDir = join(storage, 'plugins'),
   pollIntervalMs = 60_000,
@@ -410,7 +411,18 @@ export async function createMirrorHost ({
     return clearedAny
   }
 
-  // Double-buffered 64 MiB linear windows keep Unraid's spinning platters stroking forward sequentially instead of thrashing random 64 KiB seeks.
+  // One shared pacer for every replica worker: greedy backfill must leave seeders and this disk room for viewers.
+  const replicateBytesPerMs = replicateMbps > 0 ? replicateMbps * 125 : 0
+  let replicatePaceAt = 0
+  async function paceReplica (bytes) {
+    if (!replicateBytesPerMs || bytes <= 0) return
+    const now = Date.now()
+    const start = Math.max(now, replicatePaceAt)
+    replicatePaceAt = start + bytes / replicateBytesPerMs
+    if (start > now) await new Promise(resolve => setTimeout(resolve, start - now))
+  }
+
+  // Double-buffered 16 MiB linear windows stay sequential on spinning platters while the pacer spaces them out.
   async function downloadReplicaSlice (core, slice, minFreeBytes, stallMs, onProgress = null) {
     const endBlock = slice.blockOffset + slice.blockLength
     const countHave = () => core.length > slice.blockOffset
@@ -419,15 +431,18 @@ export async function createMirrorHost ({
     let lastHave = countHave()
     if (lastHave >= slice.blockLength) return { ok: true, bytes: slice.size }
     const avgBlock = slice.blockLength > 0 ? Math.max(4096, slice.size / slice.blockLength) : 65536
-    const winBlocks = Math.max(64, Math.min(1024, Math.ceil((64 * 1024 * 1024) / avgBlock)))
+    const winBlocks = Math.max(16, Math.min(256, Math.ceil((16 * 1024 * 1024) / avgBlock)))
     let cursor = slice.blockOffset
     if (core.length > cursor) {
       const unset = core.core.bitfield.firstUnset(cursor)
       if (unset >= cursor && unset < endBlock) cursor = unset
     }
-    const openWin = start => {
+    const openWin = async start => {
       if (start >= endBlock) return null
       const end = Math.min(endBlock, start + winBlocks)
+      const have = core.length > start ? core.core.bitfield.countSet(start, Math.min(end, core.length) - start) : 0
+      await paceReplica((end - start - have) * avgBlock)
+      if (closed) return null
       const handle = { start, end, range: core.download({ start, end, linear: true }), done: false, err: null }
       activeReplicaRanges.add(handle.range)
       handle.range.done().then(() => { handle.done = true }, err => { handle.err = err; handle.done = true })
@@ -438,8 +453,8 @@ export async function createMirrorHost ({
       activeReplicaRanges.delete(h.range)
       h.range.destroy()
     }
-    let cur = openWin(cursor)
-    let next = cur && cur.end < endBlock ? openWin(cur.end) : null
+    let cur = await openWin(cursor)
+    let next = cur && cur.end < endBlock ? await openWin(cur.end) : null
     let lastProgressAt = Date.now()
     try {
       while (cur && !closed) {
@@ -466,7 +481,7 @@ export async function createMirrorHost ({
         }
         closeWin(cur)
         cur = next
-        next = cur && cur.end < endBlock ? openWin(cur.end) : null
+        next = cur && cur.end < endBlock ? await openWin(cur.end) : null
       }
       return { ok: countHave() >= slice.blockLength, bytes: slice.size }
     } finally {
