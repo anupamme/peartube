@@ -278,14 +278,20 @@ export async function createNode ({
   const traffic = { private: bucket(), public: bucket(), lan: bucket() }
   let prevRx = 0, prevTx = 0, prevAt = Date.now(), downBps = 0, upBps = 0
   const tuneDht = inst => inst?.ready?.().then(() => { tuneUdxSocket(inst.io?.serverSocket); tuneUdxSocket(inst.io?.clientSocket) }).catch(() => {})
+  // Every replication connection, public swarm and LAN alike, for plugins that act per peer.
+  const peerConns = new Set()
+  const connListeners = new Set()
   const trackConn = (conn, path) => {
     tuneUdxSocket(conn.rawStream?.socket)
     tuneUdxSocket(conn.rawStream?.rawStream?.socket)
+    peerConns.add(conn)
     conn.once('close', () => {
+      peerConns.delete(conn)
       path.closedRx += conn.rawBytesRead || conn.rawStream?.bytesReceived || 0
       path.closedTx += conn.rawBytesWritten || conn.rawStream?.bytesTransmitted || 0
     })
     tracker.replicate(conn)
+    for (const fn of connListeners) fn(conn)
   }
   const swarm = isPrivate
     ? await createPrivateSwarm({
@@ -1499,6 +1505,8 @@ export async function createNode ({
     tracker,
     localChannel,
     swarm,
+    peerConnections: () => peerConns,
+    onConnection: fn => { connListeners.add(fn); return () => connListeners.delete(fn) },
     search,
     put,
     append,

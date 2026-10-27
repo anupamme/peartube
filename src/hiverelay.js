@@ -329,7 +329,7 @@ export function createHiverelaySeeder ({
   let closed = false
   let activeRun = null
   let syncRerun = false
-  let attachedSwarm = false
+  let detachConnections = null
   let discoveryHandle = null
   const epochHandles = new Map()
   let epochTimer = null
@@ -347,8 +347,15 @@ export function createHiverelaySeeder ({
   const beaconAppToCore = new Map() // beaconAppKeyHex -> coreKeyHex
   // Bulk peers (HiveRelays and replica relays: they open `hiverelay-seed` but never request) share one upload
   // budget; over it their connections are paused so their requests wait. Viewer apps never open the channel.
+  // While any other peer is drawing upload (someone is watching), bulk peers drop to a trickle that keeps
+  // their connections and tracker sync alive.
   const bulkBytesPerTick = uploadMbps > 0 ? uploadMbps * 125_000 / 4 : 0
+  const BULK_WHILE_VIEWING_BYTES_PER_TICK = 4 * 125_000 / 4 // 4 Mbps
+  const VIEWER_BYTES_PER_TICK = 1 * 125_000 / 4 // 1 Mbps to a non-bulk peer counts as viewing
+  const VIEWER_HOLD_MS = 3000
   const bulkConns = new Map() // conn -> raw bytes written at the last tick
+  const viewerSent = new WeakMap() // non-bulk conn -> raw bytes written at the last tick
+  let viewersUntil = 0
   let bulkTokens = bulkBytesPerTick
   let bulkPaused = false
   let bulkTimer = null
@@ -361,7 +368,17 @@ export function createHiverelaySeeder ({
       sent += Math.max(0, now - prev)
       bulkConns.set(conn, now)
     }
-    bulkTokens = Math.min(bulkBytesPerTick * 2, bulkTokens + bulkBytesPerTick - sent)
+    let viewerBytes = 0
+    for (const conn of node.peerConnections()) {
+      if (conn.destroyed || bulkConns.has(conn)) continue
+      const now = rawWritten(conn)
+      const prev = viewerSent.get(conn)
+      viewerSent.set(conn, now)
+      if (prev !== undefined) viewerBytes += Math.max(0, now - prev)
+    }
+    if (viewerBytes >= VIEWER_BYTES_PER_TICK) viewersUntil = Date.now() + VIEWER_HOLD_MS
+    const budget = Date.now() < viewersUntil ? Math.min(bulkBytesPerTick, BULK_WHILE_VIEWING_BYTES_PER_TICK) : bulkBytesPerTick
+    bulkTokens = Math.min(budget * 2, bulkTokens + budget - sent)
     const pause = bulkTokens < 0
     if (pause === bulkPaused) return
     bulkPaused = pause
@@ -480,10 +497,9 @@ export function createHiverelaySeeder ({
 
   function ensureSwarmWiring () {
     if (closed || node.privateRouting) return
-    if (!attachedSwarm) {
-      attachedSwarm = true
-      node.swarm.on('connection', attachConnection)
-      for (const conn of node.swarm.connections) attachConnection(conn)
+    if (!detachConnections) {
+      detachConnections = node.onConnection(attachConnection)
+      for (const conn of node.peerConnections()) attachConnection(conn)
     }
     if (dhtDiscover && !discoveryHandle) {
       discoveryHandle = node.swarm.join(RELAY_DISCOVERY_TOPIC, { server: false, client: true })
@@ -556,7 +572,7 @@ export function createHiverelaySeeder ({
       joinedPeers.add(pubkey)
       node.swarm.joinPeer(pkBuf)
     }
-    const hasPeer = () => [...node.swarm.connections].some(
+    const hasPeer = () => [...node.peerConnections()].some(
       conn => !conn.destroyed && conn.remotePublicKey && b4a.toString(conn.remotePublicKey, 'hex') === pubkey
     )
     const started = Date.now()
@@ -568,7 +584,7 @@ export function createHiverelaySeeder ({
       }
       await new Promise(resolve => setTimeout(resolve, 150))
     }
-    for (const conn of node.swarm.connections) {
+    for (const conn of node.peerConnections()) {
       if (conn.remotePublicKey && b4a.toString(conn.remotePublicKey, 'hex') === pubkey) markBulk(conn)
     }
     return pubkey
@@ -765,10 +781,8 @@ export function createHiverelaySeeder ({
     for (const conn of bulkConns.keys()) conn.resume()
     bulkConns.clear()
     bulkPaused = false
-    if (attachedSwarm) {
-      node.swarm.off('connection', attachConnection)
-      attachedSwarm = false
-    }
+    detachConnections?.()
+    detachConnections = null
     for (const pubkey of joinedPeers) {
       try { node.swarm.leavePeer(b4a.from(pubkey, 'hex')) } catch {}
     }
