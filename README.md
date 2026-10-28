@@ -19,7 +19,7 @@ A bare `npm start` founds a new tracker and prints its `tracker` and `channel` k
 
 The founded tracker's key is saved as the **Join a tracker** setting on first start. Without it, following a channel would make that channel the relay's primary catalog on the next start, and the relay's own library would drop out of view. A data directory that already lost it gets it back after one restart; Settings asks for that restart.
 
-Settings can point the relay at local folders. On a relay without `PEARTUBE_API_TOKEN`, only a browser on the relay machine itself (`127.0.0.1`) can open or change them; other devices see "Set PEARTUBE_API_TOKEN to change settings from here." To configure a headless relay from another machine, start it with a token.
+Settings can point the relay at folders on its disk. A relay without `PEARTUBE_API_TOKEN` already trusts its local network (anyone there can queue downloads), so devices on private addresses (LAN, Tailscale, loopback) can change settings too; clients from public addresses get `403` until the relay has a token. Settings are only accepted from the relay's own page, never from another website through your browser.
 
 The web UI has five tabs:
 
@@ -216,7 +216,7 @@ One port serves the web UI at `/`, the `/v1` API, the Stremio v3 addon, the M3U8
 | Route | Does |
 |---|---|
 | `GET /` | Web UI: library, channels, sharing, TV, settings |
-| `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Without `PEARTUBE_API_TOKEN`, only loopback clients may use it (others get `403`). Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
+| `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Without `PEARTUBE_API_TOKEN`, only clients on private addresses may use it; a cross-origin `Origin` is refused (`403` either way). Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
 | `POST /v1/identify` `{url}` | What a link holds: `link` (file name, size, or page title, uploader, length and thumbnail through yt-dlp), `parsed` name parts, Cinemeta `candidates` with their `imdb:…` ids and titles, `match` (an exact title and year), and a `plain` `clip:` fallback |
 | `GET /v1/poster/:tt` | Redirect to Cinemeta's poster for an identified entry |
 | `GET /v1/search?id=imdb:tt0944947:s01e02` | Tracker entries for an id, each with a `streamUrl` |

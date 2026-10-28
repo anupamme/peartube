@@ -972,7 +972,7 @@ function renderSettings (force) {
   if (!S.settings) {
     body.replaceChildren(h('div', { class: 'card' }, settingsLoaded && needsToken
       ? [h('h3', null, 'Sign in to see settings'), h('div', { class: 'hint' }, 'Use the access token above.')]
-      : h('div', { class: 'hint' }, !settingsLoaded ? 'Loading…' : S.status.settingsOpen === false ? 'Set PEARTUBE_API_TOKEN to change settings from here.' : 'Settings are not available on this relay.')))
+      : h('div', { class: 'hint' }, !settingsLoaded ? 'Loading…' : S.status.settingsOpen === false ? 'Over the internet, settings need the relay’s access token.' : 'Settings are not available on this relay.')))
     return
   }
   if (settingsDirty && !force) return

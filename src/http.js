@@ -6,6 +6,8 @@ import { page } from './ui.js'
 import { receiverPage } from './cast-ui.js'
 
 const MAX_BODY = 64 * 1024
+// Loopback, RFC 1918, CGNAT/Tailscale (100.64/10), link-local, and IPv6 ULA/link-local, plain or IPv4-mapped.
+const PRIVATE_ADDR = /^(::ffff:)?(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|169\.254\.)|^(::1$|f[cd][0-9a-f]{2}:|fe80:)/i
 const CORS = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
@@ -77,14 +79,20 @@ export function createApi (state) {
         throw Object.assign(new Error('Unauthorized'), { status: 401 })
       }
     }
-    // Settings can point the relay at local folders: without a token only this machine may see or change them.
-    const settingsOpen = Boolean(state.apiToken) || /^(127\.|::1$|::ffff:127\.)/.test(req.socket?.remoteAddress || '')
+    // An open relay already trusts its local network (anyone there can queue downloads), so its settings do too.
+    // Clients from public addresses need the token: settings can point the relay at folders on its disk.
+    const settingsOpen = Boolean(state.apiToken) || PRIVATE_ADDR.test(req.socket?.remoteAddress || '')
     if (req.method === 'GET' && path === '/v1/status') {
       const st = node ? { ...node.status(), ...(state.extraStatus?.() || {}) } : state.fallbackStatus
       return { ...st, tokenRequired: Boolean(state.apiToken), settingsOpen }
     }
     if (state.settings && path === '/v1/settings') {
-      if (!settingsOpen) throw Object.assign(new Error('Set PEARTUBE_API_TOKEN to change settings from another device'), { status: 403 })
+      if (!settingsOpen) throw Object.assign(new Error('Set PEARTUBE_API_TOKEN to change settings over the internet'), { status: 403 })
+      // Other websites can reach a LAN relay through the visitor's browser (CORS is open for players); settings only from its own page.
+      const origin = req.headers.origin
+      if (origin && (() => { try { return new URL(origin).host !== req.headers.host } catch { return true } })()) {
+        throw Object.assign(new Error('Settings can only be changed from the relay’s own page'), { status: 403 })
+      }
       if (req.method === 'GET') return state.settings.view()
       if (req.method === 'PUT') {
         const res = state.settings.update(await body(req))
