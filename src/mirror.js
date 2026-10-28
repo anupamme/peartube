@@ -427,6 +427,12 @@ export async function createMirrorHost ({
     ? core.count(offset, Math.min(offset + length, core.length))
     : Promise.resolve(0)
 
+  // Backfill stands down while any connected relay reports it is serving viewers (`peartube/bulk-busy`).
+  const peersBusy = () => hiverelayPlugin.peersBusy() === true
+  async function waitWhilePeersBusy () {
+    while (!closed && peersBusy()) await new Promise(resolve => setTimeout(resolve, 500))
+  }
+
   // Double-buffered 16 MiB linear windows stay sequential on spinning platters while the pacer spaces them out.
   async function downloadReplicaSlice (core, slice, minFreeBytes, stallMs, onProgress = null) {
     const endBlock = slice.blockOffset + slice.blockLength
@@ -441,6 +447,7 @@ export async function createMirrorHost ({
       const end = Math.min(endBlock, start + winBlocks)
       const have = await countLocal(core, start, end - start)
       await paceReplica((end - start - have) * avgBlock)
+      await waitWhilePeersBusy()
       if (closed) return null
       const handle = { start, end, range: core.download({ start, end, linear: true }), done: false, err: null }
       activeReplicaRanges.add(handle.range)
@@ -452,6 +459,7 @@ export async function createMirrorHost ({
       activeReplicaRanges.delete(h.range)
       h.range.destroy()
     }
+    await waitWhilePeersBusy()
     let cur = await openWin(cursor)
     let next = cur && cur.end < endBlock ? await openWin(cur.end) : null
     let lastProgressAt = Date.now()
@@ -459,6 +467,20 @@ export async function createMirrorHost ({
       while (cur && !closed) {
         while (!cur.done && !closed) {
           await new Promise(resolve => setTimeout(resolve, 250))
+          if (peersBusy()) {
+            // Drop the windows so no requests sit queued at the seeder, then pick up from this window's start.
+            const resumeAt = cur.start
+            closeWin(cur)
+            closeWin(next)
+            cur = next = null
+            await waitWhilePeersBusy()
+            if (closed) return { ok: false, reason: 'closed' }
+            lastProgressAt = Date.now()
+            cur = await openWin(resumeAt)
+            next = cur && cur.end < endBlock ? await openWin(cur.end) : null
+            if (!cur) return { ok: false, reason: 'closed' }
+            continue
+          }
           const nowHave = await countHave()
           if (nowHave > lastHave) {
             lastHave = nowHave

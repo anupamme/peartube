@@ -14,6 +14,7 @@ import b4a from 'b4a'
 
 const HEX64 = /^[0-9a-f]{64}$/i
 const SEED_PROTOCOL_NAME = 'hiverelay-seed'
+const BUSY_PROTOCOL_NAME = 'peartube/bulk-busy'
 const SEED_HANDSHAKE = b4a.from('{"major":1,"minor":0}')
 const SEED_SIGNATURE_DOMAIN = b4a.from('hiverelay.seed-request.v3\0')
 const DISCOVERY_EPOCH_MS = 60 * 60 * 1000
@@ -345,29 +346,26 @@ export function createHiverelaySeeder ({
   let beaconBlobs = null
   const beaconDbs = new Map() // coreKeyHex -> { key, discKey, byteLength, lastLen }
   const beaconAppToCore = new Map() // beaconAppKeyHex -> coreKeyHex
-  // Bulk peers (HiveRelays and replica relays: they open `hiverelay-seed` but never request) share one upload
-  // budget; over it their connections are paused so their requests wait. Viewer apps never open the channel.
-  // While any other peer is drawing upload (someone is watching), bulk peers drop to a trickle that keeps
-  // their connections and tracker sync alive.
+  // Bulk peers (HiveRelays and replica relays: they open `hiverelay-seed` but never request) are kept off viewers'
+  // upload. PearTube relays answer `peartube/bulk-busy` and pace themselves: their backfill stops while any connected
+  // relay reports viewing. Peers that don't (HiveRelays) share one upload budget instead; over it their connections
+  // are paused so their requests wait. Never pause a relay that speaks bulk-busy: a connection paused for a few
+  // seconds loses its Hypercore peers and the backfill on it stalls for good. Viewer apps open neither channel.
   const bulkBytesPerTick = uploadMbps > 0 ? uploadMbps * 125_000 / 4 : 0
-  const BULK_WHILE_VIEWING_BYTES_PER_TICK = 4 * 125_000 / 4 // 4 Mbps
-  const VIEWER_BYTES_PER_TICK = 1 * 125_000 / 4 // 1 Mbps to a non-bulk peer counts as viewing
-  const VIEWER_HOLD_MS = 3000
   const bulkConns = new Map() // conn -> raw bytes written at the last tick
-  const viewerSent = new WeakMap() // non-bulk conn -> raw bytes written at the last tick
-  let viewersUntil = 0
   let bulkTokens = bulkBytesPerTick
   let bulkPaused = false
-  let bulkTimer = null
   const rawWritten = conn => conn.rawBytesWritten || conn.rawStream?.bytesTransmitted || 0
-  function throttleBulk () {
-    let sent = 0
-    for (const [conn, prev] of bulkConns) {
-      if (conn.destroyed) { bulkConns.delete(conn); continue }
-      const now = rawWritten(conn)
-      sent += Math.max(0, now - prev)
-      bulkConns.set(conn, now)
-    }
+  // Viewing: more than 1 Mbps going to non-bulk peers, held 3 s. Each relay tells its peers over `peartube/bulk-busy`;
+  // p2p-replicate stops its backfill while any connected peer is busy (peersBusy()).
+  const VIEWER_BYTES_PER_TICK = 1 * 125_000 / 4
+  const VIEWER_HOLD_MS = 3000
+  const viewerSent = new WeakMap() // non-bulk conn -> raw bytes written at the last tick
+  const busyChannels = new Map() // conn -> { msg, remote }
+  let viewersUntil = 0
+  let viewing = false
+  let tickTimer = null
+  function tick () {
     let viewerBytes = 0
     for (const conn of node.peerConnections()) {
       if (conn.destroyed || bulkConns.has(conn)) continue
@@ -377,27 +375,57 @@ export function createHiverelaySeeder ({
       if (prev !== undefined) viewerBytes += Math.max(0, now - prev)
     }
     if (viewerBytes >= VIEWER_BYTES_PER_TICK) viewersUntil = Date.now() + VIEWER_HOLD_MS
-    const budget = Date.now() < viewersUntil ? Math.min(bulkBytesPerTick, BULK_WHILE_VIEWING_BYTES_PER_TICK) : bulkBytesPerTick
-    bulkTokens = Math.min(budget * 2, bulkTokens + budget - sent)
+    const nowViewing = Date.now() < viewersUntil
+    if (nowViewing !== viewing) {
+      viewing = nowViewing
+      for (const rec of busyChannels.values()) { try { rec.msg.send(viewing ? 1 : 0) } catch {} }
+    }
+    if (!bulkBytesPerTick) return
+    let sent = 0
+    for (const [conn, prev] of bulkConns) {
+      if (conn.destroyed) { bulkConns.delete(conn); continue }
+      const now = rawWritten(conn)
+      if (!busyChannels.has(conn)) sent += Math.max(0, now - prev)
+      bulkConns.set(conn, now)
+    }
+    bulkTokens = Math.min(bulkBytesPerTick * 2, bulkTokens + bulkBytesPerTick - sent)
     const pause = bulkTokens < 0
     if (pause === bulkPaused) return
     bulkPaused = pause
-    for (const conn of bulkConns.keys()) pause ? conn.pause() : conn.resume()
+    for (const conn of bulkConns.keys()) {
+      if (busyChannels.has(conn)) continue
+      pause ? conn.pause() : conn.resume()
+    }
   }
   function markBulk (conn) {
-    if (!bulkBytesPerTick || closed || conn.destroyed || bulkConns.has(conn)) return
+    if (closed || conn.destroyed || bulkConns.has(conn)) return
     bulkConns.set(conn, rawWritten(conn))
-    if (bulkPaused) conn.pause()
-    if (!bulkTimer) {
-      bulkTimer = setInterval(throttleBulk, 250)
-      bulkTimer.unref?.()
-    }
+    if (bulkPaused && !busyChannels.has(conn)) conn.pause()
   }
   // A publisher (another PearTube relay) opens the same channel but sends seed requests; HiveRelays never do.
   function unmarkBulk (conn) {
     if (!bulkConns.delete(conn)) return
     if (bulkPaused) conn.resume()
   }
+  function attachBusy (conn, mux) {
+    if (closed || conn.destroyed || mux.opened({ protocol: BUSY_PROTOCOL_NAME })) return
+    const rec = { msg: null, remote: false }
+    const channel = mux.createChannel({
+      protocol: BUSY_PROTOCOL_NAME,
+      id: null,
+      onopen () {
+        busyChannels.set(conn, rec)
+        // It paces itself from here on; release it if the cap had paused it.
+        if (bulkPaused && bulkConns.has(conn)) conn.resume()
+        try { rec.msg.send(viewing ? 1 : 0) } catch {}
+      },
+      onclose () { busyChannels.delete(conn) }
+    })
+    if (!channel) return
+    rec.msg = channel.addMessage({ encoding: c.uint, onmessage (v) { rec.remote = v === 1 } })
+    try { channel.open() } catch {}
+  }
+  const peersBusy = () => [...busyChannels.values()].some(rec => rec.remote)
   function syncEpochTopics () {
     if (closed || !dhtDiscover || node.privateRouting) return
     const bucket = Math.floor(Date.now() / DISCOVERY_EPOCH_MS)
@@ -425,7 +453,16 @@ export function createHiverelaySeeder ({
     if (acceptedP2P.has(remoteHex) || [...urlPubkeys.values()].includes(remoteHex)) markBulk(conn)
     let mux
     try { mux = Protomux.from(conn) } catch { return }
-    if (mux.opened({ protocol: SEED_PROTOCOL_NAME })) return
+    // Protomux rejects an open for a protocol nobody paired, so register both: a peer whose plugin attaches after
+    // ours still gets its channels, whichever side opens first.
+    mux.pair({ protocol: BUSY_PROTOCOL_NAME }, () => attachBusy(conn, mux))
+    mux.pair({ protocol: SEED_PROTOCOL_NAME }, () => openSeed(conn, mux, remoteBuf, remoteHex))
+    attachBusy(conn, mux)
+    openSeed(conn, mux, remoteBuf, remoteHex)
+  }
+
+  function openSeed (conn, mux, remoteBuf, remoteHex) {
+    if (closed || conn.destroyed || mux.opened({ protocol: SEED_PROTOCOL_NAME })) return
     let sendMsg = null
     const channel = mux.createChannel({
       protocol: SEED_PROTOCOL_NAME,
@@ -500,6 +537,8 @@ export function createHiverelaySeeder ({
     if (!detachConnections) {
       detachConnections = node.onConnection(attachConnection)
       for (const conn of node.peerConnections()) attachConnection(conn)
+      tickTimer = setInterval(tick, 250)
+      tickTimer.unref?.()
     }
     if (dhtDiscover && !discoveryHandle) {
       discoveryHandle = node.swarm.join(RELAY_DISCOVERY_TOPIC, { server: false, client: true })
@@ -776,11 +815,13 @@ export function createHiverelaySeeder ({
     closed = true
     clearInterval(epochTimer)
     epochTimer = null
-    clearInterval(bulkTimer)
-    bulkTimer = null
+    clearInterval(tickTimer)
+    tickTimer = null
     for (const conn of bulkConns.keys()) conn.resume()
     bulkConns.clear()
     bulkPaused = false
+    busyChannels.clear()
+    viewing = false
     detachConnections?.()
     detachConnections = null
     for (const pubkey of joinedPeers) {
@@ -809,8 +850,9 @@ export function createHiverelaySeeder ({
     }
   }
 
-  // Detect HiveRelays on every relay, not only recruiting ones: they pull replicated channels from any seeder.
-  if (enabled() || bulkBytesPerTick) ensureSwarmWiring()
+  // Wire every relay, not only recruiting ones: HiveRelays pull replicated channels from any seeder, and the
+  // busy signal must reach replicas even when the bulk cap is off.
+  ensureSwarmWiring()
 
   return {
     name: 'hiverelay-seed',
@@ -819,6 +861,7 @@ export function createHiverelaySeeder ({
     run,
     poll: () => (enabled() && !activeRun ? run({ once: true }) : null),
     stop,
-    info
+    info,
+    peersBusy
   }
 }

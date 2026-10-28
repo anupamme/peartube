@@ -954,9 +954,12 @@ export async function createNode ({
   }
 
   // Mints a dedicated 512 KiB-piece Hypercore per video (`blockOffset: 0`) and closes the write session at rest so Corestore wakes it lazily on demand.
+  // The write session is inactive: an owned core never downloads, so peers see it as an uploader from the first
+  // block. Otherwise it reports "downloading" for Hypercore's 20-40 s linger after the write, and a peer whose
+  // channel closes when Corestore collects the at-rest core does not reopen it.
   async function put ({ id, title, expectedSize = null }, source, onData = null) {
     if (!str(id, ID)) throw new Error(`Invalid id ${id}`)
-    const core = store.get({ name: `video:${b4a.toString(hypercoreCrypto.randomBytes(16), 'hex')}` })
+    const core = store.get({ name: `video:${b4a.toString(hypercoreCrypto.randomBytes(16), 'hex')}`, active: false })
     try {
       const hash = createHash('sha256')
       let size = 0
