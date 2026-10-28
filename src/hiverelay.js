@@ -806,6 +806,8 @@ export function createHiverelaySeeder ({
       bulkUploadMbps: uploadMbps,
       bulkPeers: bulkConns.size,
       bulkPaused,
+      servingViewers: viewing,
+      peersBusy: peersBusy(),
       p2pAcceptedRelays: [...acceptedP2P.entries()].map(([pubkey, { cores: _c, ...v }]) => ({ pubkey, ...v })),
       p2pDeniedRelays: [...new Map([...deniedP2P.values()].map(({ core: _c, ...v }) => [v.pubkey, v])).values()]
     }

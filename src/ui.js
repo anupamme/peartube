@@ -4,75 +4,277 @@ export const page = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>PearTube</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M12 9l12 7-12 7z' fill='white'/%3E%3C/svg%3E">
 <style>
-  :root { color-scheme: dark; --bg: #0f1115; --card: #171a21; --line: #262b36; --text: #e6e8ee; --dim: #8a91a3; --brand: #4c8dff; }
+  :root { color-scheme: light dark; --bg: #f5f6f8; --surface: #fff; --raised: #eef0f4; --line: #dde1e8; --text: #14171d; --dim: #596172; --brand: #2f6fed; --brand-hover: #2459c9; --ok: #17804a; --warn: #9a5b00; --bad: #c42b2b; --focus: #2f6fed55; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --surface: #171a21; --raised: #1f232c; --line: #2a303c; --text: #e8eaf0; --dim: #9aa2b4; --brand: #4c8dff; --brand-hover: #6aa0ff; --ok: #4cc38a; --warn: #e3ac52; --bad: #ff8f8f; --focus: #4c8dff66; } }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.4 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
-  main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
-  h1 { font-size: 18px; margin: 0 0 6px; display: flex; justify-content: space-between; align-items: center; }
-  h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; margin: 20px 0 8px; }
-  .facts { color: var(--dim); margin-bottom: 14px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
-  .facts b { color: var(--text); font-weight: 600; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
-  .row { display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .meta { color: var(--dim); font-size: 12px; margin-top: 3px; }
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: #2a2f3a; white-space: nowrap; }
-  .running, .announcing { background: #1d3b66; } .done, .seeder { background: #1b4d32; } .failed { background: #5c1f24; }
-  .bar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 8px; overflow: hidden; }
-  .bar > div { height: 100%; background: var(--brand); }
-  .error { color: #ff8a8a; font-size: 12px; margin-top: 4px; }
-  .empty { color: var(--dim); padding: 12px 0; }
-  input, select { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
-  button, a.btn { background: #262b36; color: var(--text); border: 1px solid #363d4d; border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; text-decoration: none; }
-  button.primary { background: #22498a; border-color: var(--brand); color: #fff; }
-  button:hover:not(:disabled), a.btn:hover { background: #323947; }
-  button.primary:hover:not(:disabled) { background: #2d5cb0; }
-  button:disabled { opacity: .45; cursor: default; }
-  #playerModal { position: fixed; inset: 0; background: rgba(7, 9, 13, .95); z-index: 100; display: none; flex-direction: column; }
+  [hidden] { display: none !important; }
+  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+  a { color: var(--brand); }
+  .top { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1080px; margin: 0 auto; padding: 10px 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); text-decoration: none; }
+  .brand svg { width: 26px; height: 26px; }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pill { font-size: 13px; padding: 3px 10px; border-radius: 99px; background: var(--raised); color: var(--dim); white-space: nowrap; }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.warn { color: var(--warn); }
+  .pill.ok::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; vertical-align: 1px; }
+  .tabs { max-width: 1080px; margin: 0 auto; padding: 0 8px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .tabs a { padding: 12px 12px 10px; color: var(--dim); text-decoration: none; font-weight: 600; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tabs a[aria-current='page'] { color: var(--text); border-bottom-color: var(--brand); }
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 96px; }
+  h2 { font-size: 16px; margin: 28px 0 10px; display: flex; align-items: center; gap: 8px; }
+  h2 .count { color: var(--dim); font-weight: 500; }
+  h3 { font-size: 15px; margin: 0 0 4px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .label, label { font-weight: 600; font-size: 14px; }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+  .hint { color: var(--dim); font-size: 13px; }
+  input[type=text], input[type=url], input[type=number], input[type=password], input[type=search], select { min-height: 42px; width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font: inherit; }
+  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
+  .btn { min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+  .btn:hover:not(:disabled) { border-color: var(--dim); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: var(--brand-hover); }
+  .btn.quiet { background: transparent; border-color: transparent; color: var(--dim); }
+  .btn.quiet:hover:not(:disabled) { color: var(--text); border-color: var(--line); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .chip { min-height: 40px; padding: 0 14px; border-radius: 99px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  .chip[aria-expanded='true'] { background: var(--raised); border-color: var(--brand); }
+  .panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; gap: 12px; align-items: center; }
+  .item .info { flex: 1; min-width: 0; }
+  .item .name { font-weight: 600; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
+  .meta { color: var(--dim); font-size: 13px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .poster { width: 48px; height: 72px; border-radius: 6px; flex: none; background: var(--raised); object-fit: cover; display: flex; align-items: center; justify-content: center; color: var(--dim); font-weight: 700; font-size: 18px; overflow: hidden; }
+  .thumb { width: 128px; height: 72px; }
+  .bar-track { height: 6px; background: var(--raised); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+  .bar-track > div { height: 100%; background: var(--brand); transition: width .3s; }
+  .tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--raised); color: var(--dim); white-space: nowrap; font-weight: 500; }
+  .tag.warn { color: var(--warn); }
+  .tag.ok { color: var(--ok); }
+  .tag.bad { color: var(--bad); }
+  .err { color: var(--bad); }
+  .msg { margin-top: 10px; font-size: 14px; min-height: 1px; }
+  .empty { color: var(--dim); padding: 24px 0; text-align: center; }
+  .switch { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; min-height: 40px; }
+  .switch input { appearance: none; width: 44px; height: 26px; border-radius: 13px; background: var(--line); position: relative; cursor: pointer; flex: none; margin: 0; transition: background .2s; }
+  .switch input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px #0004; }
+  .switch input:checked { background: var(--brand); }
+  .switch input:checked::after { transform: translateX(18px); }
+  .switch input:disabled { opacity: .5; cursor: default; }
+  .setting { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .setting:first-of-type { border-top: 0; }
+  .setting .what { display: flex; flex-direction: column; gap: 4px; min-width: 200px; flex: 1; }
+  .setting .control { flex: 1; min-width: 220px; max-width: 420px; }
+  .setting .control.narrow { flex: none; min-width: 0; }
+  .listedit .entry { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; overflow-wrap: anywhere; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-top: 12px; }
+  .stat { background: var(--raised); border-radius: 10px; padding: 10px 12px; }
+  .stat .v { font-size: 18px; font-weight: 700; }
+  .stat .k { color: var(--dim); font-size: 13px; }
+  .banner { background: var(--raised); border-left: 4px solid var(--warn); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
+  .cands { display: flex; flex-direction: column; gap: 6px; border: 0; padding: 0; margin: 12px 0; }
+  .cands legend { font-weight: 600; font-size: 14px; margin-bottom: 6px; padding: 0; }
+  .cand { display: flex; align-items: center; gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; font-weight: 500; }
+  .cand:has(input:checked) { border-color: var(--brand); background: var(--raised); }
+  .cand .poster { width: 32px; height: 48px; font-size: 14px; }
+  .qr { width: 160px; height: 160px; background: #fff; border-radius: 8px; padding: 8px; }
+  .menu { position: absolute; right: 0; top: calc(100% + 4px); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; min-width: 200px; z-index: 30; box-shadow: 0 8px 24px #0003; }
+  .menu .btn { justify-content: flex-start; background: transparent; border-color: transparent; }
+  .wrap-rel { position: relative; }
+  #castBar { position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px; z-index: 40; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 8px 10px 8px 16px; box-shadow: 0 8px 28px #0004; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px); }
+  #castBar .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 50; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; max-width: calc(100% - 24px); }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (max-width: 600px) {
+    .item { flex-wrap: wrap; }
+    .item.job { flex-wrap: nowrap; }
+    .item:not(.job) .acts { width: 100%; justify-content: flex-start; }
+    .tabs a { padding: 12px 9px 10px; }
+    .thumb { width: 96px; height: 54px; }
+    .setting .control { max-width: none; }
+    .p-top { flex-wrap: wrap; }
+    #playerModal .p-head { flex-basis: 100%; }
+    #playerModal .p-title { white-space: normal; }
+  }
+  #playerModal { position: fixed; inset: 0; background: rgba(7, 9, 13, .96); color: #e8eaf0; z-index: 100; display: none; flex-direction: column; }
   #playerModal.open { display: flex; }
-  .p-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 18px; background: rgba(15, 17, 21, .9); border-bottom: 1px solid var(--line); }
+  #playerModal .btn { background: #262b36; border-color: #363d4d; color: #e8eaf0; min-height: 36px; padding: 0 12px; }
+  #playerModal .btn.primary { background: #2f6fed; border-color: #4c8dff; }
+  #playerModal select { background: #171a21; color: #e8eaf0; border-color: #363d4d; min-height: 36px; width: auto; }
+  .p-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 16px; background: rgba(15, 17, 21, .9); border-bottom: 1px solid #262b36; }
+  .p-head { min-width: 0; flex: 1; }
+  .p-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .p-badge { font-size: 12px; color: #9aa2b4; }
   .p-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; cursor: pointer; }
   #pVideo, #pGlCanvas, #pCanvas { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; display: none; }
   #pSubCanvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
   #pSubText { position: absolute; left: 8%; right: 8%; bottom: 28px; text-align: center; font-size: clamp(16px, 2.2vw, 28px); font-weight: 600; color: #fff; text-shadow: 0 2px 6px #000, 0 0 3px #000, 1px 1px 0 #000, -1px -1px 0 #000; white-space: pre-wrap; pointer-events: none; }
-  #pStatus { position: absolute; padding: 8px 14px; border-radius: 8px; background: rgba(15, 17, 21, .82); border: 1px solid var(--line); color: var(--text); font-size: 13px; pointer-events: none; display: none; }
-  .p-bar { padding: 10px 18px 14px; background: rgba(15, 17, 21, .94); border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
-  #pSeek { width: 100%; accent-color: var(--brand); padding: 0; cursor: pointer; }
-  .clock { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--dim); min-width: 96px; }
+  #pStatus { position: absolute; padding: 8px 14px; border-radius: 8px; background: rgba(15, 17, 21, .82); border: 1px solid #262b36; font-size: 14px; pointer-events: none; display: none; }
+  .p-bar { padding: 10px 16px 14px; background: rgba(15, 17, 21, .94); border-top: 1px solid #262b36; display: flex; flex-direction: column; gap: 8px; }
+  .p-bar .row { justify-content: space-between; }
+  #pSeek { width: 100%; accent-color: #4c8dff; padding: 0; cursor: pointer; }
+  .clock { font-variant-numeric: tabular-nums; font-size: 13px; color: #9aa2b4; min-width: 96px; }
 </style>
 </head>
 <body>
+<header class="top">
+  <div class="bar">
+    <a class="brand" href="#library"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#2f6fed"/><path d="M12 9l12 7-12 7z" fill="#fff"/></svg>PearTube</a>
+    <div class="pills" id="pills"></div>
+  </div>
+  <nav class="tabs" aria-label="Sections">
+    <a href="#library" data-tab="library">Library</a>
+    <a href="#channels" data-tab="channels">Channels</a>
+    <a href="#sharing" data-tab="sharing">Sharing</a>
+    <a href="#tv" data-tab="tv">TV</a>
+    <a href="#settings" data-tab="settings">Settings</a>
+  </nav>
+</header>
 <main>
-  <h1><span>PearTube</span><span><a class="btn" href="/manifest.json" target="_blank">Stremio Manifest</a> <a class="btn" href="/v1/playlist.m3u">M3U Playlist</a></span></h1>
-  <div class="facts" id="facts"></div>
-  <form class="row" id="addForm" style="margin-bottom:14px">
-    <input id="uriInput" style="flex:1;min-width:220px" placeholder="Paste 64-hex key or peartube://channel/... or peartube://watch/..." required>
-    <select id="kindSelect"><option value="channel">Channel</option><option value="tracker">Open Tracker</option></select>
-    <input id="aliasInput" style="width:140px" placeholder="Optional name">
-    <button type="submit">Add / Open</button>
+  <form id="authForm" class="card" hidden>
+    <div class="field">
+      <label for="tokenInput">Access token</label>
+      <div class="row"><input class="grow" id="tokenInput" type="password" autocomplete="current-password" placeholder="9f86d081884c7d659a2feaa0c55ad015" required><button class="btn primary" type="submit">Sign in</button></div>
+      <span class="hint">This relay asks for the token it was started with.</span>
+    </div>
+    <div class="msg err" id="authMsg" role="alert"></div>
   </form>
-  <div id="err" class="error"></div>
-  <h2>Channels & Trackers</h2>
-  <div id="sources"></div>
-  <div id="discoveredWrap" style="display:none"><h2>Discovered via Gossip</h2><div id="discovered"></div></div>
-  <h2>Catalog</h2>
-  <div id="entries"></div>
-  <div id="pluginsWrap" style="display:none"><h2>Mirror Plugins</h2><div id="plugins"></div></div>
-  <h2>Acquisitions</h2>
-  <div id="jobs"></div>
+
+  <section id="tab-library" data-panel="library">
+    <div class="card">
+      <form id="addForm">
+        <div class="field" style="margin:0">
+          <label for="addInput">Add a video or channel</label>
+          <div class="row"><input class="grow" id="addInput" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=aqz-KE-bpKQ"><button class="btn primary" type="submit" id="addBtn">Add</button></div>
+        </div>
+      </form>
+      <div class="chips" role="group" aria-label="More ways to add">
+        <button class="chip" type="button" data-opens="folderForm" aria-expanded="false">Import a folder</button>
+        <button class="chip" type="button" data-opens="feedForm" aria-expanded="false">Follow a feed</button>
+        <button class="chip" type="button" data-opens="copyForm" aria-expanded="false">Copy a channel</button>
+      </div>
+      <form id="folderForm" class="panel" hidden>
+        <div class="field">
+          <label for="folderInput">Folder on the relay</label>
+          <div class="row"><input class="grow" id="folderInput" type="text" spellcheck="false" placeholder="/data/import" required><button class="btn primary" type="submit">Import</button></div>
+          <span class="hint" id="folderHint">New videos in this folder are added automatically.</span>
+        </div>
+      </form>
+      <form id="feedForm" class="panel" hidden>
+        <div class="field">
+          <label for="feedInput">Feed address</label>
+          <div class="row"><input class="grow" id="feedInput" type="url" spellcheck="false" placeholder="https://example.org/catalog.json" required><button class="btn primary" type="submit">Follow</button></div>
+        </div>
+        <div class="listedit" id="feedList"></div>
+      </form>
+      <form id="copyForm" class="panel" hidden>
+        <div class="field">
+          <label for="copyInput">Channel link</label>
+          <div class="row"><input class="grow" id="copyInput" type="text" spellcheck="false" placeholder="peartube://channel/6049da41fd86a20f4883255bd6120bd6b580e19aa209693eb1f3f8c649c76d70" required><button class="btn primary" type="submit">Copy</button></div>
+          <span class="hint">Follows the channel and keeps every video on this relay.</span>
+        </div>
+      </form>
+      <form id="preview" class="panel" hidden></form>
+      <div class="msg" id="addMsg" role="status"></div>
+    </div>
+    <div id="jobsWrap" hidden><h2>Adding <span class="count" id="jobCount"></span></h2><div class="list" id="jobs"></div></div>
+    <h2>Library <span class="count" id="libCount"></span></h2>
+    <div class="field" id="filterWrap" hidden><input id="libFilter" type="search" aria-label="Filter library" placeholder="Big Buck Bunny"></div>
+    <div class="list" id="entries"></div>
+  </section>
+
+  <section id="tab-channels" data-panel="channels" hidden>
+    <h2>This relay</h2>
+    <div class="list" id="mine"></div>
+    <h2>Following <span class="count" id="followCount"></span></h2>
+    <div class="list" id="following"></div>
+    <form id="followForm" class="card" style="margin-top:12px">
+      <div class="field">
+        <label for="followInput">Follow a channel or tracker</label>
+        <input id="followInput" type="text" spellcheck="false" placeholder="peartube://channel/6049da41fd86a20f4883255bd6120bd6b580e19aa209693eb1f3f8c649c76d70" required>
+      </div>
+      <div class="field" id="followKindWrap" hidden>
+        <label for="followKind">This key is a</label>
+        <select id="followKind"><option value="channel">Channel</option><option value="tracker">Tracker</option></select>
+      </div>
+      <div class="field">
+        <label for="followName">Name</label>
+        <input id="followName" type="text" placeholder="Blender Studio">
+      </div>
+      <button class="btn primary" type="submit">Follow</button>
+      <div class="msg" id="followMsg" role="status"></div>
+    </form>
+    <div id="foundWrap" hidden><h2>Found on the network</h2><div class="list" id="found"></div></div>
+  </section>
+
+  <section id="tab-sharing" data-panel="sharing" hidden>
+    <h2>Peers</h2>
+    <div class="card" id="netCard"></div>
+    <h2>Keep copies</h2>
+    <div class="card" id="copiesCard"></div>
+    <h2>HiveRelays</h2>
+    <div class="card">
+      <div id="hiveStatus"></div>
+      <form id="hiveForm" class="panel">
+        <div class="field">
+          <label for="hiveInput">Ask a HiveRelay to seed</label>
+          <input id="hiveInput" type="url" spellcheck="false" placeholder="http://192.168.1.50:9100" required>
+        </div>
+        <div class="field">
+          <label for="hiveKey">Its access key</label>
+          <input id="hiveKey" type="password" autocomplete="off" placeholder="hr_4f1c2a9b7d" >
+        </div>
+        <button class="btn primary" type="submit">Add HiveRelay</button>
+        <div class="msg" id="hiveMsg" role="status"></div>
+      </form>
+    </div>
+    <h2>Other apps</h2>
+    <div class="card" id="appsCard"></div>
+  </section>
+
+  <section id="tab-tv" data-panel="tv" hidden>
+    <div class="card" id="castNow" hidden></div>
+    <form id="pairForm" class="card">
+      <div class="field" style="margin:0">
+        <label for="pairInput">Pair a TV</label>
+        <div class="row"><input class="grow" id="pairInput" type="text" autocomplete="off" spellcheck="false" placeholder="K7Q2PX" required><button class="btn primary" type="submit">Pair</button></div>
+        <span class="hint">Enter the code or link shown on the TV.</span>
+      </div>
+      <div class="msg" id="pairMsg" role="status"></div>
+    </form>
+    <h2>Your TVs</h2>
+    <div class="list" id="tvs"></div>
+    <h2>Use a browser as a TV</h2>
+    <div class="card" id="webTv"></div>
+  </section>
+
+  <section id="tab-settings" data-panel="settings" hidden>
+    <div id="settingsBody"></div>
+  </section>
 </main>
-<div id="playerModal">
+<div id="castBar" hidden></div>
+<div id="toast" role="status" hidden></div>
+<div id="playerModal" role="dialog" aria-modal="true" aria-labelledby="pTitle">
   <div class="p-top">
-    <div class="row" style="min-width:0;flex:1">
-      <span class="title" id="pTitle"></span>
-      <span class="badge running" id="pBadge">Loading WASM…</span>
+    <div class="p-head">
+      <div class="p-title" id="pTitle"></div>
+      <div class="p-badge" id="pBadge">Loading player…</div>
     </div>
     <div class="row">
-      <a class="btn" id="pRawLink" target="_blank" rel="noopener">Raw URL</a>
-      <button id="pFsBtn">Fullscreen</button>
-      <button id="pCloseBtn">Close</button>
+      <a class="btn" id="pRawLink" target="_blank" rel="noopener">Open file</a>
+      <button class="btn" id="pFsBtn" type="button">Fullscreen</button>
+      <button class="btn" id="pCloseBtn" type="button">Close</button>
     </div>
   </div>
   <div class="p-stage" id="pStage">
@@ -84,19 +286,19 @@ export const page = `<!doctype html>
     <div id="pStatus"></div>
   </div>
   <div class="p-bar">
-    <input type="range" id="pSeek" min="0" max="1000" value="0" step="1">
+    <input type="range" id="pSeek" min="0" max="1000" value="0" step="1" aria-label="Position">
     <div class="row">
       <div class="row">
-        <button class="primary" id="pPlayBtn">Pause</button>
-        <button id="pBackBtn">-10s</button>
-        <button id="pFwdBtn">+10s</button>
+        <button class="btn primary" id="pPlayBtn" type="button">Pause</button>
+        <button class="btn" id="pBackBtn" type="button" aria-label="Back 10 seconds">-10s</button>
+        <button class="btn" id="pFwdBtn" type="button" aria-label="Forward 10 seconds">+10s</button>
         <span class="clock" id="pClock">0:00 / 0:00</span>
       </div>
       <div class="row">
-        <select id="pAudioSel" title="Audio Track"></select>
-        <select id="pSubSel" title="Subtitles"></select>
-        <button id="pMuteBtn">Mute</button>
-        <input type="range" id="pVol" min="0" max="100" value="100" style="width:80px;padding:0;accent-color:var(--brand)" title="Volume">
+        <select id="pAudioSel" aria-label="Audio track"></select>
+        <select id="pSubSel" aria-label="Subtitles"></select>
+        <button class="btn" id="pMuteBtn" type="button">Mute</button>
+        <input type="range" id="pVol" min="0" max="100" value="100" style="width:80px;padding:0;accent-color:#4c8dff" aria-label="Volume">
       </div>
     </div>
   </div>
@@ -104,51 +306,85 @@ export const page = `<!doctype html>
 <script>
 const $ = id => document.getElementById(id)
 const el = (t, c, txt) => { const e = document.createElement(t); if (t === 'button') e.type = 'button'; if (c) e.className = c; if (txt != null) e.textContent = txt; return e }
-const size = n => n == null ? '' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? (n / 1e3).toFixed(0) + ' KB' : n + ' B'
-const fact = (k, v) => { const s = el('span', null, k + ' '); s.append(el('b', null, v)); return s }
-// Stuffs the URI down a hidden textarea throat so plain HTTP relays and permission-stingy browsers still swallow every byte on click.
-const copiedUntil = new Map()
-function execCopy (text) {
-  const prev = document.activeElement
+// Builds an element: h('button', { class: 'btn', onclick }, 'Label', child, ...). Strings always land as text.
+function h (tag, attrs, ...kids) {
+  const e = document.createElement(tag)
+  if (tag === 'button') e.type = 'button'
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === 'class') e.className = v
+    else if (k.startsWith('on') || k === 'checked' || k === 'disabled' || k === 'value' || k === 'hidden') e[k] = v
+    else if (v === true) e.setAttribute(k, '')
+    else if (v !== false && v != null) e.setAttribute(k, v)
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) e.append(kid instanceof Node ? kid : String(kid))
+  return e
+}
+const size = n => n == null || !Number.isFinite(n) ? '' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' KB' : n + ' B'
+const rate = n => size(n || 0) + '/s'
+const short = k => k ? k.slice(0, 8) + '…' : ''
+const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many)
+function duration (s) {
+  if (!s) return ''
+  const m = Math.floor(s / 60), r = String(Math.floor(s % 60)).padStart(2, '0')
+  return m >= 60 ? Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0') + ':' + r : m + ':' + r
+}
+
+let token = localStorage.getItem('peartube.token') || ''
+let needsToken = false
+// Every call goes through here: the token rides along, a 401 asks for it, errors come back as messages.
+async function api (path, { method, body } = {}) {
+  const headers = {}
+  if (body !== undefined) headers['content-type'] = 'application/json'
+  if (token) headers.authorization = 'Bearer ' + token
+  const res = await fetch(path, { method: method || (body !== undefined ? 'POST' : 'GET'), headers, body: body !== undefined ? JSON.stringify(body) : undefined })
+  let data = null
+  try { data = await res.json() } catch {}
+  if (res.status === 401) {
+    needsToken = true
+    $('authForm').hidden = false
+    throw new Error('Sign in with the access token first.')
+  }
+  if (!res.ok) throw new Error((data && data.error) || 'The relay answered ' + res.status)
+  return data
+}
+
+let toastTimer = 0
+function toast (text) {
+  const t = $('toast')
+  t.textContent = text
+  t.hidden = false
+  clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => { t.hidden = true }, 3500)
+}
+function say (id, text, bad) {
+  const m = $(id)
+  m.textContent = text || ''
+  m.classList.toggle('err', Boolean(bad))
+}
+// Runs an action from a button: disables it meanwhile and reports failures.
+async function act (btn, fn, msgId) {
+  if (btn) btn.disabled = true
+  try { return await fn() } catch (err) {
+    if (msgId) say(msgId, err.message, true)
+    else toast(err.message)
+  } finally { if (btn) btn.disabled = false }
+}
+
+function copyText (text) {
   const ta = el('textarea')
   ta.value = text
-  ta.readOnly = true
-  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none'
+  ta.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0'
   document.body.append(ta)
-  try { ta.focus({ preventScroll: true }) } catch { ta.focus() }
   ta.select()
-  ta.setSelectionRange(0, text.length)
   let ok = false
   try { ok = document.execCommand('copy') } catch {}
   ta.remove()
-  try { prev?.focus?.({ preventScroll: true }) } catch { prev?.focus?.() }
-  return ok
+  if (!ok && window.isSecureContext && navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {})
+  toast('Link copied')
 }
-function copyBtn (label, text) {
-  const key = label + ':' + text
-  const until = copiedUntil.get(key) || 0
-  const rem = until - Date.now()
-  const b = el('button', null, rem > 0 ? 'Copied!' : label)
-  b.disabled = !text
-  if (text) b.title = text
-  if (rem > 0) setTimeout(() => { if (copiedUntil.get(key) === until) { copiedUntil.delete(key); b.textContent = label } }, rem)
-  b.onclick = () => {
-    if (!text) return
-    const flash = () => {
-      const exp = Date.now() + 1500
-      copiedUntil.set(key, exp)
-      b.textContent = 'Copied!'
-      setTimeout(() => { if (copiedUntil.get(key) === exp) { copiedUntil.delete(key); b.textContent = label } }, 1500)
-    }
-    const ok = execCopy(text)
-    if (ok) flash()
-    if (window.isSecureContext && navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(text).then(() => { if (!ok) flash() }, () => {})
-    }
-  }
-  return b
-}
-// Hold the DOM still while Master's finger presses a button so SSE updates never yank the target mid-stroke before click lands.
+const copyBtn = (label, text) => h('button', { class: 'btn', disabled: !text, title: text || '', onclick: () => copyText(text) }, label)
+
+// Holds the lists still while a finger is down, so an update never moves a button mid-press.
 let pressing = false, refreshQueued = false, player = null
 addEventListener('pointerdown', () => { pressing = true })
 for (const evName of ['pointerup', 'pointercancel', 'blur']) {
@@ -159,126 +395,672 @@ for (const evName of ['pointerup', 'pointercancel', 'blur']) {
   })
 }
 
-$('addForm').onsubmit = async ev => {
-  ev.preventDefault()
-  $('err').textContent = ''
-  const val = $('uriInput').value.trim()
-  const body = val.startsWith('peartube:') ? { uri: val } : { key: val, kind: $('kindSelect').value, alias: $('aliasInput').value.trim() }
-  const ep = val.startsWith('peartube://watch/') || val.startsWith('peartube:watch/') ? '/v1/open' : '/v1/sources'
-  const r = await fetch(ep, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(x => x.json())
-  if (r.error) $('err').textContent = r.error
-  else { $('uriInput').value = ''; $('aliasInput').value = ''; refresh() }
-}
+const S = { status: {}, sources: { sources: [], discovered: [], published: [] }, entries: [], jobs: [], plugins: [], cast: null, settings: null }
+const plugin = name => S.plugins.find(p => p.name === name) || {}
+const setting = key => S.settings && S.settings.settings[key]
+const sval = key => setting(key) ? setting(key).value : undefined
 
+// ---- Tabs
+let tab = 'library'
+function showTab () {
+  const want = location.hash.slice(1)
+  tab = ['library', 'channels', 'sharing', 'tv', 'settings'].includes(want) ? want : 'library'
+  for (const a of document.querySelectorAll('.tabs a')) a.setAttribute('aria-current', a.dataset.tab === tab ? 'page' : 'false')
+  for (const s of document.querySelectorAll('[data-panel]')) s.hidden = s.dataset.panel !== tab
+  if (tab === 'tv') loadCast()
+  if (tab === 'settings') renderSettings()
+  render()
+}
+addEventListener('hashchange', showTab)
+
+// ---- Loading
 async function refresh () {
   if (pressing || player) { refreshQueued = true; return }
   try {
     const [st, src, ent, jb, pl] = await Promise.all([
-      fetch('/v1/status').then(r => r.json()),
-      fetch('/v1/sources').then(r => r.json()),
-      fetch('/v1/entries').then(r => r.json()),
-      fetch('/v1/jobs').then(r => r.json()),
-      fetch('/v1/plugins').then(r => r.json()).catch(() => ({ plugins: [] }))
+      api('/v1/status'), api('/v1/sources'), api('/v1/entries'), api('/v1/jobs'),
+      api('/v1/plugins').catch(() => ({ plugins: [] }))
     ])
-    if (pressing || player) { refreshQueued = true; return }
-    const rec = st.reciprocity || {}
-    const sources = src.sources || []
-    const trackerKey = sources.length ? (sources.find(s => s.primary && s.kind === 'tracker')?.key || sources.find(s => s.kind === 'tracker')?.key || '') : (st.tracker || '')
-    const facts = [
-      fact('peers', st.peers + (st.lanPeers ? ' (+' + st.lanPeers + ' LAN)' : '')),
-      fact('stored', size(st.blobBytes)),
-      fact('cached', size(st.cachedBytes || 0)),
-      fact('P2P', '\\u2193 ' + size(st.downBps || 0) + '/s \\u00b7 \\u2191 ' + size(st.upBps || 0) + '/s'),
-      el('span', 'badge ' + (rec.tier || ''), (rec.tier || 'peer') + ' (' + (rec.inflightMax || 128) + ' win)'),
-      copyBtn('Copy Tracker URI', trackerKey ? 'peartube://tracker/' + trackerKey : ''),
-      copyBtn('Copy My Channel URI', st.channel ? 'peartube://channel/' + st.channel : '')
-    ]
-    if ((st.cachedBytes || 0) > 0) {
-      const clr = el('button', null, 'clear cache')
-      clr.onclick = () => fetch('/v1/cache/clear', { method: 'POST', body: '{}' }).then(refresh)
-      facts.push(clr)
-    }
-    $('facts').replaceChildren(...facts)
-    const pubSet = new Set((src.published || []).map(p => p.key))
-    $('sources').replaceChildren(...(src.sources || []).map(s => {
-      const c = el('div', 'card row')
-      const titleWrap = el('span', 'row')
-      titleWrap.append(el('span', 'title', (s.alias || s.key.slice(0, 12) + '\\u2026') + ' (' + s.kind + (s.writable ? ', local' : '') + ')'))
-      if (pubSet.has(s.key)) titleWrap.append(el('span', 'badge seeder', 'in directory'))
-      c.append(titleWrap)
-      const act = el('span', 'row')
-      act.append(copyBtn('Copy URI', 'peartube://' + s.kind + '/' + s.key + (s.alias ? '?name=' + encodeURIComponent(s.alias) : '')))
-      if (!s.primary) {
-        if (pubSet.has(s.key)) {
-          const unpub = el('button', null, 'Unlist')
-          unpub.onclick = () => fetch('/v1/channel/sources/' + s.key, { method: 'DELETE' }).then(refresh)
-          act.append(unpub)
-        } else {
-          const pub = el('button', null, 'List in Directory')
-          pub.onclick = () => fetch('/v1/channel/publish', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ type: 'source', sourceKey: s.key, kind: s.kind, title: s.alias || s.key.slice(0, 12), target: 'both' })
-          }).then(refresh)
-          act.append(pub)
-        }
-      }
-      if (!s.primary && !s.writable) {
-        const rm = el('button', null, 'Remove')
-        rm.onclick = () => fetch('/v1/sources/' + s.key, { method: 'DELETE' }).then(refresh)
-        act.append(rm)
-      }
-      c.append(act)
-      return c
-    }))
-    const disc = src.discovered || []
-    $('discoveredWrap').style.display = disc.length ? '' : 'none'
-    $('discovered').replaceChildren(...disc.map(d => {
-      const c = el('div', 'card row')
-      const join = el('button', null, '+ Subscribe')
-      join.onclick = () => fetch('/v1/sources', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ key: d.key, kind: d.kind, alias: d.title }) }).then(refresh)
-      c.append(el('span', 'title', d.title + ' (' + d.kind + ' \\u00b7 ' + d.key.slice(0, 10) + '\\u2026)'), join)
-      return c
-    }))
-    const sortedEntries = (ent.results || []).slice().sort((a, b) => (Number(Boolean(b.local)) - Number(Boolean(a.local))) || ((b.cachedBytes || 0) - (a.cachedBytes || 0)))
-    $('entries').replaceChildren(...(sortedEntries.length ? sortedEntries.map(e => {
-      const c = el('div', 'card row')
-      const info = el('div')
-      const locTag = e.local ? 'local' : (e.cachedBytes ? 'cached ' + size(e.cachedBytes) : 'remote')
-      info.append(el('div', 'title', e.title), el('div', 'meta', [e.id, size(e.size), locTag, e.sourceKind + ':' + e.source.slice(0, 8)].join(' \\u00b7 ')))
-      const act = el('span', 'row')
-      const play = el('button', 'primary', 'Stream')
-      play.onclick = () => openPlayer(e)
-      act.append(play, copyBtn('Copy Magnet', e.magnetUrl))
-      c.append(info, act)
-      return c
-    }) : [el('div', 'empty', 'No entries synced yet.')]))
-    const plugs = pl.plugins || []
-    $('pluginsWrap').style.display = plugs.length ? '' : 'none'
-    $('plugins').replaceChildren(...plugs.map(p => {
-      const c = el('div', 'card row')
-      const info = el('div')
-      const summary = p.lastResult ? JSON.stringify(p.lastResult) : (p.description || '')
-      info.append(el('div', 'title', p.name), el('div', 'meta', [p.runs ? p.runs + ' runs' : 'idle', summary].filter(Boolean).join(' \\u00b7 ')))
-      if (p.lastError) info.append(el('div', 'error', p.lastError))
-      const runBtn = el('button', null, 'Run Now')
-      runBtn.onclick = () => fetch('/v1/plugins/' + encodeURIComponent(p.name) + '/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then(refresh)
-      c.append(info, runBtn)
-      return c
-    }))
-    $('jobs').replaceChildren(...((jb.jobs || []).length ? jb.jobs.slice().sort((a, b) => b.created - a.created).map(j => {
-      const c = el('div', 'card')
-      const r = el('div', 'row'); r.append(el('div', 'title', j.title || j.id), el('span', 'badge ' + j.status, j.status))
-      c.append(r, el('div', 'meta', [j.id, j.plugin || '', j.size ? size(j.size) : ''].filter(Boolean).join(' \\u00b7 ')))
-      if (j.error && j.status !== 'done') c.append(el('div', 'error', j.error))
-      return c
-    }) : [el('div', 'empty', 'No acquisitions yet.')]))
-  } catch (err) { $('err').textContent = 'Node unreachable: ' + err.message }
+    Object.assign(S, { status: st, sources: src, entries: ent.results || [], jobs: jb.jobs || [], plugins: pl.plugins || [], offline: false })
+  } catch (err) {
+    S.offline = !needsToken
+  }
+  if (pressing || player) { refreshQueued = true; return }
+  render()
 }
-refresh()
-const ev = new EventSource('/v1/events')
-ev.onmessage = refresh
-setInterval(refresh, 5000)
+let settingsLoaded = false
+async function loadSettings () {
+  try { S.settings = await api('/v1/settings') } catch { S.settings = null }
+  settingsLoaded = true
+  if (tab === 'settings') renderSettings()
+  render()
+}
+async function loadCast () {
+  try { S.cast = await api('/v1/cast/status') } catch { S.cast = null }
+  renderCast()
+}
+let refreshTimer = 0
+const soon = () => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 250) }
+
+function render () {
+  renderPills()
+  if (tab === 'library') renderLibrary()
+  if (tab === 'channels') renderChannels()
+  if (tab === 'sharing') renderSharing()
+  if (tab === 'tv') renderCast()
+  renderCastBar()
+}
+
+// ---- Header
+function renderPills () {
+  const st = S.status
+  const pills = []
+  if (S.offline) pills.push(h('span', { class: 'pill warn' }, 'Relay unreachable'))
+  else {
+    pills.push(h('span', { class: 'pill' + (st.peers || st.lanPeers ? ' ok' : '') }, h('b', null, String((st.peers || 0))), ' ', (st.peers === 1 ? 'peer' : 'peers'), st.lanPeers ? ' · ' + st.lanPeers + ' nearby' : ''))
+    pills.push(h('span', { class: 'pill' }, '↓ ', h('b', null, rate(st.downBps)), ' ↑ ', h('b', null, rate(st.upBps))))
+  }
+  const restart = S.settings ? S.settings.restartNeeded.length : 0
+  if (restart) pills.push(h('a', { class: 'pill warn', href: '#settings' }, 'Restart to apply ' + plural(restart, 'change', 'changes')))
+  if (needsToken && !token) pills.push(h('span', { class: 'pill warn' }, 'Read-only until you sign in'))
+  $('pills').replaceChildren(...pills)
+}
+
+// ---- Library: add flow
+for (const chip of document.querySelectorAll('[data-opens]')) {
+  chip.onclick = () => {
+    for (const other of document.querySelectorAll('[data-opens]')) {
+      const open = other === chip && other.getAttribute('aria-expanded') !== 'true'
+      other.setAttribute('aria-expanded', String(open))
+      $(other.dataset.opens).hidden = !open
+      if (open) $(other.dataset.opens).querySelector('input').focus()
+    }
+    $('preview').hidden = true
+    say('addMsg', '')
+    renderFeeds()
+  }
+}
+
+const HEX = /^[0-9a-f]{64}$/i
+$('addForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const val = $('addInput').value.trim()
+  say('addMsg', '')
+  $('preview').hidden = true
+  if (!val) return say('addMsg', 'Paste a link to a video, a page, or a channel.', true)
+  if (/^peartube:/i.test(val)) {
+    return act($('addBtn'), async () => {
+      const watch = /^peartube:(?:[/][/])?watch[/]/i.test(val)
+      const r = await api(watch ? '/v1/open' : '/v1/sources', { body: { uri: val } })
+      $('addInput').value = ''
+      say('addMsg', watch ? 'Opened. It is in your library now.' : 'Following ' + ((r.source && r.source.alias) || 'the channel') + '.')
+      refresh()
+    }, 'addMsg')
+  }
+  if (HEX.test(val)) {
+    location.hash = '#channels'
+    $('followInput').value = val
+    $('followInput').dispatchEvent(new Event('input'))
+    $('followName').focus()
+    return
+  }
+  if (!/^https?:[/][/]/i.test(val)) return say('addMsg', 'That is not a link. Links start with https://', true)
+  await act($('addBtn'), async () => {
+    say('addMsg', 'Looking at the link…')
+    const r = await api('/v1/identify', { body: { url: val } })
+    say('addMsg', '')
+    renderPreview(val, r)
+  }, 'addMsg')
+}
+
+function posterBox (src, title, cls) {
+  const box = h('div', { class: 'poster' + (cls ? ' ' + cls : '') }, (title || '?').trim().charAt(0).toUpperCase())
+  if (src) {
+    const img = h('img', { class: 'poster' + (cls ? ' ' + cls : ''), alt: '', loading: 'lazy', src })
+    img.onerror = () => img.replaceWith(box)
+    return img
+  }
+  return box
+}
+
+function renderPreview (url, r) {
+  const p = $('preview')
+  const link = r.link
+  const facts = [link.site, link.uploader, duration(link.duration), r.parsed.resolution, size(link.size)].filter(Boolean)
+  const choices = [...r.candidates.map(c => ({ id: c.id, title: c.title, label: c.title, poster: c.poster, sub: c.type === 'series' ? 'Episode' : 'Movie' })),
+    { id: r.plain.id, title: r.plain.title, label: r.candidates.length ? 'None of these' : r.plain.title, sub: link.kind === 'page' ? 'Video' : 'Video file' }]
+  const chosen = r.match || r.plain.id
+  const titleInput = h('input', { id: 'addTitle', type: 'text', value: (choices.find(c => c.id === chosen) || choices[0]).title, placeholder: 'Big Buck Bunny 2008', required: true })
+  const radios = choices.map(c => h('label', { class: 'cand' },
+    h('input', { type: 'radio', name: 'cand', value: c.id, checked: c.id === chosen, onchange: () => { titleInput.value = c.title } }),
+    c.poster !== undefined ? posterBox(c.poster, c.label) : null,
+    h('span', { class: 'grow' }, h('div', null, c.label), h('div', { class: 'meta' }, c.sub))))
+  p.replaceChildren(
+    h('div', { class: 'row', style: 'flex-wrap:nowrap;align-items:flex-start' },
+      link.thumbnail ? posterBox(link.thumbnail, link.name, 'thumb') : null,
+      h('div', { class: 'grow' }, h('h3', null, link.name || r.parsed.title), h('div', { class: 'meta' }, facts.join(' · ')))),
+    r.candidates.length ? h('fieldset', { class: 'cands' }, h('legend', null, 'Is this one of these?'), radios) : null,
+    h('div', { class: 'field' }, h('label', { for: 'addTitle' }, 'Title in your library'), titleInput),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'submit', id: 'confirmAdd' }, 'Add to library'),
+      h('button', { class: 'btn quiet', onclick: () => { p.hidden = true } }, 'Cancel')))
+  p.onsubmit = async ev => {
+    ev.preventDefault()
+    const picked = p.querySelector('input[name=cand]:checked')
+    const id = picked ? picked.value : r.plain.id
+    await act($('confirmAdd'), async () => {
+      await api('/v1/acquire', { body: { id, title: titleInput.value.trim() || r.plain.title, source: { url, page: link.kind === 'page' } } })
+      p.hidden = true
+      $('addInput').value = ''
+      say('addMsg', 'Adding “' + (titleInput.value.trim() || r.plain.title) + '”.')
+      refresh()
+    }, 'addMsg')
+  }
+  p.hidden = false
+}
+
+$('folderForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const dir = $('folderInput').value.trim()
+  await act(ev.submitter, async () => {
+    if (sval('watchDir') !== dir) await saveSettings({ watchDir: dir })
+    await api('/v1/plugins/watch-dir/run', { body: { dir } })
+    say('addMsg', 'Importing from ' + dir + '. New files there are added automatically.')
+    refresh()
+  }, 'addMsg')
+}
+$('feedForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const url = $('feedInput').value.trim()
+  await act(ev.submitter, async () => {
+    await saveSettings({ feeds: [...(sval('feeds') || []).map(f => f.ref), url] })
+    $('feedInput').value = ''
+    say('addMsg', 'Following the feed. Its videos are added as they appear.')
+    renderFeeds()
+  }, 'addMsg')
+}
+function renderFeeds () {
+  const feeds = sval('feeds') || []
+  $('feedList').replaceChildren(...feeds.map(f => h('div', { class: 'entry' }, h('span', null, f.label),
+    h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await saveSettings({ feeds: feeds.filter(x => x !== f).map(x => x.ref) }); renderFeeds() }) }, 'Unfollow'))))
+  const dir = sval('watchDir')
+  if (dir && !$('folderInput').value) $('folderInput').value = dir
+}
+$('copyForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const val = $('copyInput').value.trim()
+  await act(ev.submitter, async () => {
+    const r = await api('/v1/sources', { body: HEX.test(val) ? { key: val.toLowerCase(), kind: 'channel' } : { uri: val } })
+    await keepCopy(r.source.key, true)
+    $('copyInput').value = ''
+    say('addMsg', 'Copying ' + (r.source.alias || 'the channel') + ' to this relay.')
+    refresh()
+  }, 'addMsg')
+}
+
+// ---- Library: jobs and entries
+const JOB_TEXT = { queued: 'Waiting', running: 'Downloading', announcing: 'Publishing', done: 'Added', failed: 'Failed', cancelled: 'Cancelled' }
+function renderJobs () {
+  const recent = Date.now() - 6 * 3600_000
+  const jobs = S.jobs.filter(j => j.status !== 'done' || j.created > recent).sort((a, b) => b.created - a.created).slice(0, 20)
+  $('jobsWrap').hidden = !jobs.length
+  $('jobCount').textContent = jobs.length ? String(jobs.length) : ''
+  $('jobs').replaceChildren(...jobs.map(j => {
+    const active = j.status === 'queued' || j.status === 'running' || j.status === 'announcing'
+    const pct = j.total ? Math.min(100, Math.round((j.bytes || 0) / j.total * 100)) : null
+    const status = j.status === 'running' && j.bytes != null ? (pct != null ? 'Downloading ' + pct + '% of ' + size(j.total) : 'Downloading · ' + size(j.bytes)) : JOB_TEXT[j.status] || j.status
+    const tagClass = j.status === 'done' ? 'tag ok' : j.status === 'failed' ? 'tag bad' : 'tag'
+    return h('div', { class: 'item job' },
+      h('div', { class: 'info' },
+        h('div', { class: 'name' }, j.title || 'Untitled'),
+        h('div', { class: 'meta' }, h('span', { class: tagClass }, status), j.status === 'done' && j.size ? ' ' + size(j.size) : ''),
+        j.error && j.status === 'failed' ? h('div', { class: 'meta err' }, j.error) : null,
+        j.status === 'running' ? h('div', { class: 'bar-track' }, h('div', { style: 'width:' + (pct == null ? 100 : pct) + '%' })) : null),
+      h('div', { class: 'acts' }, h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await api('/v1/jobs/' + j.jobId, { method: 'DELETE' }); refresh() }) }, active ? 'Cancel' : 'Dismiss')))
+  }))
+}
+
+function entryKind (id) {
+  if (/^imdb:tt[0-9]+:s[0-9]+e[0-9]+$/.test(id)) return 'Episode'
+  if (/^imdb:tt[0-9]+$/.test(id)) return 'Movie'
+  return 'Video'
+}
+function sourceName (key) {
+  const s = (S.sources.sources || []).find(x => x.key === key)
+  if (!s || s.writable) return 'this relay'
+  return s.alias || (s.kind === 'channel' ? 'channel ' : 'tracker ') + short(s.key)
+}
+function renderLibrary () {
+  renderJobs()
+  const q = $('libFilter').value.trim().toLowerCase()
+  const all = S.entries.slice().sort((a, b) => (Number(Boolean(b.local)) - Number(Boolean(a.local))) || a.title.localeCompare(b.title))
+  const list = q ? all.filter(e => e.title.toLowerCase().includes(q)) : all
+  $('libCount').textContent = all.length ? String(all.length) : ''
+  $('filterWrap').hidden = all.length < 8
+  if (!all.length) {
+    $('entries').replaceChildren(h('div', { class: 'empty' }, S.offline ? 'Can’t reach the relay.' : 'Nothing here yet. Paste a link above to add a video.'))
+    return
+  }
+  const tvs = (S.cast && S.cast.receivers) || []
+  $('entries').replaceChildren(...(list.length ? list.map(e => {
+    const imdb = (e.id.match(/^imdb:(tt[0-9]+)/) || [])[1]
+    const where = e.local ? 'Saved here' : e.cachedBytes ? 'Partly saved' : 'On the network'
+    const castWrap = h('span', { class: 'wrap-rel' })
+    if (tvs.length) {
+      castWrap.append(h('button', { class: 'btn', 'aria-haspopup': 'menu', onclick: () => {
+        if (castWrap.querySelector('.menu')) return castWrap.querySelector('.menu').remove()
+        castWrap.append(h('div', { class: 'menu', role: 'menu' }, tvs.map(tv => h('button', { class: 'btn', role: 'menuitem', onclick: ev => act(ev.currentTarget, async () => {
+          await api('/v1/cast/play', { body: { receiverId: tv.id, key: e.key } })
+          castWrap.querySelector('.menu')?.remove()
+          toast('Playing on ' + tv.name)
+          loadCast()
+        }) }, tv.name))))
+      } }, 'Cast'))
+    }
+    return h('div', { class: 'item' },
+      posterBox(imdb ? '/v1/poster/' + imdb : null, e.title),
+      h('div', { class: 'info' },
+        h('div', { class: 'name' }, e.title),
+        h('div', { class: 'meta' }, [entryKind(e.id), size(e.size), where, 'from ' + sourceName(e.source)].filter(Boolean).join(' · '))),
+      h('div', { class: 'acts' },
+        h('button', { class: 'btn primary', 'data-play': true, onclick: () => openPlayer(e) }, 'Play'),
+        castWrap,
+        copyBtn('Copy link', e.magnetUrl)))
+  }) : [h('div', { class: 'empty' }, 'No titles match “' + q + '”.')]))
+}
+$('libFilter').oninput = () => renderLibrary()
+
+// ---- Channels
+$('followInput').oninput = () => { $('followKindWrap').hidden = !HEX.test($('followInput').value.trim()) }
+$('followForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const val = $('followInput').value.trim()
+  const alias = $('followName').value.trim()
+  await act(ev.submitter, async () => {
+    const body = HEX.test(val) ? { key: val.toLowerCase(), kind: $('followKind').value, alias } : { uri: val, alias }
+    const r = await api('/v1/sources', { body })
+    $('followInput').value = ''
+    $('followName').value = ''
+    $('followKindWrap').hidden = true
+    say('followMsg', 'Following ' + (r.source.alias || short(r.source.key)) + '.')
+    refresh()
+  }, 'followMsg')
+}
+
+function copying (key) {
+  if (!sval('replicate')) return false
+  const only = sval('replicateSources') || []
+  return !only.length || only.includes(key)
+}
+// Keeping a copy of one source: replicate everything, or only the listed sources.
+async function keepCopy (key, on) {
+  const followed = (S.sources.sources || []).filter(s => !s.writable).map(s => s.key)
+  const only = sval('replicateSources') || []
+  if (on) {
+    if (!sval('replicate')) return saveSettings({ replicate: true, replicateSources: [key] })
+    if (only.length && !only.includes(key)) return saveSettings({ replicateSources: [...only, key] })
+    return
+  }
+  const next = (only.length ? only : followed.concat(key)).filter(k => k !== key)
+  return saveSettings(next.length ? { replicateSources: [...new Set(next)] } : { replicate: false, replicateSources: [] })
+}
+function lockedNote (...keys) {
+  const locked = keys.map(setting).find(s => s && s.source === 'env')
+  return locked ? 'Set by ' + locked.env : ''
+}
+function switchRow (label, checked, onchange, { disabled = false, note = '' } = {}) {
+  const input = h('input', { type: 'checkbox', role: 'switch', checked: Boolean(checked), disabled })
+  input.onchange = () => act(input, () => onchange(input.checked)).then(render)
+  return h('label', { class: 'switch' }, input, h('span', null, label), note ? h('span', { class: 'tag' }, note) : null)
+}
+
+function renderChannels () {
+  const st = S.status
+  const src = S.sources
+  const published = new Set((src.published || []).map(p => p.key))
+  const tracker = (src.sources || []).find(s => s.primary && s.kind === 'tracker')?.key || st.tracker
+  $('mine').replaceChildren(
+    h('div', { class: 'item' }, h('div', { class: 'info' }, h('div', { class: 'name' }, 'Tracker'), h('div', { class: 'meta' }, 'Everything this relay announces · ' + short(tracker))),
+      h('div', { class: 'acts' }, copyBtn('Copy link', tracker ? 'peartube://tracker/' + tracker : ''))),
+    h('div', { class: 'item' }, h('div', { class: 'info' }, h('div', { class: 'name' }, 'Channel'), h('div', { class: 'meta' }, 'Videos you publish · ' + short(st.channel))),
+      h('div', { class: 'acts' }, copyBtn('Copy link', st.channel ? 'peartube://channel/' + st.channel : ''))))
+  const following = (src.sources || []).filter(s => !s.writable)
+  $('followCount').textContent = following.length ? String(following.length) : ''
+  const canEdit = Boolean(S.settings)
+  $('following').replaceChildren(...(following.length ? following.map(s => {
+    const listed = published.has(s.key)
+    return h('div', { class: 'item' },
+      h('div', { class: 'info' },
+        h('div', { class: 'name' }, s.alias || (s.kind === 'channel' ? 'Channel ' : 'Tracker ') + short(s.key)),
+        h('div', { class: 'meta' }, (s.kind === 'channel' ? 'Channel' : 'Tracker') + (listed ? ' · In your directory' : '')),
+        canEdit ? switchRow('Keep a copy here', copying(s.key), on => keepCopy(s.key, on), { disabled: Boolean(lockedNote('replicate')), note: lockedNote('replicate') }) : null),
+      h('div', { class: 'acts' },
+        copyBtn('Copy link', 'peartube://' + s.kind + '/' + s.key),
+        listed
+          ? h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await api('/v1/channel/sources/' + s.key, { method: 'DELETE' }); refresh() }) }, 'Remove from directory')
+          : h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await api('/v1/channel/publish', { body: { type: 'source', sourceKey: s.key, kind: s.kind, title: s.alias || short(s.key), target: 'both' } }); refresh() }) }, 'Add to directory'),
+        h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await api('/v1/sources/' + s.key, { method: 'DELETE' }); refresh() }) }, 'Unfollow')))
+  }) : [h('div', { class: 'empty' }, 'You are not following anything yet.')]))
+  const found = (src.discovered || []).filter(d => !(src.sources || []).some(s => s.key === d.key))
+  $('foundWrap').hidden = !found.length
+  $('found').replaceChildren(...found.map(d => h('div', { class: 'item' },
+    h('div', { class: 'info' }, h('div', { class: 'name' }, d.title), h('div', { class: 'meta' }, d.kind === 'channel' ? 'Channel' : 'Tracker')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn', onclick: e => act(e.currentTarget, async () => { await api('/v1/sources', { body: { key: d.key, kind: d.kind, alias: d.title } }); refresh() }) }, 'Follow')))))
+}
+
+// ---- Sharing
+const stat = (v, k) => h('div', { class: 'stat' }, h('div', { class: 'v' }, v), h('div', { class: 'k' }, k))
+function renderSharing () {
+  const st = S.status
+  const routes = st.routes || {}
+  const lan = st.lan
+  $('netCard').replaceChildren(
+    h('div', { class: 'stats' },
+      stat(String((routes.public && routes.public.peers) || 0), 'over the internet'),
+      stat(String(st.lanPeers || 0), lan ? 'nearby on ' + lan.host : 'nearby'),
+      stat(st.privateRouting ? String((routes.private && routes.private.peers) || 0) : 'Off', 'private routing'),
+      stat(rate(st.upBps), 'sending now')),
+    S.settings ? h('div', { style: 'margin-top:12px' }, switchRow('Find peers on this network', sval('lan'), on => saveSettings({ lan: on }), { disabled: Boolean(lockedNote('lan')), note: lockedNote('lan') })) : null)
+
+  const rep = plugin('p2p-replicate')
+  const only = sval('replicateSources') || []
+  const copyLines = []
+  if (rep.enabled) {
+    copyLines.push(h('div', { class: 'stats' },
+      stat(String(rep.replicatedEntries || 0) + ' / ' + (rep.totalEntries || 0), 'videos copied'),
+      stat(size(rep.replicatedBytes || 0), 'of ' + size(rep.targetBytes || 0)),
+      stat(size(rep.freeDiskBytes), 'disk free')))
+    if (rep.waitingForViewers) copyLines.push(h('div', { class: 'msg' }, h('span', { class: 'tag warn' }, 'Paused while viewers watch')))
+    else if (rep.activeTitles && rep.activeTitles.length) copyLines.push(h('div', { class: 'meta', style: 'margin-top:10px' }, 'Copying ' + rep.activeTitles.map(t => t.split(' · ').slice(1).join(' · ')).join(', ')))
+    if (rep.skippedDiskFull) copyLines.push(h('div', { class: 'meta' }, plural(rep.skippedDiskFull, 'video', 'videos') + ' skipped to keep disk space free'))
+  }
+  $('copiesCard').replaceChildren(
+    S.settings
+      ? switchRow(only.length ? 'Keep copies of ' + plural(only.length, 'followed source', 'followed sources') : 'Keep copies of everything I follow', sval('replicate'), on => saveSettings({ replicate: on, replicateSources: on ? only : [] }), { disabled: Boolean(lockedNote('replicate')), note: lockedNote('replicate') })
+      : h('div', { class: 'hint' }, 'Sign in to change sharing.'),
+    ...copyLines,
+    h('div', { class: 'hint', style: 'margin-top:8px' }, 'Disk and speed limits are in ', h('a', { href: '#settings' }, 'Settings'), '.'))
+
+  const hr = plugin('hiverelay-seed')
+  const relays = sval('hiverelays') || []
+  const lines = []
+  if (S.settings) lines.push(switchRow('Find HiveRelays automatically', sval('hiverelayDiscover'), on => saveSettings({ hiverelayDiscover: on }), { disabled: Boolean(lockedNote('hiverelayDiscover')), note: lockedNote('hiverelayDiscover') || (setting('hiverelayDiscover').live ? '' : 'After restart') }))
+  if (hr.enabled) {
+    lines.push(h('div', { class: 'stats' },
+      stat(String((hr.p2pAcceptedRelays || []).length + (hr.configuredRelays || []).filter(r => r.pubkey).length), 'HiveRelays seeding'),
+      stat(String(hr.httpPinnedCores || 0), 'videos pinned'),
+      stat(String(hr.bulkPeers || 0), 'relays copying from you')))
+    if (hr.servingViewers) lines.push(h('div', { class: 'msg' }, h('span', { class: 'tag ok' }, 'Serving viewers first')))
+    if (hr.bulkPaused) lines.push(h('div', { class: 'msg' }, h('span', { class: 'tag warn' }, 'Seeding paused at the upload limit')))
+  } else if (st.privateRouting) {
+    lines.push(h('div', { class: 'hint' }, 'Off while private routing is on.'))
+  }
+  if (relays.length) {
+    const running = new Map((hr.configuredRelays || []).map(r => [r.url.replace(/^https?:[/][/]/, '').replace(/[/]+$/, ''), r]))
+    const later = S.settings.restartNeeded.includes('hiverelays')
+    lines.push(h('div', { class: 'listedit', style: 'margin-top:10px' }, relays.map(r => h('div', { class: 'entry' }, h('span', null, r.label, ' ',
+      h('span', { class: 'tag' + (running.get(r.label)?.pubkey ? ' ok' : '') }, later && !running.has(r.label) ? 'After restart' : running.get(r.label)?.pubkey ? 'Seeding' : 'Not reached yet')),
+      h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, () => saveSettings({ hiverelays: relays.filter(x => x !== r).map(x => x.ref) })) }, 'Remove')))))
+  }
+  $('hiveStatus').replaceChildren(...lines)
+  $('hiveForm').hidden = !S.settings || Boolean(lockedNote('hiverelays'))
+
+  const origin = location.origin
+  $('appsCard').replaceChildren(
+    h('div', { class: 'setting' }, h('div', { class: 'what' }, h('span', { class: 'label' }, 'Stremio add-on'), h('span', { class: 'hint' }, 'Install this address in Stremio.')), copyBtn('Copy address', origin + '/manifest.json')),
+    h('div', { class: 'setting' }, h('div', { class: 'what' }, h('span', { class: 'label' }, 'M3U playlist'), h('span', { class: 'hint' }, 'For VLC, Kodi and IPTV players.')), copyBtn('Copy address', origin + '/v1/playlist.m3u')))
+}
+$('hiveForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const url = $('hiveInput').value.trim().replace(/[/]+$/, '')
+  const key = $('hiveKey').value.trim()
+  await act(ev.submitter, async () => {
+    await saveSettings({ hiverelays: [...(sval('hiverelays') || []).map(r => r.ref), key ? url + '=' + key : url] })
+    $('hiveInput').value = ''
+    $('hiveKey').value = ''
+    say('hiveMsg', 'Added. Restart the relay to start seeding there.')
+  }, 'hiveMsg')
+}
+
+// ---- TV
+$('pairForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const val = $('pairInput').value.trim()
+  await act(ev.submitter, async () => {
+    const body = /^peartube:/i.test(val) ? { uri: val } : { code: val.toUpperCase() }
+    const r = await api('/v1/cast/pair', { body })
+    $('pairInput').value = ''
+    say('pairMsg', 'Paired with ' + ((r && r.name) || 'the TV') + '.')
+    loadCast()
+  }, 'pairMsg')
+}
+function castControl (body) {
+  return api('/v1/cast/control', { body }).then(s => { S.cast = s; renderCast() })
+}
+function castButtons () {
+  const state = (S.cast && S.cast.session && S.cast.session.state) || {}
+  const paused = state.paused === true || state.playing === false
+  return [
+    h('button', { class: 'btn', 'aria-label': 'Back 10 seconds', onclick: e => act(e.currentTarget, () => castControl({ action: 'skip', deltaMs: -10000 })) }, '-10s'),
+    h('button', { class: 'btn primary', onclick: e => act(e.currentTarget, () => castControl({ action: 'togglePlay' })) }, paused ? 'Play' : 'Pause'),
+    h('button', { class: 'btn', 'aria-label': 'Forward 10 seconds', onclick: e => act(e.currentTarget, () => castControl({ action: 'skip', deltaMs: 10000 })) }, '+10s'),
+    h('button', { class: 'btn', onclick: e => act(e.currentTarget, async () => { S.cast = await api('/v1/cast/stop', { body: {} }); render() }) }, 'Stop')
+  ]
+}
+function renderCastBar () {
+  const session = S.cast && S.cast.session
+  const bar = $('castBar')
+  bar.hidden = !session || tab === 'tv'
+  if (!session) return
+  const state = session.state || {}
+  bar.replaceChildren(h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 'name' }, state.title || 'Casting'), h('div', { class: 'meta' }, 'on ' + session.receiverName)), ...castButtons())
+}
+function renderCast () {
+  const c = S.cast
+  const session = c && c.session
+  $('castNow').hidden = !session
+  if (session) {
+    const state = session.state || {}
+    const clock = state.durationMs ? fmtClock((state.positionMs || 0) / 1000) + ' / ' + fmtClock(state.durationMs / 1000) : ''
+    $('castNow').replaceChildren(h('div', { class: 'label' }, 'Playing on ' + session.receiverName), h('h3', { style: 'margin:6px 0' }, state.title || 'Casting'), clock ? h('div', { class: 'meta' }, clock) : null, h('div', { class: 'row', style: 'margin-top:12px' }, castButtons()))
+  }
+  const tvs = (c && c.receivers) || []
+  $('tvs').replaceChildren(...(tvs.length ? tvs.map(tv => h('div', { class: 'item' },
+    h('div', { class: 'info' }, h('div', { class: 'name' }, tv.name || 'TV'), h('div', { class: 'meta' }, h('span', { class: tv.online ? 'tag ok' : 'tag' }, tv.online ? 'Online' : 'Offline'), ' ', tv.paired ? 'Paired' : 'Not paired', tv.host ? ' · ' + tv.host : '')),
+    h('div', { class: 'acts' }, h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, async () => { await api('/v1/cast/receivers/' + encodeURIComponent(tv.id), { method: 'DELETE' }); loadCast() }) }, 'Forget')))) : [h('div', { class: 'empty' }, c ? 'No TVs yet. Pair one with its code.' : 'Casting is not available on this relay.')]))
+  // A relay serves the TV page on its own address; apps run a separate hub.
+  const lanHost = S.status.lan && S.status.lan.host
+  const web = (c && c.webReceiverUrl) || (c ? location.protocol + '//' + (lanHost && /^(127[.]|localhost)/.test(location.hostname) ? lanHost + ':' + location.port : location.host) + '/tv' : '')
+  $('webTv').replaceChildren(...(web ? [
+    h('div', { class: 'row', style: 'align-items:flex-start;gap:16px' },
+      c.webReceiverQrSvg ? h('img', { class: 'qr', alt: 'QR code for ' + web, src: 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(c.webReceiverQrSvg) }) : null,
+      h('div', { class: 'grow' }, h('div', { class: 'hint' }, 'Open this on a smart TV or console browser.'), h('div', { class: 'label', style: 'margin:8px 0;overflow-wrap:anywhere' }, web), copyBtn('Copy address', web)))
+  ] : [h('div', { class: 'hint' }, 'Needs a network address. Set one in Settings.')]))
+  renderCastBar()
+}
+
+// ---- Settings
+const GROUPS = [
+  { title: 'Network', items: [
+    { key: 'streamHost', label: 'Address viewers stream from', ph: '192.168.1.20' },
+    { key: 'streamPort', label: 'Stream port', ph: '8175' },
+    { key: 'lan', label: 'Find peers on this network' },
+    { key: 'lanHost', label: 'Network address', ph: '192.168.1.20' },
+    { key: 'dhtPort', label: 'Peer port (UDP, 0 picks one)', ph: '49737' },
+    { key: 'privateRouting', label: 'Private routing' },
+    { key: 'relayThrough', label: 'Blind relays', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' },
+    { key: 'bootstrap', label: 'DHT bootstrap nodes', ph: '88.99.3.86:49737' },
+    { key: 'allowedPeers', label: 'Only connect to these peers', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' }
+  ] },
+  { title: 'Library', items: [
+    { key: 'tracker', label: 'Join a tracker', ph: 'bc7d85ea0eec017d3f6875b4c06c3c16091a50337b4d1709425e3bd35122fbeb' },
+    { key: 'publishChannel', label: 'Publish new videos to my channel' },
+    { key: 'directory', label: 'List followed channels in my directory' },
+    { key: 'acquireConcurrency', label: 'Downloads at once', ph: '4' },
+    { key: 'cinemetaUrl', label: 'Title lookup service', ph: 'https://v3-cinemeta.strem.io' },
+    { key: 'watchDir', label: 'Import folder', ph: '/data/import' },
+    { key: 'feeds', label: 'Followed feeds', ph: 'https://example.org/catalog.json' }
+  ] },
+  { title: 'Sharing', items: [
+    { key: 'replicate', label: 'Keep copies of what I follow' },
+    { key: 'replicateFreeGb', label: 'Keep this much disk free (GB)', ph: '20' },
+    { key: 'replicateMbps', label: 'Copy speed limit (Mbps)', ph: '80' },
+    { key: 'hiverelayDiscover', label: 'Find HiveRelays automatically' },
+    { key: 'hiverelays', label: 'HiveRelays', ph: 'http://192.168.1.50:9100' },
+    { key: 'hiverelayApiKey', label: 'HiveRelay access key', ph: 'hr_4f1c2a9b7d' },
+    { key: 'hiverelayReplicas', label: 'Copies per video on HiveRelays', ph: '3' },
+    { key: 'hiverelayUploadMbps', label: 'HiveRelay upload limit (Mbps)', ph: '50' }
+  ] }
+]
+const INPUT_TYPE = { host: 'text', port: 'number', number: 'number', key: 'text', path: 'text', url: 'url', secret: 'password' }
+let settingsDirty = false
+
+async function saveSettings (patch) {
+  const r = await api('/v1/settings', { method: 'PUT', body: patch })
+  S.settings = r
+  if (r.warning) toast(r.warning)
+  else toast(r.changed.some(k => !setting(k).live) ? 'Saved. Restart the relay to apply.' : 'Saved')
+  if (tab === 'settings') renderSettings(true)
+  refresh()
+  return r
+}
+
+function settingRow (item) {
+  const s = setting(item.key)
+  if (!s) return null
+  const id = 'set-' + item.key
+  const locked = s.source === 'env'
+  const tags = [h('span', { class: s.live ? 'tag ok' : 'tag warn' }, s.live ? 'Applies now' : 'After restart')]
+  if (locked) tags.push(h('span', { class: 'tag' }, 'Set by ' + s.env))
+  const what = h('div', { class: 'what' }, h('label', { for: id }, item.label), h('div', { class: 'row' }, tags))
+  if (s.type === 'bool') {
+    const input = h('input', { id, type: 'checkbox', role: 'switch', checked: Boolean(s.value), disabled: locked })
+    input.onchange = () => act(input, () => saveSettings({ [item.key]: input.checked }))
+    return h('div', { class: 'setting' }, what, h('div', { class: 'control narrow' }, h('span', { class: 'switch' }, input)))
+  }
+  if (s.type === 'keys' || s.type === 'hosts' || s.type === 'urls') {
+    const values = s.value || []
+    const shown = v => s.type === 'urls' ? v.label : v
+    const kept = v => s.type === 'urls' ? v.ref : v
+    const input = h('input', { id, type: s.type === 'urls' ? 'url' : 'text', spellcheck: 'false', placeholder: item.ph, disabled: locked })
+    const add = h('button', { class: 'btn', disabled: locked, onclick: () => {
+      const v = input.value.trim()
+      if (v) act(add, () => saveSettings({ [item.key]: [...values.map(kept), v] }))
+    } }, 'Add')
+    input.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); add.click() } }
+    return h('div', { class: 'setting' }, what, h('div', { class: 'control listedit' },
+      values.map(v => h('div', { class: 'entry' }, h('span', null, shown(v)), locked ? null : h('button', { class: 'btn quiet', onclick: e => act(e.currentTarget, () => saveSettings({ [item.key]: values.filter(x => x !== v).map(kept) })) }, 'Remove'))),
+      h('div', { class: 'row' }, h('span', { class: 'grow' }, input), add)))
+  }
+  const detected = item.key === 'lanHost' && S.status.lan ? S.status.lan.host : ''
+  const input = h('input', { id, type: INPUT_TYPE[s.type] || 'text', placeholder: detected || item.ph, spellcheck: 'false', disabled: locked, value: s.type === 'secret' ? '' : String(s.value ?? '') })
+  if (s.type === 'port' || s.type === 'number') { input.min = '0'; input.step = 'any'; input.inputMode = 'numeric' }
+  if (s.type === 'secret' && s.set) input.placeholder = 'Saved. Type to replace.'
+  input.dataset.key = item.key
+  input.oninput = () => { settingsDirty = true; input.closest('.card').querySelector('.save').disabled = false }
+  return h('div', { class: 'setting' }, what, h('div', { class: 'control' }, input))
+}
+
+function readField (input) {
+  const s = setting(input.dataset.key)
+  if (s.type === 'port' || s.type === 'number') return input.value === '' ? 0 : Number(input.value)
+  return input.value.trim()
+}
+
+function renderSettings (force) {
+  const body = $('settingsBody')
+  if (!S.settings) {
+    body.replaceChildren(h('div', { class: 'card' }, settingsLoaded && needsToken
+      ? [h('h3', null, 'Sign in to see settings'), h('div', { class: 'hint' }, 'Use the access token above.')]
+      : h('div', { class: 'hint' }, settingsLoaded ? 'Settings are not available on this relay.' : 'Loading…')))
+    return
+  }
+  if (settingsDirty && !force) return
+  settingsDirty = false
+  const blocks = []
+  const pending = S.settings.restartNeeded
+  if (pending.length) {
+    const names = pending.map(k => (GROUPS.flatMap(g => g.items).find(i => i.key === k) || { label: k }).label)
+    blocks.push(h('div', { class: 'banner' }, h('div', { class: 'label' }, 'Restart the relay to apply ' + plural(pending.length, 'change', 'changes') + '.'), h('div', { class: 'row', style: 'margin-top:8px' }, names.map(n => h('span', { class: 'tag' }, n)))))
+  }
+  for (const g of GROUPS) {
+    const card = h('div', { class: 'card' }, h('h3', null, g.title), g.items.map(settingRow))
+    const save = h('button', { class: 'btn primary save', disabled: true }, 'Save changes')
+    save.onclick = () => {
+      const patch = {}
+      for (const input of card.querySelectorAll('input[data-key]')) {
+        const s = setting(input.dataset.key)
+        if (s.source === 'env') continue
+        const v = readField(input)
+        if (s.type === 'secret' ? v !== '' : v !== s.value) patch[input.dataset.key] = v
+      }
+      if (Object.keys(patch).length) act(save, () => saveSettings(patch))
+    }
+    card.append(h('div', { class: 'row', style: 'margin-top:12px' }, save))
+    blocks.push(card)
+  }
+  const rechunk = plugin('blob-rechunk')
+  if (rechunk.running || rechunk.remaining > 0) {
+    const done = (rechunk.migrated || 0) + (rechunk.deduped || 0)
+    blocks.push(h('div', { class: 'card' }, h('h3', null, 'Storage'),
+      h('div', { class: 'meta' }, rechunk.running ? 'Converting old-format videos: ' + done + ' of ' + rechunk.total : plural(rechunk.remaining, 'video uses', 'videos use') + ' the old storage format.'),
+      rechunk.running ? h('div', { class: 'bar-track' }, h('div', { style: 'width:' + Math.round(done / Math.max(1, rechunk.total) * 100) + '%' })) : null,
+      h('div', { class: 'row', style: 'margin-top:12px' },
+        h('button', { class: 'btn primary', disabled: Boolean(rechunk.running), onclick: e => act(e.currentTarget, async () => { api('/v1/plugins/blob-rechunk/run', { body: { foreground: true } }).then(refresh, err => toast(err.message)); toast('Converting now'); setTimeout(refresh, 500) }) }, 'Convert now'),
+        switchRow('Convert at every start', sval('rechunk'), on => saveSettings({ rechunk: on }), { disabled: Boolean(lockedNote('rechunk')), note: lockedNote('rechunk') }))))
+  }
+  blocks.push(h('div', { class: 'card' }, h('h3', null, 'Access'),
+    h('div', { class: 'row' }, h('span', { class: 'grow hint' }, token ? 'Signed in on this browser.' : 'No token needed on this relay.'),
+      token ? h('button', { class: 'btn', onclick: () => { token = ''; localStorage.removeItem('peartube.token'); location.reload() } }, 'Sign out') : null)))
+  body.replaceChildren(...blocks)
+}
+
+$('authForm').onsubmit = async ev => {
+  ev.preventDefault()
+  const prev = token
+  token = $('tokenInput').value.trim()
+  try {
+    S.settings = await api('/v1/settings')
+    localStorage.setItem('peartube.token', token)
+    needsToken = false
+    $('authForm').hidden = true
+    $('tokenInput').value = ''
+    say('authMsg', '')
+    renderSettings(true)
+    refresh()
+  } catch {
+    token = prev
+    say('authMsg', 'That token did not work.', true)
+  }
+}
+
+showTab()
+// Settings need the token: ask for it first instead of probing with a request that fails.
+refresh().then(() => {
+  if (S.status.tokenRequired && !token) {
+    needsToken = true
+    settingsLoaded = true
+    $('authForm').hidden = false
+    render()
+    if (tab === 'settings') renderSettings()
+  } else loadSettings()
+})
+loadCast()
+const events = new EventSource('/v1/events')
+// Left open, each visit's stream keeps a connection to the relay; after six reloads the browser has none left.
+addEventListener('pagehide', () => events.close())
+events.onmessage = ev => {
+  let event = 'update'
+  try { event = JSON.parse(ev.data).event } catch {}
+  if (event === 'cast') loadCast()
+  else soon()
+}
+// Progress polls only while something is moving.
+setInterval(() => {
+  const busy = S.jobs.some(j => j.status === 'running' || j.status === 'queued' || j.status === 'announcing') || plugin('p2p-replicate').replicating || plugin('blob-rechunk').running
+  if (busy || document.visibilityState === 'visible') refresh()
+}, 4000)
+setInterval(() => { if (tab === 'tv' || (S.cast && S.cast.session)) loadCast() }, 5000)
 
 // In-browser peartube-media WebAssembly player: demuxes MKV/AVI/MP4/TS over same-origin HTTP Range,
 // hardware-accelerates H.264/HEVC via fMP4 MSE when supported, falls back to WASM SIMD software video,
@@ -347,7 +1129,7 @@ function audioOutTime (ctx) {
   const ts = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null
   return (ts && ts.contextTime > 0) ? ts.contextTime : ctx.currentTime
 }
-// Keep one warm WASM Worker pre-compiled in the background so clicking Stream opens in 0 ms.
+// One shared WASM Worker, compiled when a Play button is about to be used, so playback opens without a compile wait.
 const ASSET_VER = '?v=5'
 let sharedWorker = null
 let workerCanvasTransferred = false
@@ -369,7 +1151,12 @@ function getWorker () {
   }
   return sharedWorker
 }
-setTimeout(() => { try { getWorker() } catch {} }, 150)
+// The player is a 16 MB download: warm it on the way to a Play button, not on every visit.
+for (const evName of ['pointerover', 'focusin', 'touchstart']) {
+  addEventListener(evName, ev => {
+    if (!sharedWorker && ev.target.closest && ev.target.closest('[data-play]')) { try { getWorker() } catch {} }
+  }, { passive: true })
+}
 
 let openCounter = 0
 
@@ -399,7 +1186,6 @@ function openPlayer (entry) {
   const worker = getWorker()
   $('pTitle').textContent = entry.title || entry.id
   $('pBadge').textContent = 'Opening…'
-  $('pBadge').className = 'badge running'
   $('pRawLink').href = streamUrl
   $('pStatus').style.display = ''
   $('pStatus').textContent = 'Buffering stream…'
@@ -667,7 +1453,6 @@ function openPlayer (entry) {
     }
     if (at) parts.push(at.codec)
     $('pBadge').textContent = parts.join(' \\u00b7 ')
-    $('pBadge').className = 'badge seeder'
   }
 
   worker.onerror = err => {
@@ -684,8 +1469,7 @@ function openPlayer (entry) {
     if (m.type === 'error') {
       $('pStatus').style.display = ''
       $('pStatus').textContent = 'Playback error: ' + m.error
-      $('pBadge').textContent = 'Error'
-      $('pBadge').className = 'badge failed'
+      $('pBadge').textContent = 'Can’t play this file'
       return
     }
     if (m.type === 'manifest') {

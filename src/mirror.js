@@ -337,10 +337,17 @@ export async function createMirrorHost ({
   })
 
   // 5. Built-in plugin: greedy P2P Hyperblobs block replicator — sucks every announced peer slice onto disk up to the free-space floor without forging duplicate tracker entries.
-  const allowReplicateKeys = Array.isArray(replicate) && replicate.length
-    ? new Set(replicate.map(k => String(k).trim().toLowerCase()).filter(Boolean))
-    : null
-  const replicateEnabled = Boolean(replicate) && (!Array.isArray(replicate) || Boolean(allowReplicateKeys?.size))
+  let allowReplicateKeys = null
+  let replicateEnabled = false
+  function setReplicate (value) {
+    allowReplicateKeys = Array.isArray(value) && value.length
+      ? new Set(value.map(k => String(k).trim().toLowerCase()).filter(Boolean))
+      : null
+    replicateEnabled = Boolean(value) && (!Array.isArray(value) || Boolean(allowReplicateKeys?.size))
+  }
+  setReplicate(replicate)
+  // Bumped when replication is switched off, so a running pass stops taking new slices.
+  let replicateGen = 0
   const activeReplicaRanges = new Set()
   const deadReplicaCores = new Map()
   let replicating = false
@@ -412,7 +419,7 @@ export async function createMirrorHost ({
   }
 
   // One shared pacer for every replica worker: greedy backfill must leave seeders and this disk room for viewers.
-  const replicateBytesPerMs = replicateMbps > 0 ? replicateMbps * 125 : 0
+  let replicateBytesPerMs = replicateMbps > 0 ? replicateMbps * 125 : 0
   let replicatePaceAt = 0
   async function paceReplica (bytes) {
     if (!replicateBytesPerMs || bytes <= 0) return
@@ -596,10 +603,11 @@ export async function createMirrorHost ({
     repState.skippedUnavailable = skippedDead
 
     let idx = 0
+    const gen = replicateGen
     const activeTitles = new Set()
     const workerCount = Math.max(1, Math.min(replicateConcurrency, pending.length))
     async function worker () {
-      while (!closed) {
+      while (!closed && gen === replicateGen) {
         const s = pending[idx++]
         if (!s) break
         const core = cores.get(s.blobs)
@@ -726,6 +734,7 @@ export async function createMirrorHost ({
       replicating,
       minFreeBytes: replicateMinFreeBytes,
       freeDiskBytes: freeDiskBytes(),
+      waitingForViewers: peersBusy(),
       ...repState
     })
   })
@@ -762,6 +771,11 @@ export async function createMirrorHost ({
   }
   if (rechunk) {
     run('blob-rechunk').catch(() => {})
+  } else {
+    // Count legacy blobs without moving any, so the UI can offer the migration only when there is something to migrate.
+    node.rechunkLegacyBlobs?.({ limit: 0 }).then(res => {
+      if (!rechunkRunning) rechunkProgress = { ...rechunkProgress, ...res, running: false }
+    }).catch(() => {})
   }
   if (watchDir) {
     mkdirSync(watchDir, { recursive: true })
@@ -807,11 +821,40 @@ export async function createMirrorHost ({
     }))
   }
 
+  // Live settings: the watch folder, followed feeds, and replication take effect without a restart.
+  function configure ({ watchDir: dir, feeds: nextFeeds, replicate: rep, replicateMinFreeBytes: minFree, replicateMbps: mbps } = {}) {
+    if (dir !== undefined && dir !== watchDir) {
+      watchDir = dir || null
+      if (watchDir) {
+        mkdirSync(watchDir, { recursive: true })
+        run('watch-dir').catch(() => {})
+      }
+    }
+    if (Array.isArray(nextFeeds) && JSON.stringify(nextFeeds) !== JSON.stringify(configuredFeeds)) {
+      const added = nextFeeds.filter(u => !configuredFeeds.includes(u))
+      configuredFeeds.splice(0, configuredFeeds.length, ...nextFeeds)
+      for (const url of added) run('feed-mirror', { url }).catch(() => {})
+    }
+    if (Number.isFinite(minFree)) replicateMinFreeBytes = minFree
+    if (Number.isFinite(mbps)) replicateBytesPerMs = mbps > 0 ? mbps * 125 : 0
+    if (rep !== undefined) {
+      const was = replicateEnabled
+      setReplicate(rep)
+      if (was && !replicateEnabled) {
+        replicateGen++
+        for (const r of activeReplicaRanges) r.destroy()
+        activeReplicaRanges.clear()
+      }
+      if (replicateEnabled) run('p2p-replicate').catch(() => {})
+    }
+    onchange?.()
+  }
+
   async function close () {
     closed = true
     clearInterval(timer)
     for (const p of plugins.values()) await p.stop?.()
   }
 
-  return { register, run, list, close }
+  return { register, run, list, configure, close }
 }

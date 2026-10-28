@@ -11,6 +11,8 @@ import { createApi } from '../src/http.js'
 import { createMirrorHost } from '../src/mirror.js'
 import { createCastController } from '../src/cast.js'
 import { lanAddress } from '../src/lan.js'
+import { createSettings } from '../src/settings.js'
+import { identify, posterUrl } from '../src/identify.js'
 
 const env = process.env
 
@@ -105,6 +107,9 @@ if (env.PEARTUBE_PRIVATE_RELAY || env.PEARTUBE_PRIVATE_RELAY_PORT) {
 }
 const storage = env.PEARTUBE_STORAGE || './peartube-data'
 mkdirSync(storage, { recursive: true, mode: 0o700 })
+// Everything below reads settings: an env var wins, then settings.json (set from the UI), then the default.
+const settings = createSettings(storage, env)
+const cfg = settings.get
 const jobsFile = join(storage, 'jobs.json')
 const sourcesFile = join(storage, 'sources.json')
 function loadSavedSources () {
@@ -112,7 +117,7 @@ function loadSavedSources () {
   const fromEnv = env.PEARTUBE_SOURCES ? env.PEARTUBE_SOURCES.split(',').map(s => s.trim()).filter(Boolean) : []
   return [...saved, ...fromEnv]
 }
-const isDirectory = Boolean(env.PEARTUBE_DIRECTORY)
+const isDirectory = cfg('directory')
 async function syncDirectory (list) {
   if (!isDirectory || !state.node) return
   const published = new Set((await state.node.publishedSources()).map(p => p.key))
@@ -134,8 +139,11 @@ const state = {
   mirror: null,
   cast: null,
   apiToken: env.PEARTUBE_API_TOKEN || null,
+  settings,
+  identify: link => identify(link, { cinemetaUrl: cfg('cinemetaUrl') }),
+  posterUrl: imdb => posterUrl(cfg('cinemetaUrl'), imdb),
   onSourcesChanged: saveSources,
-  fallbackStatus: { tracker: env.PEARTUBE_TRACKER || '', channel: '', writer: '', blobs: '', blobBytes: 0, cachedBytes: 0, peers: 0, lanPeers: 0, downBps: 0, upBps: 0, rxBytes: 0, txBytes: 0, routes: { private: emptyRoute(), public: emptyRoute(), lan: emptyRoute() }, inflightBlocks: 0, rtt: 0, retransmits: 0, sources: [], reciprocity: { tier: 'leecher', seededBytes: 0, contributingPeers: 0, ratio: 0, inflightMax: 64 } },
+  fallbackStatus: { tracker: cfg('tracker'), channel: '', writer: '', blobs: '', blobBytes: 0, cachedBytes: 0, peers: 0, lanPeers: 0, downBps: 0, upBps: 0, rxBytes: 0, txBytes: 0, routes: { private: emptyRoute(), public: emptyRoute(), lan: emptyRoute() }, inflightBlocks: 0, rtt: 0, retransmits: 0, sources: [], reciprocity: { tier: 'leecher', seededBytes: 0, contributingPeers: 0, ratio: 0, inflightMax: 64 } },
   fallbackJobs () {
     try { return JSON.parse(readFileSync(jobsFile, 'utf8')).map(({ source, announce, ...j }) => j) } catch { return [] }
   }
@@ -162,46 +170,50 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 
 const stagger = env.PEARTUBE_LAN_HOST ? Math.max(0, (Number(env.PEARTUBE_LAN_HOST.split('.')[3]) - 111) * 3000) : 0
 if (stagger > 0) await new Promise(resolve => setTimeout(resolve, stagger))
-const dhtPort = env.PEARTUBE_DHT_PORT ? Number(env.PEARTUBE_DHT_PORT) : undefined
+const dhtPort = cfg('dhtPort') || undefined
+const list = value => value.length ? value : null
+const replicateValue = () => cfg('replicate') ? (cfg('replicateSources').length ? cfg('replicateSources') : true) : false
+const lanHost = () => cfg('lanHost') || lanAddress(os.networkInterfaces())
+// LAN discovery is a live setting: on with an address, off without one.
+function lanFactory () {
+  const host = cfg('lan') ? lanHost() : null
+  return host ? keyPair => createLan({ host, keyPair }) : null
+}
 
-const replicateOpt = env.PEARTUBE_REPLICATE
-  ? (env.PEARTUBE_REPLICATE === '1' || env.PEARTUBE_REPLICATE === 'true'
-      ? true
-      : env.PEARTUBE_REPLICATE.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
-  : false
+const replicateOpt = replicateValue()
 const hiverelayOpt = {
-  relays: env.PEARTUBE_HIVERELAYS || '',
-  apiKey: env.PEARTUBE_HIVERELAY_API_KEY || null,
-  discover: Boolean(env.PEARTUBE_HIVERELAY_DISCOVER || env.PEARTUBE_HIVERELAY === '1' || env.PEARTUBE_HIVERELAY === 'true'),
-  replicas: Number(env.PEARTUBE_HIVERELAY_REPLICAS || 3),
+  relays: cfg('hiverelays').join(','),
+  apiKey: cfg('hiverelayApiKey') || null,
+  discover: cfg('hiverelayDiscover') || env.PEARTUBE_HIVERELAY === '1' || env.PEARTUBE_HIVERELAY === 'true',
+  replicas: cfg('hiverelayReplicas'),
   includeCached: Boolean(replicateOpt),
-  uploadMbps: Math.max(0, Number(env.PEARTUBE_HIVERELAY_UPLOAD_MBPS ?? 50))
+  uploadMbps: Math.max(0, cfg('hiverelayUploadMbps'))
 }
 const hiverelayEnabled = Boolean(hiverelayOpt.relays || hiverelayOpt.discover)
 let replicateDebounce = null
 function scheduleReplicate () {
-  if ((!replicateOpt && !hiverelayEnabled) || shuttingDown || replicateDebounce) return
+  if ((!cfg('replicate') && !hiverelayEnabled) || shuttingDown || replicateDebounce) return
   replicateDebounce = setTimeout(() => {
     replicateDebounce = null
     if (shuttingDown) return
-    if (replicateOpt) state.mirror?.run('p2p-replicate').catch(() => {})
+    if (cfg('replicate')) state.mirror?.run('p2p-replicate').catch(() => {})
     if (hiverelayEnabled) state.mirror?.run('hiverelay-seed').catch(() => {})
   }, 2000)
   replicateDebounce.unref?.()
 }
 const node = await createNode({
   storage,
-  tracker: env.PEARTUBE_TRACKER || null,
+  tracker: cfg('tracker') || null,
   sources: loadSavedSources(),
-  allowedPeers: env.PEARTUBE_ALLOWED_PEERS ? env.PEARTUBE_ALLOWED_PEERS.split(',').map(s => s.trim()).filter(Boolean) : null,
-  streamHost: env.PEARTUBE_STREAM_HOST || '127.0.0.1',
-  streamPort: Number(env.PEARTUBE_STREAM_PORT || 8175),
-  bootstrap: env.PEARTUBE_BOOTSTRAP ? env.PEARTUBE_BOOTSTRAP.split(',') : undefined,
+  allowedPeers: list(cfg('allowedPeers')),
+  streamHost: cfg('streamHost'),
+  streamPort: cfg('streamPort'),
+  bootstrap: list(cfg('bootstrap')) || undefined,
   dhtPort,
-  privateRouting: Boolean(env.PEARTUBE_PRIVATE_ROUTING),
+  privateRouting: cfg('privateRouting'),
   privateRelay: false,
-  relayThrough: env.PEARTUBE_RELAY_THROUGH ? env.PEARTUBE_RELAY_THROUGH.split(',') : null,
-  lan: env.PEARTUBE_LAN_HOST ? keyPair => createLan({ host: env.PEARTUBE_LAN_HOST, keyPair }) : null,
+  relayThrough: list(cfg('relayThrough')),
+  lan: lanFactory(),
   onchange: () => {
     api.notify('update')
     scheduleReplicate()
@@ -209,25 +221,29 @@ const node = await createNode({
 })
 state.node = node
 if (isDirectory) await syncDirectory(node.listSources())
-const mirrorChannel = env.PEARTUBE_PUBLISH_CHANNEL ? env.PEARTUBE_PUBLISH_CHANNEL !== '0' : true
+const mirrorChannel = cfg('publishChannel')
 state.acquirer = createAcquirer(node, jobsFile, {
+  concurrency: cfg('acquireConcurrency'),
   defaultChannel: mirrorChannel,
   onDone: () => {
     api.notify('update')
     scheduleReplicate()
   }
 })
+const mirrorConfig = () => ({
+  watchDir: cfg('watchDir') || null,
+  feeds: cfg('feeds'),
+  replicate: replicateValue(),
+  replicateMinFreeBytes: Math.max(0, cfg('replicateFreeGb')) * 1024 * 1024 * 1024,
+  replicateMbps: Math.max(0, cfg('replicateMbps'))
+})
 state.mirror = await createMirrorHost({
   node,
   storage,
   acquirer: state.acquirer,
   mirrorChannel,
-  rechunk: Boolean(env.PEARTUBE_RECHUNK === '1' || env.PEARTUBE_RECHUNK === 'true'),
-  watchDir: env.PEARTUBE_WATCH_DIR || null,
-  feeds: env.PEARTUBE_MIRROR_FEEDS ? env.PEARTUBE_MIRROR_FEEDS.split(',').map(s => s.trim()).filter(Boolean) : [],
-  replicate: replicateOpt,
-  replicateMinFreeBytes: Math.max(0, Number(env.PEARTUBE_REPLICATE_FREE_GB ?? 20)) * 1024 * 1024 * 1024,
-  replicateMbps: Math.max(0, Number(env.PEARTUBE_REPLICATE_MBPS ?? 80)),
+  rechunk: cfg('rechunk'),
+  ...mirrorConfig(),
   hiverelay: hiverelayOpt,
   pluginsDir: env.PEARTUBE_PLUGINS_DIR || join(storage, 'plugins'),
   onchange: () => api.notify('update')
@@ -235,10 +251,21 @@ state.mirror = await createMirrorHost({
 state.cast = createCastController({
   storage,
   getNode: () => state.node,
-  getLanHost: () => env.PEARTUBE_LAN_HOST || lanAddress(os.networkInterfaces()),
+  getLanHost: lanHost,
   onchange: () => api.notify('cast')
 })
-await state.cast.setLanHost(env.PEARTUBE_LAN_HOST || lanAddress(os.networkInterfaces())).catch(() => {})
-
+await state.cast.setLanHost(lanHost()).catch(() => {})
+state.extraStatus = () => ({ lan: node.lanEndpoint() ? { host: node.lanEndpoint().host, port: node.lanEndpoint().port } : null, privateRouting: node.privateRouting })
+// Live settings apply here; the rest wait for a restart (the settings view lists them in `restartNeeded`).
+state.applySettings = async changed => {
+  const has = (...keys) => keys.some(k => changed.includes(k))
+  if (has('allowedPeers')) node.setAllowedPeers(list(cfg('allowedPeers')))
+  if (has('watchDir', 'feeds', 'replicate', 'replicateSources', 'replicateFreeGb', 'replicateMbps')) state.mirror.configure(mirrorConfig())
+  if (has('lan', 'lanHost')) {
+    await state.cast.setLanHost(lanHost()).catch(() => {})
+    await node.setLan(lanFactory())
+  }
+  api.notify('update')
+}
 console.log(JSON.stringify({ msg: 'relay ready', api: apiPort, ...node.status() }))
 setInterval(() => console.log(JSON.stringify({ msg: 'heartbeat', ...node.status() })), 60_000).unref()

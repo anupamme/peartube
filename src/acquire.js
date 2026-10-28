@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
+import { resolvePage } from './identify.js'
 
 // Jobs hold source URLs and auth headers, so they live in a private file and
 // never in the Corestore: replication serves any stored core a peer can name.
@@ -63,7 +64,10 @@ export function createAcquirer (node, file, {
     running.set(job, controller)
     try {
       if (!job.announce) {
-        const res = await openSource(job.source.url, job.source.headers || {}, controller)
+        // A page link (YouTube, …) is resolved to its media file on every attempt: those URLs expire.
+        const media = job.source.page ? await resolvePage(job.source.url) : { url: job.source.url, headers: {} }
+        if (job.status === 'cancelled') throw new Error('Cancelled')
+        const res = await openSource(media.url, { ...media.headers, ...(job.source.headers || {}) }, controller)
         const cl = Number(res.headers['content-length'])
         job.total = Number.isSafeInteger(cl) && cl >= 0 ? cl : null
         job.bytes = 0
@@ -104,13 +108,14 @@ export function createAcquirer (node, file, {
   }
   function add ({ id, title, source, channel = defaultChannel, plugin = 'http-acquire' }) {
     if (typeof source?.url !== 'string' || !/^https?:\/\//.test(source.url)) throw new Error('source.url must be http(s)')
-    const job = { jobId: randomUUID(), id, title, plugin, channel: Boolean(channel), status: 'queued', created: Date.now(), source: { url: source.url, headers: source.headers || {} } }
+    const job = { jobId: randomUUID(), id, title, plugin, channel: Boolean(channel), status: 'queued', created: Date.now(), source: { url: source.url, headers: source.headers || {}, page: Boolean(source.page) } }
     jobs.push(job)
     save()
     next()
     return view(job)
   }
 
+  // Cancels a queued or running job; a finished, failed or cancelled one is dismissed from the list.
   function cancel (jobId) {
     const job = jobs.find(j => j.jobId === jobId)
     if (!job) return null
@@ -118,6 +123,10 @@ export function createAcquirer (node, file, {
       job.status = 'cancelled'
       job.source = null
       running.get(job)?.abort()
+      save()
+    } else if (job.status !== 'announcing') {
+      jobs = jobs.filter(j => j !== job)
+      job.status = 'removed'
       save()
     }
     return view(job)

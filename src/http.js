@@ -8,7 +8,7 @@ import { receiverPage } from './cast-ui.js'
 const MAX_BODY = 64 * 1024
 const CORS = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, HEAD, POST, DELETE, OPTIONS',
+  'access-control-allow-methods': 'GET, HEAD, POST, PUT, DELETE, OPTIONS',
   'access-control-allow-headers': 'content-type, authorization, range',
   'access-control-expose-headers': 'content-length, content-range, accept-ranges'
 }
@@ -71,13 +71,30 @@ export function createApi (state) {
     const path = url.pathname
     if (state.cast && req.method === 'POST' && path === '/v1/cast/web-register') return state.cast.registerWebReceiver(await body(req))
     if (state.cast && req.method === 'POST' && path === '/v1/cast/web-state') return state.cast.updateWebReceiverState(await body(req))
-    if (state.apiToken && (req.method === 'POST' || req.method === 'DELETE')) {
+    // Writes, and the settings themselves, need the token; reads of public state do not.
+    if (state.apiToken && (req.method === 'POST' || req.method === 'PUT' || req.method === 'DELETE' || path === '/v1/settings')) {
       if (req.headers.authorization !== `Bearer ${state.apiToken}`) {
         throw Object.assign(new Error('Unauthorized'), { status: 401 })
       }
     }
     if (req.method === 'GET' && path === '/v1/status') {
-      return node ? { ...node.status(), ...(state.extraStatus?.() || {}) } : state.fallbackStatus
+      const st = node ? { ...node.status(), ...(state.extraStatus?.() || {}) } : state.fallbackStatus
+      return { ...st, tokenRequired: Boolean(state.apiToken) }
+    }
+    if (state.settings && path === '/v1/settings') {
+      if (req.method === 'GET') return state.settings.view()
+      if (req.method === 'PUT') {
+        const res = state.settings.update(await body(req))
+        if (res.changed.length) {
+          try { await state.applySettings?.(res.changed) } catch (err) { res.warning = err.message }
+        }
+        return res
+      }
+    }
+    if (req.method === 'POST' && path === '/v1/identify' && state.identify) {
+      const { url: link } = await body(req)
+      if (typeof link !== 'string' || !/^https?:\/\//i.test(link.trim())) throw Object.assign(new Error('Paste an http(s) link'), { status: 400 })
+      return state.identify(link.trim())
     }
     if (req.method === 'GET' && path === '/v1/search') {
       const id = url.searchParams.get('id')
@@ -285,6 +302,14 @@ export function createApi (state) {
       res.write(': connected\n\n')
       sse.add(res)
       req.once('close', () => sse.delete(res))
+      return
+    }
+    const posterMatch = req.method === 'GET' && state.posterUrl && url.pathname.match(/^\/v1\/poster\/(tt\d{5,10})$/)
+    if (posterMatch) {
+      // Cinemeta's poster for an identified entry; a redirect keeps image bytes off the relay.
+      const poster = await state.posterUrl(posterMatch[1]).catch(() => null)
+      res.writeHead(poster ? 302 : 404, poster ? { ...CORS, location: poster, 'cache-control': 'max-age=86400' } : CORS)
+      res.end()
       return
     }
     if (req.method === 'GET' && url.pathname === '/v1/playlist.m3u') {

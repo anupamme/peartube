@@ -12,10 +12,22 @@ A relay is the PearTube service you run on a server or NAS to import and share v
 
 ```sh
 npm install
-PEARTUBE_TRACKER=<tracker key> npm start
+npm start
 ```
 
-Leave `PEARTUBE_TRACKER` unset to found a new tracker; the relay prints its `tracker` and `channel` keys on startup (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` for the web UI (which plays MKV/AVI/MP4/TS streams directly in the browser via `peartube-media` compiled to WebAssembly, including DTS/AC-3/TrueHD surround audio and PGS/ASS/SRT subtitles), `http://<relay>:8174/manifest.json` in Stremio, `http://<relay>:8174/v1/playlist.m3u` in VLC/MPV/IINA/Kodi, or `http://<relay>:8174/tv` on a Smart TV browser. Run an unauthenticated relay only on a trusted network (anyone who can reach it can queue downloads unless `PEARTUBE_API_TOKEN` is set).
+A bare `npm start` founds a new tracker and prints its `tracker` and `channel` keys (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` and finish setup under **Settings**: the address viewers stream from, LAN discovery, the tracker to join, HiveRelays, the import folder, feeds and copy limits. Settings are saved in `settings.json` in the data directory (mode `0600`, never in the Corestore). Each one is marked **Applies now** or **After restart**, and the page lists any changes still waiting for a restart. Environment variables still work and take precedence. A setting given by one shows **Set by PEARTUBE_…** and is read-only in the UI. Precedence is env var, then `settings.json`, then the default. Only `PEARTUBE_STORAGE`, `PEARTUBE_API_HOST`, `PEARTUBE_API_PORT` and `PEARTUBE_API_TOKEN` have to be set before starting.
+
+The web UI has five tabs:
+
+| Tab | What it covers |
+|---|---|
+| Library | Adding videos, plus a list you can play in the browser through `peartube-media` compiled to WebAssembly (MKV/AVI/MP4/TS, DTS/AC-3/TrueHD surround, PGS/ASS/SRT subtitles) or cast to a TV |
+| Channels | Your tracker and channel, and the channels you follow |
+| Sharing | Peers, copies kept for other relays, HiveRelays, and the Stremio and M3U addresses |
+| TV | Pairing and controlling TVs |
+| Settings | Relay configuration (see above) |
+
+Stremio takes `http://<relay>:8174/manifest.json`. VLC, MPV, IINA and Kodi take `http://<relay>:8174/v1/playlist.m3u`. A Smart TV browser opens `http://<relay>:8174/tv`. Set `PEARTUBE_API_TOKEN` on any network you don't fully trust: the UI asks for it once, then keeps it in that browser.
 
 Prebuilt multi-arch container (`linux/amd64` and `linux/arm64`, published from `main` by CI):
 
@@ -32,7 +44,14 @@ Peers try to connect automatically, and relays on the same local network can dis
 
 Or build locally with `docker build -t peartube-relay .` and mount `/data`.
 
-There is no browser file-upload UI yet. Media gets onto a relay either by posting a direct download URL to `POST /v1/acquire` (from `curl` or an external client) or by pointing `PEARTUBE_WATCH_DIR` at a local folder of media files:
+There is no browser file upload. To get media onto a relay, paste a link into **Library → Add a video or channel**:
+
+- A direct file link (`https://…/Movie.2008.1080p.mkv`) is fetched as is.
+- A video page (YouTube, Vimeo and the other sites [yt-dlp](https://github.com/yt-dlp/yt-dlp) supports) needs `yt-dlp` on the relay's `PATH`. The relay resolves the page again on every attempt, because those media URLs expire, and stores one progressive file with both audio and video.
+
+Before anything is added, the relay identifies the link. It parses title, year, `S01E02`, resolution, codec and audio from the filename, or reads the page's title, uploader, length and thumbnail through yt-dlp. Names that look like a movie or an episode get suggestions from [Cinemeta](https://v3-cinemeta.strem.io) (no key; change it or turn it off under **Settings → Title lookup service**). A suggestion is preselected only when the title matches exactly and the year agrees. A title you accept is announced as `imdb:tt…` (movie) or `imdb:tt…:s01e02` (episode), with the title `Name 2008` or `Name S01E02`: the ids Stremio and MediaStorm search by. Anything else stays a plain `clip:` video under its parsed or page title.
+
+**Import a folder**, **Follow a feed** and **Copy a channel** sit under the same box. The API does the same from `curl`:
 
 ```sh
 curl -X POST http://127.0.0.1:8174/v1/acquire \
@@ -47,9 +66,9 @@ When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `p
 1. **Host & network capability check**:
    - **Real Linux/macOS host, NAS, or VPS (including self-hosted remote `codex` CLI / SSH sessions)**: Supported. If the agent runs inside a command sandbox (such as Codex's `workspace-write` + `codex-network-proxy`), request unsandboxed/escalated execution: `HyperDHT` (`udx-native`) needs raw UDP sockets (cannot traverse an `HTTP_PROXY`), and the relay must be registered under Docker, `systemd`, or `launchd` so the agent's per-command process reaper does not kill it when the turn exits.
    - **OpenAI-hosted Codex Cloud VMs (`Work in > Cloud`)**: **Cannot** host a live public or LAN `peartube-relay`—the cloud VM sits behind an HTTP/HTTPS-only egress proxy that blocks raw `HyperDHT`/`UDX` UDP (even with Tailscale attached), exposes no inbound TCP/UDP ports, and hibernates between turns. In Codex Cloud, either run loopback-only tests against `createTestnet()` (`PEARTUBE_BOOTSTRAP=127.0.0.1:<port>`), drive an external relay's HTTPS `/v1/acquire` API via a Codex Network secret, or deploy the container below onto a real VPS.
-2. **Required env vars before starting**:
+2. **Settings before starting**: an unattended install sets these as env vars. Each one locks its setting in the web UI. Anything left unset can be set later under **Settings**.
    - Detect the machine's reachable LAN, Tailscale, or public IPv4 (`HOST_IP`) and set `PEARTUBE_STREAM_HOST=$HOST_IP` (leaving the `127.0.0.1` default breaks playback on every other device). On a LAN host, also set `PEARTUBE_LAN_HOST=$HOST_IP` for zero-config mDNS discovery.
-   - Generate `PEARTUBE_API_TOKEN=$(openssl rand -hex 32)` on any non-loopback network (`GET` playback/Stremio/M3U routes stay open; `POST`/`DELETE` `/v1/*` require `Authorization: Bearer <token>`). Keep `PEARTUBE_STORAGE` mode `0700` and env files mode `0600`.
+   - Generate `PEARTUBE_API_TOKEN=$(openssl rand -hex 32)` on any non-loopback network (`GET` playback/Stremio/M3U routes stay open; `POST`/`PUT`/`DELETE` `/v1/*` and `/v1/settings` require `Authorization: Bearer <token>`). Keep `PEARTUBE_STORAGE` mode `0700` and env files mode `0600`.
    - Leave `PEARTUBE_TRACKER` unset to found a new catalog, or pass the user's existing `PEARTUBE_TRACKER` / `PEARTUBE_SOURCES` (add `PEARTUBE_REPLICATE=1` to mirror and seed remote blobs).
 3. **Install and detach as a persistent service**:
 
@@ -144,6 +163,8 @@ When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `p
    - Poll `curl -fsS http://127.0.0.1:8174/v1/status` until `tracker` and `channel` are 64-character hex keys, and confirm `curl -fsSI http://127.0.0.1:8174/manifest.json` returns `200 OK`.
    - Return the Web UI (`http://<host>:8174/`), Smart TV page (`http://<host>:8174/tv`), Stremio addon (`http://<host>:8174/manifest.json`), M3U playlist (`http://<host>:8174/v1/playlist.m3u`), public read-only channel URI (`peartube://channel/<status.channel>`), private shared tracker key (`<status.tracker>`), and the path holding `PEARTUBE_API_TOKEN`.
 
+Every variable except `PEARTUBE_STORAGE`, `PEARTUBE_API_HOST`, `PEARTUBE_API_PORT`, `PEARTUBE_API_TOKEN`, `PEARTUBE_SOURCES`, `PEARTUBE_PLUGINS_DIR` and the `PEARTUBE_PRIVATE_RELAY*` guard mode is also a setting in the web UI. When one is set, it overrides that setting and locks it in the UI.
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `PEARTUBE_TRACKER` | none (found new) | Tracker key to join |
@@ -174,8 +195,9 @@ When an AI coding/ops agent (Codex CLI, Claude Code, OpenCode, etc.) installs `p
 | `PEARTUBE_HIVERELAY_UPLOAD_MBPS` | `50` | Shared upload cap for bulk peers that don't pace themselves: HiveRelays (peers that open `hiverelay-seed` without sending seed requests and don't answer `peartube/bulk-busy`), over both public and LAN connections. While over it their connections are paused. PearTube replica relays are never paused; they follow `PEARTUBE_REPLICATE_MBPS` and stand down while viewers watch. Viewer apps are never capped. `0` removes the cap |
 | `PEARTUBE_PLUGINS_DIR` | `<PEARTUBE_STORAGE>/plugins` | Directory scanned on startup for custom import plugins (`*.mjs` / `*.js`; `/data/plugins` in Docker) |
 | `PEARTUBE_ACQUIRE_CONCURRENCY` | `4` | Maximum concurrent HTTP acquisition downloads |
+| `PEARTUBE_CINEMETA_URL` | `https://v3-cinemeta.strem.io` | Cinemeta-compatible service that suggests movie and episode matches for added links; empty turns lookups off |
 | `PEARTUBE_ALLOWED_PEERS` | none | Optional comma-separated 64-hex peer Noise public keys allowed through the swarm firewall |
-| `PEARTUBE_API_TOKEN` | none | Optional Bearer token required on mutating `POST`/`DELETE` `/v1/*` routes |
+| `PEARTUBE_API_TOKEN` | none | Optional Bearer token required on mutating `POST`/`PUT`/`DELETE` `/v1/*` routes and on `/v1/settings` |
 
 ### Reachability
 
@@ -185,16 +207,19 @@ Private routing connects peers over **two-hop encrypted UDX-spliced guard circui
 
 ## UI and API
 
-One port serves the acquisitions page at `/`, the `/v1` API, the Stremio v3 addon, the M3U8 playlist, and `/tv`. By default there is no auth: run an open relay on a trusted network only, because anyone who can reach it can queue a download of any URL. Setting `PEARTUBE_API_TOKEN` requires `Authorization: Bearer <token>` on `POST` and `DELETE` `/v1/*` routes while keeping `GET` routes open for players.
+One port serves the web UI at `/`, the `/v1` API, the Stremio v3 addon, the M3U8 playlist, and `/tv`. By default there is no auth: run an open relay on a trusted network only, because anyone who can reach it can queue a download of any URL. Setting `PEARTUBE_API_TOKEN` requires `Authorization: Bearer <token>` on `POST`, `PUT` and `DELETE` `/v1/*` routes and on `/v1/settings`, while keeping the other `GET` routes open for players.
 
 | Route | Does |
 |---|---|
-| `GET /` | Acquisitions page |
+| `GET /` | Web UI: library, channels, sharing, TV, settings |
+| `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
+| `POST /v1/identify` `{url}` | What a link holds: `link` (file name, size, or page title, uploader, length and thumbnail through yt-dlp), `parsed` name parts, Cinemeta `candidates` with their `imdb:…` ids and titles, `match` (an exact title and year), and a `plain` `clip:` fallback |
+| `GET /v1/poster/:tt` | Redirect to Cinemeta's poster for an identified entry |
 | `GET /v1/search?id=imdb:tt0944947:s01e02` | Tracker entries for an id, each with a `streamUrl` |
 | `GET /v1/entries` | Every tracker entry, same shape as search |
-| `POST /v1/acquire` `{id, title, source: {url, headers}}` | Fetch a source, store it, announce it |
-| `GET /v1/jobs`, `GET /v1/jobs/:jobId`, `DELETE /v1/jobs/:jobId` | Acquire jobs (sources are never returned) |
-| `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic |
+| `POST /v1/acquire` `{id, title, source: {url, headers, page}}` | Fetch a source, store it, announce it; `page: true` resolves a video page through yt-dlp on every attempt |
+| `GET /v1/jobs`, `GET /v1/jobs/:jobId`, `DELETE /v1/jobs/:jobId` | Acquire jobs (sources are never returned). `DELETE` cancels a queued or running job and removes a finished, failed or cancelled one |
+| `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic, `lan` (`{host, port}` while LAN discovery runs), `privateRouting`, and `tokenRequired` |
 | `GET /v1/sources` | Followed trackers/channels, this node's `channel` key, and catalogs discovered through peers |
 | `POST /v1/sources` `{uri}` or `{key, kind, alias}`, `DELETE /v1/sources/:key` | Follow or remove a shared tracker or channel |
 | `POST /v1/channel/publish`, `DELETE /v1/channel/sources/:key` | Publish an entry or a link to another catalog (`{type: "source", sourceKey, kind, title, target}`), or remove a catalog link |
@@ -246,7 +271,7 @@ Ids look like `imdb:tt0111161` for movies and `imdb:tt0944947:s01e02` for episod
 
 ## Privacy rule
 
-Replication serves any stored core a peer can name, so the Corestore holds only public data: the tracker and the blobs. Acquire jobs, with their source URLs and headers, live in `jobs.json` in the data directory and are never replicated.
+Replication serves any stored core a peer can name, so the Corestore holds only public data: the tracker and the blobs. Several things live in private files in the data directory and are never replicated: acquire jobs with their source URLs and headers in `jobs.json`, and relay settings (feed URLs, HiveRelay keys) in `settings.json`. A video page's thumbnail is shown only while you confirm the add and is never announced. An identified entry carries nothing beyond its `imdb:…` id and title.
 
 Private-only peers exchange ten-minute, periodically renewed inner Noise public keys inside the tracker and seal route descriptors (`G_S` + expiring `routeToken`) behind `crypto_secretbox` keys derived from the tracker or peer public key. Consenting stateless guard forwarders (`bin/private-relay.js`) forward encrypted UDX packets in RAM (`relayTo`) with zero Corestore or Hypercore protocol participation, and every endpoint dials both inbound and outbound strictly through `/24`-diverse guards (`Peer_A -> G_A <-> G_B <- Peer_B`), rejecting endpoint or unadvertised direct hop-open attempts. Because guards are auto-discovered on the open DHT, `/24` diversity enforces network-prefix separation rather than proving independent operators: a monitor running its own advertised `/24` guard can act as `G_A` to reach `G_B` across one non-controlled guard (still never seeing the seeder's IP unless `G_B` also colludes or is seized), and this topology does not provide legal immunity or defeat provider flow logs or global traffic correlation.
 
