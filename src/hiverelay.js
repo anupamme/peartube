@@ -800,9 +800,9 @@ export function createHiverelaySeeder ({
       discover: dhtDiscover,
       publisherPubkey: publisherPubkeyHex,
       beaconDriveKey: beaconDbs.size ? b4a.toString(beaconDbs.values().next().value.key, 'hex') : null,
-      configuredRelays: targets.map(t => ({ url: t.url, hasApiKey: Boolean(t.apiKey), pubkey: urlPubkeys.get(t.url) || null })),
       httpPinnedCores: httpPinned.size,
-      p2pConnectedRelays: seedChannels.size,
+      // Public status: scheme, host and path only, never credentials or a query string.
+      configuredRelays: targets.map(t => ({ url: (u => u.protocol + '//' + u.host + u.pathname.replace(/\/+$/, ''))(new URL(t.url)), hasApiKey: Boolean(t.apiKey), pubkey: urlPubkeys.get(t.url) || null })),
       bulkUploadMbps: uploadMbps,
       bulkPeers: bulkConns.size,
       bulkPaused,

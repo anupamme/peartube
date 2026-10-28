@@ -30,7 +30,8 @@ function fetchJson (url, headers = {}, redirects = 0) {
       }
       if (res.statusCode < 200 || res.statusCode >= 300) {
         res.resume?.()
-        reject(new Error(`Feed ${url} answered ${res.statusCode}`))
+        // Plugin errors are public on /v1/plugins: name the feed by host and path, never its query or credentials.
+        reject(new Error(`Feed ${parsed.host}${parsed.pathname} answered ${res.statusCode}`))
         return
       }
       const chunks = []
@@ -283,7 +284,8 @@ export async function createMirrorHost ({
       if (watchDir) return scanFolder(watchDir, ctx)
       return null
     },
-    info: () => ({ watchDir: watchDir || null, trackedFiles: Object.keys(watchLedger).length })
+    // /v1/plugins is public: say whether a folder is watched, never which.
+    info: () => ({ watching: Boolean(watchDir), trackedFiles: Object.keys(watchLedger).length })
   })
 
   // 4. Built-in plugin: JSON manifest & remote PearTube relay `/v1/entries` mirror.
@@ -333,7 +335,8 @@ export async function createMirrorHost ({
       if (!configuredFeeds.length) return null
       return this.run({}, ctx)
     },
-    info: () => ({ feeds: configuredFeeds })
+    // Feed URLs can carry access tokens; they stay in settings.json.
+    info: () => ({ feeds: configuredFeeds.length })
   })
 
   // 5. Built-in plugin: greedy P2P Hyperblobs block replicator — sucks every announced peer slice onto disk up to the free-space floor without forging duplicate tracker entries.

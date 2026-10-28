@@ -371,7 +371,7 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     // Follow a feed.
     clicks = 0
     await clickText('Follow a feed')
-    await type('#feedInput', stub.base + '/feed.json')
+    await type('#feedInput', stub.base + '/feed.json?token=feedsecret123')
     await clickText('Follow', '#feedForm')
     result.interactions.followFeed = clicks
     mark('followFeedClicked')
@@ -426,6 +426,15 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     assert.deepEqual(hive.settings.hiverelays.value.map(r => r.label), ['192.168.1.50:9100'])
     assert.ok(!JSON.stringify(hive).includes('hr_secretkey_123'), 'the key never comes back from the API')
     assert.ok(readFileSync(join(storage, 'settings.json'), 'utf8').includes('192.168.1.50:9100=hr_secretkey_123'))
+    // /v1/plugins is readable without a token: it must not reveal feed tokens, keys or the import folder.
+    // A feed that fails keeps its error on public status too; that error must not carry its token either.
+    const current = (await settingsNow()).settings.feeds.value.map(f => f.ref)
+    await fetch(base + '/v1/settings', { method: 'PUT', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ feeds: [...current, stub.base + '/missing-feed.json?token=deadfeed456'] }) })
+    const failed = await waitApi(async () => (await getJson('/v1/plugins', {})).plugins.find(p => p.name === 'feed-mirror' && p.lastError), 'failing feed recorded')
+    assert.match(failed.lastError, /missing-feed\.json answered 404/)
+    const publicPlugins = await (await fetch(base + '/v1/plugins')).text()
+    for (const secret of ['feedsecret123', 'deadfeed456', 'hr_secretkey_123', watchDir]) assert.ok(!publicPlugins.includes(secret), 'public plugin status leaks ' + secret)
+    result.checks.publicPluginsRedacted = true
 
     // No legacy blobs on a new relay: the migration stays out of sight.
     await open('#settings')
