@@ -77,11 +77,14 @@ export function createApi (state) {
         throw Object.assign(new Error('Unauthorized'), { status: 401 })
       }
     }
+    // Settings can point the relay at local folders: without a token only this machine may see or change them.
+    const settingsOpen = Boolean(state.apiToken) || /^(127\.|::1$|::ffff:127\.)/.test(req.socket?.remoteAddress || '')
     if (req.method === 'GET' && path === '/v1/status') {
       const st = node ? { ...node.status(), ...(state.extraStatus?.() || {}) } : state.fallbackStatus
-      return { ...st, tokenRequired: Boolean(state.apiToken) }
+      return { ...st, tokenRequired: Boolean(state.apiToken), settingsOpen }
     }
     if (state.settings && path === '/v1/settings') {
+      if (!settingsOpen) throw Object.assign(new Error('Set PEARTUBE_API_TOKEN to change settings from another device'), { status: 403 })
       if (req.method === 'GET') return state.settings.view()
       if (req.method === 'PUT') {
         const res = state.settings.update(await body(req))

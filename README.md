@@ -17,6 +17,8 @@ npm start
 
 A bare `npm start` founds a new tracker and prints its `tracker` and `channel` keys (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` and finish setup under **Settings**: the address viewers stream from, LAN discovery, the tracker to join, HiveRelays, the import folder, feeds and copy limits. Settings are saved in `settings.json` in the data directory (mode `0600`, never in the Corestore). Each one is marked **Applies now** or **After restart**, and the page lists any changes still waiting for a restart. Environment variables still work and take precedence. A setting given by one shows **Set by PEARTUBE_…** and is read-only in the UI. Precedence is env var, then `settings.json`, then the default. Only `PEARTUBE_STORAGE`, `PEARTUBE_API_HOST`, `PEARTUBE_API_PORT` and `PEARTUBE_API_TOKEN` have to be set before starting.
 
+Settings can point the relay at local folders. On a relay without `PEARTUBE_API_TOKEN`, only a browser on the relay machine itself (`127.0.0.1`) can open or change them; other devices see "Set PEARTUBE_API_TOKEN to change settings from here." To configure a headless relay from another machine, start it with a token.
+
 The web UI has five tabs:
 
 | Tab | What it covers |
@@ -212,14 +214,14 @@ One port serves the web UI at `/`, the `/v1` API, the Stremio v3 addon, the M3U8
 | Route | Does |
 |---|---|
 | `GET /` | Web UI: library, channels, sharing, TV, settings |
-| `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
+| `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Without `PEARTUBE_API_TOKEN`, only loopback clients may use it (others get `403`). Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
 | `POST /v1/identify` `{url}` | What a link holds: `link` (file name, size, or page title, uploader, length and thumbnail through yt-dlp), `parsed` name parts, Cinemeta `candidates` with their `imdb:…` ids and titles, `match` (an exact title and year), and a `plain` `clip:` fallback |
 | `GET /v1/poster/:tt` | Redirect to Cinemeta's poster for an identified entry |
 | `GET /v1/search?id=imdb:tt0944947:s01e02` | Tracker entries for an id, each with a `streamUrl` |
 | `GET /v1/entries` | Every tracker entry, same shape as search |
 | `POST /v1/acquire` `{id, title, source: {url, headers, page}}` | Fetch a source, store it, announce it; `page: true` resolves a video page through yt-dlp on every attempt |
 | `GET /v1/jobs`, `GET /v1/jobs/:jobId`, `DELETE /v1/jobs/:jobId` | Acquire jobs (sources are never returned). `DELETE` cancels a queued or running job and removes a finished, failed or cancelled one |
-| `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic, `lan` (`{host, port}` while LAN discovery runs), `privateRouting`, and `tokenRequired` |
+| `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic, `lan` (`{host, port}` while LAN discovery runs), `privateRouting`, `tokenRequired`, and `settingsOpen` (whether this client may use `/v1/settings`) |
 | `GET /v1/sources` | Followed trackers/channels, this node's `channel` key, and catalogs discovered through peers |
 | `POST /v1/sources` `{uri}` or `{key, kind, alias}`, `DELETE /v1/sources/:key` | Follow or remove a shared tracker or channel |
 | `POST /v1/channel/publish`, `DELETE /v1/channel/sources/:key` | Publish an entry or a link to another catalog (`{type: "source", sourceKey, kind, title, target}`), or remove a catalog link |

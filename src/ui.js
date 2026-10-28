@@ -972,7 +972,7 @@ function renderSettings (force) {
   if (!S.settings) {
     body.replaceChildren(h('div', { class: 'card' }, settingsLoaded && needsToken
       ? [h('h3', null, 'Sign in to see settings'), h('div', { class: 'hint' }, 'Use the access token above.')]
-      : h('div', { class: 'hint' }, settingsLoaded ? 'Settings are not available on this relay.' : 'Loading…')))
+      : h('div', { class: 'hint' }, !settingsLoaded ? 'Loading…' : S.status.settingsOpen === false ? 'Set PEARTUBE_API_TOKEN to change settings from here.' : 'Settings are not available on this relay.')))
     return
   }
   if (settingsDirty && !force) return
@@ -1041,6 +1041,10 @@ refresh().then(() => {
     needsToken = true
     settingsLoaded = true
     $('authForm').hidden = false
+    render()
+    if (tab === 'settings') renderSettings()
+  } else if (S.status.settingsOpen === false) {
+    settingsLoaded = true
     render()
     if (tab === 'settings') renderSettings()
   } else loadSettings()
