@@ -220,6 +220,14 @@ const node = await createNode({
   }
 })
 state.node = node
+// A relay started without a tracker founds its own, keyed by its writer. Saved sources would otherwise replace it as
+// the primary catalog on the next start (createNode only keeps its own tracker when told the key), hiding its library.
+if (!cfg('tracker')) {
+  const { tracker, writer } = node.status()
+  if (tracker === writer) settings.remember('tracker', writer)
+  // Followed something before this fix: the founded tracker comes back after a restart, which the UI asks for.
+  else settings.update({ tracker: writer })
+}
 if (isDirectory) await syncDirectory(node.listSources())
 const mirrorChannel = cfg('publishChannel')
 state.acquirer = createAcquirer(node, jobsFile, {

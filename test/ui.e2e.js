@@ -191,7 +191,7 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     PEARTUBE_STREAM_PORT: String(streamPort),
     PEARTUBE_BOOTSTRAP: '127.0.0.1:1'
   }
-  const relay = await startRelay(env)
+  let relay = await startRelay(env)
   const base = 'http://127.0.0.1:' + apiPort
   const auth = { authorization: 'Bearer ' + TOKEN }
   const getJson = async (path, headers = auth) => (await fetch(base + path, { headers })).json()
@@ -390,6 +390,17 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     const copied = await waitApi(async () => { const s = await settingsNow(); return s.settings.replicate.value && s }, 'replication on')
     assert.deepEqual(copied.settings.replicateSources.value, [channelKey])
     assert.ok((await getJson('/v1/sources')).sources.some(s => s.key === channelKey))
+
+    // Following something must not cost a bare-started relay its own tracker and library on the next start.
+    const before = await getJson('/v1/status')
+    relay.kill('SIGTERM')
+    await new Promise(resolve => relay.once('exit', resolve))
+    relay = await startRelay(env)
+    const after = await getJson('/v1/status')
+    assert.equal(after.tracker, before.tracker, 'same tracker after following a channel and restarting')
+    assert.ok((await entries()).some(e => e.id === 'imdb:tt1254207'), 'library survives the restart')
+    assert.deepEqual((await settingsNow()).restartNeeded, [], 'remembering the tracker needs no restart')
+    result.checks.trackerSurvivesFollowRestart = after.tracker
 
     // Sharing: keep copies off again, LAN discovery on, and a HiveRelay with a key.
     await open('#library')

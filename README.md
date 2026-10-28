@@ -17,6 +17,8 @@ npm start
 
 A bare `npm start` founds a new tracker and prints its `tracker` and `channel` keys (`{"msg":"relay ready", ...}`). Open `http://<relay>:8174/` and finish setup under **Settings**: the address viewers stream from, LAN discovery, the tracker to join, HiveRelays, the import folder, feeds and copy limits. Settings are saved in `settings.json` in the data directory (mode `0600`, never in the Corestore). Each one is marked **Applies now** or **After restart**, and the page lists any changes still waiting for a restart. Environment variables still work and take precedence. A setting given by one shows **Set by PEARTUBE_…** and is read-only in the UI. Precedence is env var, then `settings.json`, then the default. Only `PEARTUBE_STORAGE`, `PEARTUBE_API_HOST`, `PEARTUBE_API_PORT` and `PEARTUBE_API_TOKEN` have to be set before starting.
 
+The founded tracker's key is saved as the **Join a tracker** setting on first start. Without it, following a channel would make that channel the relay's primary catalog on the next start, and the relay's own library would drop out of view. A data directory that already lost it gets it back after one restart; Settings asks for that restart.
+
 Settings can point the relay at local folders. On a relay without `PEARTUBE_API_TOKEN`, only a browser on the relay machine itself (`127.0.0.1`) can open or change them; other devices see "Set PEARTUBE_API_TOKEN to change settings from here." To configure a headless relay from another machine, start it with a token.
 
 The web UI has five tabs:

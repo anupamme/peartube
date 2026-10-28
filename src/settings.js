@@ -162,5 +162,12 @@ export function createSettings (storage, env = {}) {
     return { changed, ...view() }
   }
 
-  return { get, view, update, file }
+  // A value the running relay already uses (the tracker it founded): saved so the next start keeps it, no restart flagged.
+  function remember (key, value) {
+    if (lockedBy(key) || Object.hasOwn(saved, key)) return
+    update({ [key]: value })
+    boot[key] = JSON.stringify(get(key))
+  }
+
+  return { get, view, update, remember, file }
 }
