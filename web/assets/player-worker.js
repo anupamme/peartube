@@ -94,18 +94,19 @@ function prefetchFrom (startBlockIdx) {
     if (startByte > endByte) continue
     const ctl = new AbortController()
     inflightPrefetch.set(idx, ctl)
+    // Only this request's own settlement may clear its slot: after a seek, an aborted request settles late and would
+    // otherwise untrack the new request for the same block, which then can't be aborted and holds a connection.
+    const settle = () => { if (inflightPrefetch.get(idx) === ctl) inflightPrefetch.delete(idx) }
     fetch(url, { headers: { Range: 'bytes=' + startByte + '-' + endByte }, signal: ctl.signal })
       .then(res => (res.status === 200 || res.status === 206) ? res.arrayBuffer() : null)
       .then(ab => {
-        inflightPrefetch.delete(idx)
+        settle()
         if (!ab || closed || epoch !== prefetchEpoch || url !== streamUrl) return
         const u8 = new Uint8Array(ab)
         if (u8.byteLength > 0) putBlock(idx, u8)
         prefetchFrom(idx + 1)
       })
-      .catch(() => {
-        inflightPrefetch.delete(idx)
-      })
+      .catch(settle)
   }
 }
 
@@ -169,6 +170,8 @@ function readAtSync (offset, dstPtr, len) {
     try {
       const xhr = new XMLHttpRequest()
       xhr.open('GET', streamUrl, false)
+      // Workers allow timeouts on synchronous requests; one that never gets a connection is retried, not waited on forever.
+      xhr.timeout = 20000
       xhr.responseType = 'arraybuffer'
       xhr.setRequestHeader('Range', 'bytes=' + fetchStart + '-' + fetchEnd)
       xhr.send()

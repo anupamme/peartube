@@ -1270,7 +1270,7 @@ function audioOutTime (ctx) {
   return (ts && ts.contextTime > 0) ? ts.contextTime : ctx.currentTime
 }
 // One shared WASM Worker, compiled when a Play button is about to be used, so playback opens without a compile wait.
-const ASSET_VER = '?v=5'
+const ASSET_VER = '?v=6'
 let sharedWorker = null
 let workerCanvasTransferred = false
 let workerOffscreenReady = false
@@ -1302,6 +1302,8 @@ let openCounter = 0
 
 function closePlayer () {
   if (!player) return
+  clearTimeout(seekTimer)
+  seekTarget = null
   const p = player
   player = null
   $('playerModal').classList.remove('open')
@@ -1335,14 +1337,21 @@ function openPlayer (entry) {
   $('pClock').textContent = '0:00 / 0:00'
   $('playerModal').classList.add('open')
 
+  // Each decoded chunk becomes its own AudioBufferSourceNode. If its sample rate differs from the context's, the browser
+  // resamples every 20–30 ms buffer on its own and the edges click; matching the rate leaves one resampler at the output.
+  // Most film audio is 48 kHz; the first chunk switches the context if this stream differs.
   const AudioCtx = window.AudioContext || window.webkitAudioContext
-  const audioCtx = AudioCtx ? new AudioCtx() : null
-  const gainNode = audioCtx ? audioCtx.createGain() : null
-  if (gainNode) {
-    gainNode.gain.value = ($('pMuteBtn').dataset.muted === '1') ? 0 : (Number($('pVol').value) / 100)
-    gainNode.connect(audioCtx.destination)
+  function makeAudio (rate) {
+    if (!AudioCtx) return { audioCtx: null, gainNode: null }
+    let ctx
+    try { ctx = new AudioCtx({ sampleRate: rate }) } catch { ctx = new AudioCtx() }
+    const gain = ctx.createGain()
+    gain.gain.value = ($('pMuteBtn').dataset.muted === '1') ? 0 : (Number($('pVol').value) / 100)
+    gain.connect(ctx.destination)
+    ctx.resume?.().catch(() => {})
+    return { audioCtx: ctx, gainNode: gain }
   }
-  audioCtx?.resume?.().catch(() => {})
+  const { audioCtx, gainNode } = makeAudio(48000)
 
   const seq = ++openCounter
   const p = {
@@ -1428,6 +1437,11 @@ function openPlayer (entry) {
   p.syncWorkerClock = syncWorkerClock
 
   function scheduleAudioChunk (m) {
+    if (p.audioCtx && !p.audioStarted && m.rate > 0 && m.rate !== p.audioCtx.sampleRate) {
+      const prev = p.audioCtx
+      Object.assign(p, makeAudio(m.rate))
+      try { prev.close() } catch {}
+    }
     if (!p.audioCtx || !p.gainNode || m.samples <= 0) {
       if (m?.buf?.byteLength) { try { worker.postMessage({ cmd: 'recycleAudio', buf: m.buf }, [m.buf]) } catch {} }
       return
@@ -1881,8 +1895,20 @@ $('pCloseBtn').onclick = closePlayer
 $('pPlayBtn').onclick = togglePlay
 $('pStage').onclick = togglePlay
 $('pStage').ondblclick = () => $('pFsBtn').click()
-$('pBackBtn').onclick = () => player && seekTo((player.freeBaseMedia || 0) - 10)
-$('pFwdBtn').onclick = () => player && seekTo((player.freeBaseMedia || 0) + 10)
+// Repeated ±10 s presses add up into one seek: each seek restarts the demuxer and its range reads.
+let seekTimer = 0
+let seekTarget = null
+function nudge (deltaSecs) {
+  if (!player) return
+  const from = seekTarget ?? (player.freeBaseMedia || 0)
+  seekTarget = Math.max(0, player.duration > 0 ? Math.min(player.duration, from + deltaSecs) : from + deltaSecs)
+  $('pStatus').style.display = ''
+  $('pStatus').textContent = 'Seeking to ' + fmtClock(seekTarget)
+  clearTimeout(seekTimer)
+  seekTimer = setTimeout(() => { const t = seekTarget; seekTarget = null; seekTo(t) }, 350)
+}
+$('pBackBtn').onclick = () => nudge(-10)
+$('pFwdBtn').onclick = () => nudge(10)
 $('pFsBtn').onclick = () => {
   const m = $('playerModal')
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
