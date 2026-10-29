@@ -24,10 +24,10 @@ set -eu
 # bare-kit v2.5.5, libqjs main, and the libjs headers and QuickJS master that
 # libqjs main was made against. libqjs fetches those two unpinned, so they are
 # given to CMake from here.
-BARE_KIT=78230eb57194cdfb67184220c46b29ad23d8f825
-LIBQJS=177194ba544c50d4ebd780bcdf7570043c8cea2c
-LIBJS=19f0f5c73f24a7d8f3b95d7dd7609d5743f4adac
-QUICKJS=535a7c250ff4a577ec36c3e103daab6dadeea650
+BARE_KIT=230e20265b3ea66606bae1f1d69e0ae331f7c09e
+LIBQJS=348141095737bed3a7da01c5b5756e84904ffb5f
+LIBJS=a2249688df3c36b928477539c6e2bf3e08c711bc
+QUICKJS=19d6bd865e709e2b5717fb4f2290c0cecc57ee4b
 # bare-kit's minSdk, and the Android app's (android/app/build.gradle.kts).
 API=29
 
@@ -54,7 +54,7 @@ for target in "$@"; do
     *) echo "Unknown target $target: an Android ABI, darwin, ios-arm64, or ios-arm64-simulator" >&2; exit 1 ;;
   esac
 done
-key=$(cat bare-kit.sh patches/*.patch | shasum -a 256 | cut -c1-16)
+key=$( { cat bare-kit.sh patches/*.patch; echo "$BARE_KIT $LIBQJS $LIBJS $QUICKJS"; } | shasum -a 256 | cut -c1-16)
 out="$cache/bare-kit-qjs-$key"
 # Not $TMPDIR: the build path ends up in the libraries (C __FILE__ strings,
 # and the module paths of bare's embedded JS bundle), and on a Mac $TMPDIR is
@@ -98,6 +98,7 @@ build() {
   log="$work/$name.log"
   echo "Building bare-kit on QuickJS for $name (log: $log)"
   { cmake -S "$work/src/bare-kit" -B "$work/$name" -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+      "-DCMAKE_C_FLAGS=-I$work/$name/_deps/github+libuv+libuv-src/include" \
       "-DBARE_ENGINE=github:holepunchto/libqjs#$LIBQJS" \
       "-DFETCHCONTENT_SOURCE_DIR_GITHUB+HOLEPUNCHTO+LIBQJS=$work/src/libqjs" \
       "-DFETCHCONTENT_SOURCE_DIR_GITHUB+HOLEPUNCHTO+LIBJS=$work/src/libjs" \

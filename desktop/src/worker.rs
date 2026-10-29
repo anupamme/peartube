@@ -2,8 +2,8 @@
 //! is the relay's own core. We talk to it in newline-delimited JSON over
 //! bare-kit's IPC pipes; worker.js documents the messages.
 
-use std::collections::HashMap;
-use std::ffi::{CString, c_char, c_int};
+use std::collections::{HashMap, VecDeque};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -333,6 +333,17 @@ struct BareWorklet {
 }
 
 #[repr(C)]
+struct BareIpcPoll {
+    _private: [u8; 0],
+}
+
+type IpcPollCb = extern "C" fn(*mut BareIpcPoll, c_int);
+
+const IPC_READABLE: c_int = 0x1;
+const IPC_WRITABLE: c_int = 0x2;
+const IPC_WOULD_BLOCK: c_int = -1;
+
+#[repr(C)]
 struct BareIpc {
     _opaque: [u8; 0],
 }
@@ -345,8 +356,14 @@ unsafe extern "C" {
     fn bare_worklet_resume(worklet: *mut BareWorklet) -> c_int;
     fn bare_ipc_alloc(result: *mut *mut BareIpc) -> c_int;
     fn bare_ipc_init(ipc: *mut BareIpc, worklet: *mut BareWorklet) -> c_int;
-    fn bare_ipc_get_incoming(ipc: *mut BareIpc) -> c_int;
-    fn bare_ipc_get_outgoing(ipc: *mut BareIpc) -> c_int;
+    fn bare_ipc_read(ipc: *mut BareIpc, data: *mut c_void, len: usize) -> c_int;
+    fn bare_ipc_write(ipc: *mut BareIpc, data: *const c_void, len: usize) -> c_int;
+    fn bare_ipc_poll_alloc(result: *mut *mut BareIpcPoll) -> c_int;
+    fn bare_ipc_poll_init(poll: *mut BareIpcPoll, ipc: *mut BareIpc) -> c_int;
+    fn bare_ipc_poll_start(poll: *mut BareIpcPoll, events: c_int, cb: IpcPollCb) -> c_int;
+    fn bare_ipc_poll_stop(poll: *mut BareIpcPoll) -> c_int;
+    fn bare_ipc_poll_set_data(poll: *mut BareIpcPoll, data: *mut c_void);
+    fn bare_ipc_poll_get_data(poll: *mut BareIpcPoll) -> *mut c_void;
 }
 
 type Reply = Result<Value, String>;
@@ -358,10 +375,115 @@ struct Shared {
     subscribers: Mutex<Vec<mpsc::UnboundedSender<Event>>>,
 }
 
+struct IpcCtx {
+    shared: Arc<Shared>,
+    ipc: *mut BareIpc,
+    poll: *mut BareIpcPoll,
+    outbox: Mutex<VecDeque<Vec<u8>>>,
+    buffered: Mutex<Vec<u8>>,
+    writing: Mutex<()>,
+}
+
+unsafe impl Send for IpcCtx {}
+unsafe impl Sync for IpcCtx {}
+
+extern "C" fn ipc_callback(poll: *mut BareIpcPoll, events: c_int) {
+    let data = unsafe { bare_ipc_poll_get_data(poll) } as *const IpcCtx;
+    if data.is_null() {
+        return;
+    }
+    let ctx = unsafe { &*data };
+    if events & IPC_READABLE != 0 {
+        ctx.read_all();
+    }
+    if events & IPC_WRITABLE != 0 {
+        let _ = ctx.flush();
+    }
+}
+
+impl IpcCtx {
+    fn watch(&self, writable: bool) {
+        unsafe {
+            bare_ipc_poll_stop(self.poll);
+            let events = IPC_READABLE | if writable { IPC_WRITABLE } else { 0 };
+            bare_ipc_poll_start(self.poll, events, ipc_callback);
+        }
+    }
+
+    fn read_all(&self) {
+        let mut chunk = vec![0u8; 64 * 1024];
+        loop {
+            let n = unsafe { bare_ipc_read(self.ipc, chunk.as_mut_ptr().cast(), chunk.len()) };
+            if n > 0 {
+                let mut buffered = self.buffered.lock();
+                buffered.extend_from_slice(&chunk[..n as usize]);
+                while let Some(end) = buffered.iter().position(|&b| b == b'\n') {
+                    let line: Vec<u8> = buffered.drain(..=end).collect();
+                    drop(buffered);
+                    self.shared.dispatch(&line[..end]);
+                    buffered = self.buffered.lock();
+                }
+                continue;
+            }
+            if n == IPC_WOULD_BLOCK {
+                break;
+            }
+            self.shared.pending.lock().clear();
+            self.shared.broadcast(Event::Exited);
+            break;
+        }
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        let _writer = self.writing.lock();
+        loop {
+            let front = self.outbox.lock().front().cloned();
+            let Some(bytes) = front else {
+                self.watch(false);
+                return Ok(());
+            };
+            let n = unsafe { bare_ipc_write(self.ipc, bytes.as_ptr().cast(), bytes.len()) };
+            if n >= 0 {
+                let mut outbox = self.outbox.lock();
+                if let Some(entry) = outbox.front_mut() {
+                    entry.drain(..(n as usize).min(entry.len()));
+                    if entry.is_empty() {
+                        outbox.pop_front();
+                    }
+                }
+                continue;
+            }
+            if n == IPC_WOULD_BLOCK {
+                self.watch(true);
+                return Ok(());
+            }
+            return Err("The P2P worker stopped".to_string());
+        }
+    }
+
+    fn send(&self, bytes: Vec<u8>) -> Result<(), String> {
+        let _writer = self.writing.lock();
+        let n = unsafe { bare_ipc_write(self.ipc, bytes.as_ptr().cast(), bytes.len()) };
+        if n >= 0 {
+            if n as usize == bytes.len() {
+                return Ok(());
+            }
+            self.outbox.lock().push_back(bytes[n as usize..].to_vec());
+        } else if n == IPC_WOULD_BLOCK {
+            self.outbox.lock().push_back(bytes);
+        } else {
+            return Err("The P2P worker stopped".to_string());
+        }
+        self.watch(true);
+        Ok(())
+    }
+}
+
 pub struct Worker {
     worklet: *mut BareWorklet,
-    outgoing: c_int,
-    write: Mutex<()>,
+    ipc: *mut BareIpc,
+    poll: *mut BareIpcPoll,
+    ctx: Arc<IpcCtx>,
     next_id: AtomicU64,
     shared: Arc<Shared>,
 }
@@ -383,7 +505,7 @@ impl Worker {
         std::fs::create_dir_all(assets).map_err(|err| format!("Cannot create {}: {err}", assets.display()))?;
         let assets = CString::new(assets.to_string_lossy().as_bytes()).map_err(|err| err.to_string())?;
         let source = UvBuf { base: BUNDLE.as_ptr().cast(), len: BUNDLE.len() };
-        let (incoming, outgoing, worklet) = unsafe {
+        let (worklet, ipc, poll) = unsafe {
             // A write to a worklet that has exited must fail with EPIPE, not kill the app.
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
             let mut worklet = std::ptr::null_mut();
@@ -395,15 +517,25 @@ impl Worker {
             let mut ipc = std::ptr::null_mut();
             check(bare_ipc_alloc(&mut ipc), "IPC alloc")?;
             check(bare_ipc_init(ipc, worklet), "IPC init")?;
-            (bare_ipc_get_incoming(ipc), bare_ipc_get_outgoing(ipc), worklet)
+            let mut poll = std::ptr::null_mut();
+            check(bare_ipc_poll_alloc(&mut poll), "IPC poll alloc")?;
+            check(bare_ipc_poll_init(poll, ipc), "IPC poll init")?;
+            (worklet, ipc, poll)
         };
         let shared = Arc::new(Shared::default());
-        let reader = shared.clone();
-        std::thread::Builder::new()
-            .name("peartube-ipc".into())
-            .spawn(move || reader.read(incoming))
-            .map_err(|err| err.to_string())?;
-        Ok(Worker { worklet, outgoing, write: Mutex::new(()), next_id: AtomicU64::new(1), shared })
+        let ctx = Arc::new(IpcCtx {
+            shared: shared.clone(),
+            ipc,
+            poll,
+            outbox: Mutex::new(VecDeque::new()),
+            buffered: Mutex::new(Vec::new()),
+            writing: Mutex::new(()),
+        });
+        unsafe {
+            bare_ipc_poll_set_data(poll, Arc::as_ptr(&ctx) as *const c_void as *mut c_void);
+            check(bare_ipc_poll_start(poll, IPC_READABLE, ipc_callback), "IPC poll start")?;
+        }
+        Ok(Worker { worklet, ipc, poll, ctx, next_id: AtomicU64::new(1), shared })
     }
 
     pub async fn start(&self, settings: &Settings) -> Result<Status, String> {
@@ -542,59 +674,16 @@ impl Worker {
         self.shared.pending.lock().insert(id, tx);
         let mut line = serde_json::to_vec(&json!({ "id": id, "method": method, "params": params })).map_err(|err| err.to_string())?;
         line.push(b'\n');
-        if let Err(err) = self.write_all(&line) {
+        if let Err(err) = self.ctx.send(line) {
             self.shared.pending.lock().remove(&id);
             return Err(err);
         }
         rx.await.map_err(|_| "The P2P worker stopped".to_string())?
     }
 
-    fn write_all(&self, mut bytes: &[u8]) -> Result<(), String> {
-        let _one_writer = self.write.lock();
-        while !bytes.is_empty() {
-            let n = unsafe { libc::write(self.outgoing, bytes.as_ptr().cast(), bytes.len()) };
-            if n >= 0 {
-                bytes = &bytes[n as usize..];
-                continue;
-            }
-            let err = std::io::Error::last_os_error();
-            match err.raw_os_error() {
-                Some(libc::EAGAIN) => wait(self.outgoing, libc::POLLOUT),
-                Some(libc::EINTR) => {}
-                _ => return Err(format!("Cannot reach the P2P worker: {err}")),
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Shared {
-    fn read(&self, fd: c_int) {
-        let mut chunk = vec![0u8; 64 * 1024];
-        let mut buffered = Vec::new();
-        loop {
-            let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-            if n > 0 {
-                buffered.extend_from_slice(&chunk[..n as usize]);
-                while let Some(end) = buffered.iter().position(|&b| b == b'\n') {
-                    let line: Vec<u8> = buffered.drain(..=end).collect();
-                    self.dispatch(&line[..end]);
-                }
-                continue;
-            }
-            if n == 0 {
-                break;
-            }
-            match std::io::Error::last_os_error().raw_os_error() {
-                Some(libc::EAGAIN) => wait(fd, libc::POLLIN),
-                Some(libc::EINTR) => {}
-                _ => break,
-            }
-        }
-        // Dropping the senders fails every call still waiting for a reply.
-        self.pending.lock().clear();
-        self.broadcast(Event::Exited);
-    }
 
     fn dispatch(&self, line: &[u8]) {
         let msg = match serde_json::from_slice::<Value>(line) {
@@ -649,10 +738,6 @@ fn check(code: c_int, what: &str) -> Result<(), String> {
     if code == 0 { Ok(()) } else { Err(format!("bare-kit {what} failed ({code})")) }
 }
 
-fn wait(fd: c_int, events: libc::c_short) {
-    let mut poll = libc::pollfd { fd, events, revents: 0 };
-    unsafe { libc::poll(&mut poll, 1, -1) };
-}
 
 fn non_empty(list: &[String]) -> Option<&[String]> {
     if list.is_empty() { None } else { Some(list) }
