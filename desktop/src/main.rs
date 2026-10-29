@@ -13,6 +13,7 @@ mod settings_screen;
 mod theme;
 mod video;
 
+use std::sync::Arc;
 use std::borrow::Cow;
 
 use gpui_kit::assets::{Assets, icon_assets};
@@ -51,6 +52,7 @@ fn main() {
             let _ = url_tx.unbounded_send(arg);
         }
     }
+    // GPUI's default client is a null one: artwork never loads without this.
     let app = gpui_kit::application().with_assets(AppAssets);
     app.on_open_urls(move |urls| {
         for url in urls {

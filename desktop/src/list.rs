@@ -113,6 +113,18 @@ pub fn column() -> Div {
     v_flex().w_full().max_w(px(920.)).mx_auto().px_6()
 }
 
+/// The poster the app's own loopback API serves for an IMDb-identified title.
+pub fn poster_uri(entry: &Entry) -> Option<String> {
+    let tt = entry.id.strip_prefix("imdb:")?.split(':').next()?;
+    if tt.len() < 7 || tt.len() > 11 || !tt.starts_with("tt") || !tt[2..].bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Blocked on the artwork crash: GPUI's image path aborts the app the moment a fetch runs.
+    // The worklet already serves /v1/poster/{tt}; this hook returns None until that pipeline lands.
+    let _ = tt;
+    None
+}
+
 enum CatalogItem<'a> {
     Movie(&'a Entry, usize),
     Series {
@@ -178,6 +190,31 @@ impl PearTube {
             catalog.push((title.to_lowercase(), CatalogItem::Series { group_key: gk, title, episodes: eps }));
         }
         catalog.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Continue watching: newest first, one card per title (episodes of a show collapse to the
+        // latest), so the hero is what you actually stopped on.
+        let mut resume: Vec<(Entry, u64, f32)> = self
+            .entries
+            .iter()
+            .filter_map(|e| {
+                let prog = self.watch_history.get(&e.id)?;
+                if prog.duration_ms == 0 { return None }
+                let pos = self.resume_position_for(e);
+                if pos == 0 { return None }
+                let ratio = (prog.position_ms as f32 / prog.duration_ms as f32).clamp(0.01, 1.);
+                if ratio >= 0.98 { return None }
+                Some((e.clone(), pos, ratio))
+            })
+            .collect();
+        resume.sort_by(|a, b| {
+            let ua = self.watch_history.get(&a.0.id).map_or(0, |w| w.updated_at);
+            let ub = self.watch_history.get(&b.0.id).map_or(0, |w| w.updated_at);
+            ub.cmp(&ua)
+        });
+        let mut seen_titles = BTreeSet::new();
+        resume.retain(|(e, _, _)| seen_titles.insert(series_group_key(e)));
+        resume.truncate(8);
+        let browse = query.is_empty();
 
         let empty_msg = if self.entries.is_empty() {
             if self.status.is_none() { "Connecting to your private cinema…" } else { "Your library is quiet. Waiting for peers or channels to sync…" }
@@ -329,6 +366,18 @@ impl PearTube {
                     column()
                         .py_5()
                         .gap_3()
+                        .when(browse && !resume.is_empty(), |this| this.child(self.render_hero(&resume[0], cx)))
+                        .when(browse && resume.len() > 1, |this| this.child(self.render_rail(&resume[1..], cx)))
+                        .when(browse && !catalog.is_empty(), |this| {
+                            this.child(
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .pt_2()
+                                    .child(div().text_lg().font_weight(FontWeight::BOLD).child("In your library"))
+                                    .child(div().text_xs().text_color(rgb(DIM)).child(format!("{} titles", catalog.len()))),
+                            )
+                        })
                         .when(catalog.is_empty(), |this| {
                             this.child(div().py_16().text_center().text_color(rgb(DIM)).child(empty_msg))
                         })
@@ -363,6 +412,160 @@ impl PearTube {
                 cx.notify();
             }))
             .child(label.to_string())
+    }
+
+    /// The one thing you were watching, at the size it deserves.
+    fn render_hero(&self, item: &(Entry, u64, f32), cx: &mut Context<Self>) -> impl IntoElement {
+        let (entry, resume_ms, ratio) = item;
+        let (title, year) = split_title_year(&entry.title);
+        let mut meta = vec![label(&entry.id), format_bytes(entry.size)];
+        if let Some(y) = year {
+            meta.push(y);
+        }
+        let meta_line = meta.join(" · ");
+        let pct = (ratio * 100.).round() as u32;
+        let resume_entry = entry.clone();
+        let restart_entry = entry.clone();
+        let start_at = *resume_ms;
+
+        v_flex()
+            .id("hero")
+            .rounded(px(18.))
+            .bg(rgb(CARD))
+            .border_1()
+            .border_color(rgb(LINE))
+            .p_6()
+            .child(
+                h_flex()
+                    .gap_5()
+                    .items_start()
+                    .when_some(poster_uri(entry), |this, uri| {
+                        this.child(
+                            div()
+                                .w(px(132.))
+                                .h(px(198.))
+                                .flex_none()
+                                .rounded(px(12.))
+                                .overflow_hidden()
+                                .bg(rgb(BG))
+                                .child(img(uri).size_full().object_fit(ObjectFit::Cover)),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(DIM))
+                                    .child("CONTINUE WATCHING"),
+                            )
+                            .child(div().text_3xl().font_weight(FontWeight::BOLD).child(title))
+                            .child(div().text_sm().text_color(rgb(DIM)).child(meta_line))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .h(px(4.))
+                                            .rounded(px(2.))
+                                            .bg(hsla(0., 0., 1., 0.08))
+                                            .child(
+                                                div()
+                                                    .h_full()
+                                                    .rounded(px(2.))
+                                                    .w(relative(*ratio))
+                                                    .bg(rgb(BRAND)),
+                                            ),
+                                    )
+                                    .child(div().text_xs().text_color(rgb(DIM)).child(format!("{pct}%"))),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Button::new("hero-resume").primary().label("Resume").on_click(
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.activate_entry(resume_entry.clone(), Some(start_at), window, cx)
+                                        }),
+                                    ))
+                                    .child(Button::new("hero-restart").label("Start over").on_click(
+                                        cx.listener(move |this, _, window, cx| {
+                                            this.activate_entry(restart_entry.clone(), Some(0), window, cx)
+                                        }),
+                                    )),
+                            ),
+                    ),
+            )
+    }
+
+    /// Everything else in progress, on one horizontal line.
+    fn render_rail(&self, items: &[(Entry, u64, f32)], cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(div().text_lg().font_weight(FontWeight::BOLD).child("Continue watching"))
+                    .child(div().text_xs().text_color(rgb(DIM)).child(format!("{}", items.len()))),
+            )
+            .child(
+                h_flex()
+                    .id("continue-rail")
+                    .w_full()
+                    .gap_3()
+                    .overflow_x_scroll()
+                    .children(items.iter().map(|(entry, pos, ratio)| {
+                        let (title, _) = split_title_year(&entry.title);
+                        let kind = label(&entry.id);
+                        let play = entry.clone();
+                        let start_at = *pos;
+                        let fill = *ratio;
+                        v_flex()
+                            .id(SharedString::from(format!("rail-{}", entry.key)))
+                            .w(px(170.))
+                            .flex_none()
+                            .rounded(px(14.))
+                            .bg(rgb(CARD))
+                            .border_1()
+                            .border_color(rgb(LINE))
+                            .overflow_hidden()
+                            .when_some(poster_uri(entry), |this, uri| {
+                                this.child(
+                                    div()
+                                        .w_full()
+                                        .h(px(255.))
+                                        .bg(rgb(BG))
+                                        .child(img(uri).size_full().object_fit(ObjectFit::Cover)),
+                                )
+                            })
+                            .cursor_pointer()
+                            .hover(|s| {
+                                s.bg(rgb(CARD_ELEVATED))
+                                    .border_color(hsla(264. / 360., 0.6, 0.65, 0.45))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.activate_entry(play.clone(), Some(start_at), window, cx)
+                            }))
+                            .p_3()
+                            .gap_2()
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).truncate().child(title))
+                            .child(div().text_xs().text_color(rgb(DIM)).child(kind))
+                            .child(
+                                div()
+                                    .h(px(3.))
+                                    .w_full()
+                                    .rounded(px(2.))
+                                    .bg(hsla(0., 0., 1., 0.06))
+                                    .child(div().h_full().rounded(px(2.)).w(relative(fill)).bg(rgb(BRAND))),
+                            )
+                    })),
+            )
     }
 
     fn render_movie_card(&self, entry: &Entry, alt_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
@@ -418,6 +621,18 @@ impl PearTube {
                     .gap_4()
                     .px_4()
                     .py_3p5()
+                    .when_some(poster_uri(entry), |this, uri| {
+                        this.child(
+                            div()
+                                .w(px(44.))
+                                .h(px(66.))
+                                .flex_none()
+                                .rounded(px(8.))
+                                .overflow_hidden()
+                                .bg(rgb(BG))
+                                .child(img(uri).size_full().object_fit(ObjectFit::Cover)),
+                        )
+                    })
                     .child(
                         v_flex()
                             .flex_1()

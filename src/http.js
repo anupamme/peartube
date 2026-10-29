@@ -318,11 +318,12 @@ export function createApi (state) {
       req.once('close', () => sse.delete(res))
       return
     }
-    const posterMatch = req.method === 'GET' && state.posterUrl && url.pathname.match(/^\/v1\/poster\/(tt\d{5,10})$/)
-    if (posterMatch) {
-      // Cinemeta's poster for an identified entry; a redirect keeps image bytes off the relay.
-      const poster = await state.posterUrl(posterMatch[1]).catch(() => null)
-      res.writeHead(poster ? 302 : 404, poster ? { ...CORS, location: poster, 'cache-control': 'max-age=86400' } : CORS)
+    const artMatch = req.method === 'GET' && url.pathname.match(/^\/v1\/(poster|backdrop)\/(tt\d{5,10})$/)
+    if (artMatch && (state.posterUrl || state.backdropUrl)) {
+      // Cinemeta's art for an identified entry; a redirect keeps image bytes off the relay.
+      const lookup = artMatch[1] === 'poster' ? state.posterUrl : state.backdropUrl
+      const art = lookup ? await lookup(artMatch[2]).catch(() => null) : null
+      res.writeHead(art ? 302 : 404, art ? { ...CORS, location: art, 'cache-control': 'max-age=86400' } : CORS)
       res.end()
       return
     }

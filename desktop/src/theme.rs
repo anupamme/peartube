@@ -1,18 +1,20 @@
-//! The Android app's palette (android/.../ui/Theme.kt), over gpui-component's
-//! dark theme, so its inputs, menus and buttons match the rest of the window.
+//! Both apps' palette, mirroring design/tokens.json (dark side): the Mac, Android and TV
+//! surfaces share one violet brand, one ink/dim pair, one green, and one radius language.
 
 use gpui_kit::component::{Theme, ThemeMode};
 use gpui_kit::{App, Hsla, px, rgb};
 
-pub const BG: u32 = 0x0a0c10;
-pub const CARD: u32 = 0x131720;
-pub const CARD_ELEVATED: u32 = 0x1a202c;
-pub const LINE: u32 = 0x232a38;
-pub const INK: u32 = 0xf3f5fa;
-pub const DIM: u32 = 0x8a93a6;
+pub const BG: u32 = 0x08090c;
+pub const CARD: u32 = 0x101218;
+pub const CARD_ELEVATED: u32 = 0x171a22;
+pub const LINE: u32 = 0x232733;
+pub const INK: u32 = 0xf2f4f8;
+pub const DIM: u32 = 0x98a0b3;
 pub const BRAND: u32 = 0x9147ff;
-pub const ACCENT: u32 = 0x4ade80;
-pub const DANGER: u32 = 0xff6b6b;
+pub const BRAND_HOVER: u32 = 0xa866ff;
+pub const RING: u32 = 0xb98bff;
+pub const ACCENT: u32 = 0x45d08a;
+pub const DANGER: u32 = 0xff7d7d;
 pub fn apply(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
     Theme::update(cx, |theme| {
@@ -27,16 +29,16 @@ pub fn apply(cx: &mut App) {
         theme.primary = brand;
         theme.primary_foreground = color(0xffffff);
         theme.button_primary = brand;
-        theme.button_primary_hover = brand.opacity(0.9);
-        theme.button_primary_active = brand.opacity(0.8);
+        theme.button_primary_hover = color(BRAND_HOVER);
+        theme.button_primary_active = brand;
         theme.button_primary_foreground = color(0xffffff);
-        theme.ring = brand;
+        theme.ring = color(RING);
         theme.caret = brand;
         theme.selection = brand.opacity(0.35);
         theme.slider_bar = brand;
         theme.slider_thumb = color(0xffffff);
         theme.danger = color(DANGER);
-        theme.font_size = px(14.);
-        theme.radius = px(12.);
+        theme.font_size = px(15.);
+        theme.radius = px(10.);
     });
 }

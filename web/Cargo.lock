@@ -974,6 +974,8 @@ dependencies = [
  "audio-trim",
  "codecs",
  "oxideav-core",
+ "oxideav-h264",
+ "oxideav-h265",
  "oxideav-pixfmt",
  "serde_json",
  "talc",

@@ -12,7 +12,7 @@ import { createMirrorHost } from '../src/mirror.js'
 import { createCastController } from '../src/cast.js'
 import { lanAddress } from '../src/lan.js'
 import { createSettings } from '../src/settings.js'
-import { identify, posterUrl } from '../src/identify.js'
+import { identify, posterUrl, backdropUrl } from '../src/identify.js'
 
 const env = process.env
 
@@ -142,6 +142,7 @@ const state = {
   settings,
   identify: link => identify(link, { cinemetaUrl: cfg('cinemetaUrl') }),
   posterUrl: imdb => posterUrl(cfg('cinemetaUrl'), imdb),
+  backdropUrl: imdb => backdropUrl(cfg('cinemetaUrl'), imdb),
   onSourcesChanged: saveSources,
   fallbackStatus: { tracker: cfg('tracker'), channel: '', writer: '', blobs: '', blobBytes: 0, cachedBytes: 0, peers: 0, lanPeers: 0, downBps: 0, upBps: 0, rxBytes: 0, txBytes: 0, routes: { private: emptyRoute(), public: emptyRoute(), lan: emptyRoute() }, inflightBlocks: 0, rtt: 0, retransmits: 0, sources: [], reciprocity: { tier: 'leecher', seededBytes: 0, contributingPeers: 0, ratio: 0, inflightMax: 64 } },
   fallbackJobs () {

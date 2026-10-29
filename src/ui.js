@@ -6,86 +6,149 @@ export const page = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>PearTube</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6fed'/%3E%3Cpath d='M12 9l12 7-12 7z' fill='white'/%3E%3C/svg%3E">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('peartube-theme')||'system'}catch(e){document.documentElement.dataset.theme='system'}</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%239147ff'/%3E%3Cpath d='M12 9l12 7-12 7z' fill='white'/%3E%3C/svg%3E">
 <style>
-  :root { color-scheme: light dark; --bg: #f5f6f8; --surface: #fff; --raised: #eef0f4; --line: #dde1e8; --text: #14171d; --dim: #596172; --brand: #2f6fed; --brand-hover: #2459c9; --ok: #17804a; --warn: #9a5b00; --bad: #c42b2b; --focus: #2f6fed55; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #0f1115; --surface: #171a21; --raised: #1f232c; --line: #2a303c; --text: #e8eaf0; --dim: #9aa2b4; --brand: #4c8dff; --brand-hover: #6aa0ff; --ok: #4cc38a; --warn: #e3ac52; --bad: #ff8f8f; --focus: #4c8dff66; } }
+  /* design/tokens.json, hand-kept here because the relay must ship without a build step.
+     Brand: violet (#9147ff) — the Mac, Android and TV surfaces already wear it. */
+  :root { color-scheme: dark; --bg:#08090c; --surface:#101218; --raised:#171a22; --line:#232733; --text:#f2f4f8; --dim:#98a0b3;
+    --brand:#9147ff; --brand-hover:#a866ff; --brand-soft:rgba(145,71,255,.16); --ring:#b98bff; --on-brand:#fff;
+    --ok:#45d08a; --warn:#e8b45c; --bad:#ff7d7d; --focus:var(--ring); --live:#e11d48;
+    --on-media:#f7f8fb; --on-media-dim:rgba(247,248,251,.74); --on-media-line:rgba(255,255,255,.3);
+    --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px; --s7:48px;
+    --r-control:10px; --r-card:14px; --r-panel:18px; --r-pill:999px;
+    --t-fast:120ms; --t-base:160ms; --ease:cubic-bezier(.2,.8,.2,1); }
+  html[data-theme='light'] { color-scheme: light; --bg:#f7f8fa; --surface:#fff; --raised:#eef1f6; --line:#e3e7ee; --text:#0d1016; --dim:#5b6475;
+    --brand:#7c3aed; --brand-hover:#6d28d9; --brand-soft:rgba(124,58,237,.12); --ring:#7c3aed;
+    --ok:#127a48; --warn:#8a5200; --bad:#b3261e; --live:#be123c; }
+  @media (prefers-color-scheme: light) { html[data-theme='system'], html:not([data-theme]) { color-scheme: light; --bg:#f7f8fa; --surface:#fff; --raised:#eef1f6; --line:#e3e7ee; --text:#0d1016; --dim:#5b6475;
+    --brand:#7c3aed; --brand-hover:#6d28d9; --brand-soft:rgba(124,58,237,.12); --ring:#7c3aed;
+    --ok:#127a48; --warn:#8a5200; --bad:#b3261e; --live:#be123c; } }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
-  body { margin: 0; font: 15px/1.45 system-ui, -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+  body { margin: 0; font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif; letter-spacing: -0.005em; -webkit-font-smoothing: antialiased; background: var(--bg); color: var(--text); }
   a { color: var(--brand); }
-  .top { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--line); }
-  .bar { max-width: 1080px; margin: 0 auto; padding: 10px 16px 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); text-decoration: none; }
-  .brand svg { width: 26px; height: 26px; }
-  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
-  .pill { font-size: 13px; padding: 3px 10px; border-radius: 99px; background: var(--raised); color: var(--dim); white-space: nowrap; }
-  .pill b { color: var(--text); font-weight: 600; }
+  .top { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(18px) saturate(1.3); border-bottom: 1px solid var(--line); }
+  .bar { max-width: 1440px; margin: 0 auto; padding: 14px 28px 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: -0.02em; color: var(--text); text-decoration: none; }
+  .brand svg { width: 30px; height: 30px; border-radius: 9px; background: var(--brand); box-shadow: 0 6px 18px var(--brand-soft); }
+  .brand svg rect { fill: transparent; }
+  .brand svg path { fill: var(--on-brand); }
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .bar-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  .theme-toggle { min-height: 34px; padding: 0 10px; color: var(--dim); }
+  .theme-toggle:hover:not(:disabled) { color: var(--text); }
+  .pill { font-size: 12px; font-weight: 500; padding: 4px 10px; border-radius: var(--r-pill); background: var(--raised); color: var(--dim); white-space: nowrap; }
+  .pill b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .pill.warn { color: var(--warn); }
-  .pill.ok::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; vertical-align: 1px; }
-  .tabs { max-width: 1080px; margin: 0 auto; padding: 0 8px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
-  .tabs a { padding: 12px 12px 10px; color: var(--dim); text-decoration: none; font-weight: 600; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .pill.ok::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; vertical-align: 1px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
+  .tabs { max-width: 1440px; margin: 0 auto; padding: 0 20px; display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+  .tabs a { padding: 12px 14px 11px; color: var(--dim); text-decoration: none; font-size: 14px; font-weight: 600; border-bottom: 2px solid transparent; white-space: nowrap; transition: color var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
+  .tabs a:hover { color: var(--text); }
   .tabs a[aria-current='page'] { color: var(--text); border-bottom-color: var(--brand); }
-  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 96px; }
-  h2 { font-size: 16px; margin: 28px 0 10px; display: flex; align-items: center; gap: 8px; }
-  h2 .count { color: var(--dim); font-weight: 500; }
-  h3 { font-size: 15px; margin: 0 0 4px; }
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+  main { max-width: 1440px; margin: 0 auto; padding: 24px 28px 96px; }
+  h2 { font-size: 20px; font-weight: 700; letter-spacing: -0.015em; margin: 40px 0 16px; display: flex; align-items: baseline; gap: 10px; }
+  h2 .count { color: var(--dim); font-weight: 500; font-size: 13px; font-variant-numeric: tabular-nums; }
+  h3 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-panel); padding: 18px; margin-bottom: 14px; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .label, label { font-weight: 600; font-size: 14px; }
-  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
-  .hint { color: var(--dim); font-size: 13px; }
-  input[type=text], input[type=url], input[type=number], input[type=password], input[type=search], select { min-height: 42px; width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font: inherit; }
-  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid var(--focus); outline-offset: 1px; }
-  .btn { min-height: 40px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--line); background: var(--raised); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
-  .btn:hover:not(:disabled) { border-color: var(--dim); }
-  .btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
-  .btn.primary:hover:not(:disabled) { background: var(--brand-hover); }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .hint { color: var(--dim); font-size: 12.5px; }
+  input[type=text], input[type=url], input[type=number], input[type=password], input[type=search], select { min-height: 42px; width: 100%; background: var(--raised); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-control); padding: 8px 12px; font: inherit; transition: border-color var(--t-fast) var(--ease); }
+  input::placeholder { color: var(--dim); }
+  input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+  .btn { min-height: 38px; padding: 0 16px; border-radius: var(--r-control); border: 1px solid var(--line); background: var(--raised); color: var(--text); font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 7px; transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease), transform var(--t-fast) var(--ease); }
+  .btn:hover:not(:disabled) { border-color: color-mix(in srgb, var(--dim) 45%, transparent); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+  .btn.primary:hover:not(:disabled) { background: var(--brand-hover); border-color: var(--brand-hover); }
   .btn.quiet { background: transparent; border-color: transparent; color: var(--dim); }
   .btn.quiet:hover:not(:disabled) { color: var(--text); border-color: var(--line); }
   .btn:disabled { opacity: .5; cursor: default; }
-  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-  .chip { min-height: 40px; padding: 0 14px; border-radius: 99px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; cursor: pointer; }
-  .chip[aria-expanded='true'] { background: var(--raised); border-color: var(--brand); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .chip { min-height: 32px; padding: 0 14px; border-radius: var(--r-pill); border: 1px solid var(--line); background: transparent; color: var(--dim); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; transition: color var(--t-fast) var(--ease), background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
+  .chip:hover { color: var(--text); border-color: color-mix(in srgb, var(--dim) 45%, transparent); }
+  .chip[aria-expanded='true'] { background: var(--raised); color: var(--text); border-color: var(--brand); }
   .panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
   .list { display: flex; flex-direction: column; gap: 8px; }
-  .item { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; gap: 12px; align-items: center; }
+  /* Jobs are ephemeral: keep them from pushing the library below the fold. */
+  #jobs { max-height: 268px; overflow-y: auto; scrollbar-width: thin; padding-right: 4px; }
+  .item.job { padding: 10px 14px; }
+  .item.job .name { font-size: 14px; }
+  .item { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-card); padding: 14px; display: flex; gap: 14px; align-items: center; transition: border-color var(--t-fast) var(--ease); }
+  .item:hover { border-color: color-mix(in srgb, var(--dim) 35%, var(--line)); }
   .item .info { flex: 1; min-width: 0; }
   .item .name { font-weight: 600; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
-  .meta { color: var(--dim); font-size: 13px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--dim); font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-  .poster { width: 48px; height: 72px; border-radius: 6px; flex: none; background: var(--raised); object-fit: cover; display: flex; align-items: center; justify-content: center; color: var(--dim); font-weight: 700; font-size: 18px; overflow: hidden; }
+  .poster { width: 48px; height: 72px; border-radius: 8px; flex: none; background: var(--raised); object-fit: cover; display: flex; align-items: center; justify-content: center; color: var(--dim); font-weight: 700; font-size: 18px; overflow: hidden; }
   .thumb { width: 128px; height: 72px; }
-  .lib-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .lib-tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
   .lib-tools .kinds { display: flex; gap: 6px; flex-wrap: wrap; }
   .lib-tools input { flex: 1; min-width: 200px; width: auto; }
   .chip[aria-pressed='true'] { background: var(--text); color: var(--bg); border-color: var(--text); }
-  .chip .count { opacity: .7; font-size: 13px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px 14px; }
+  .chip .count { opacity: .7; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 24px 16px; }
   .tile { display: flex; flex-direction: column; gap: 2px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; min-width: 0; }
-  .tile .poster { width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: 10px; font-size: 40px; margin-bottom: 6px; background: linear-gradient(160deg, var(--raised), var(--line)); transition: transform .15s, box-shadow .15s; }
+  .tile .poster { width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: var(--r-card); font-size: 40px; margin-bottom: 8px; background: linear-gradient(160deg, var(--raised), var(--line)); box-shadow: 0 0 0 1px var(--line); transition: transform var(--t-base) var(--ease), box-shadow var(--t-base) var(--ease); }
   .grid > .empty { grid-column: 1 / -1; }
-  .tile:hover .poster, .tile:focus-visible .poster { transform: translateY(-2px); box-shadow: 0 6px 18px #0004; }
+  .tile:hover .poster { transform: translateY(-4px); box-shadow: 0 22px 44px rgba(0,0,0,.45), 0 0 0 1px color-mix(in srgb, var(--ring) 35%, transparent); }
   .tile:focus-visible { outline: none; }
-  .tile:focus-visible .poster { outline: 3px solid var(--focus); }
-  .tile-title { font-weight: 600; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .tile-meta { color: var(--dim); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile:focus-visible .poster { outline: 2px solid var(--ring); outline-offset: 3px; transform: translateY(-4px); }
+  .tile-title { font-weight: 600; font-size: 14px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .tile-meta { color: var(--dim); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tile-meta.ok { color: var(--ok); }
-  .more { grid-column: 1 / -1; display: flex; justify-content: center; padding: 8px; }
-  #detail { width: min(720px, calc(100% - 24px)); max-height: calc(100% - 48px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--text); }
-  #detail::backdrop { background: #0009; }
-  #detail .bar { padding: 10px 10px 0 16px; justify-content: flex-end; }
-  #detailBody { padding: 0 20px 20px; }
-  .detail-head { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
-  .detail-head .poster { width: 96px; height: 144px; font-size: 32px; }
-  .detail-head h3 { font-size: 20px; margin: 4px 0 6px; }
+  .tile-art { position: relative; }
+  .tile-progress { position: absolute; left: 8px; right: 8px; bottom: 8px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.28); overflow: hidden; }
+  .tile-progress > span { display: block; height: 100%; background: var(--brand); border-radius: 2px; }
+  .more { grid-column: 1 / -1; display: flex; justify-content: center; padding: 12px; }
+  /* Browse face: one hero, landscape rails, posters underneath — Netflix shape, YouTube rows,
+     torrent truth kept in the meta line instead of the layout. */
+  #resumeWrap, #liveWrap { margin-bottom: 32px; }
+  #hero { position: relative; overflow: hidden; border-radius: var(--r-panel); border: 1px solid var(--line); min-height: 372px; display: flex; align-items: flex-end; margin-bottom: 4px; background: linear-gradient(135deg, var(--raised), var(--surface)); }
+  #hero.no-art { min-height: 236px; }
+  #hero.no-art .hero-scrim { background: none; }
+  .hero-art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .hero-scrim { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(4,5,8,.95) 0%, rgba(4,5,8,.86) 34%, rgba(4,5,8,.16) 70%, rgba(4,5,8,.55) 100%); }
+  .hero-body { position: relative; padding: 32px; display: flex; flex-direction: column; gap: 12px; max-width: 640px; }
+  .hero-logo { max-width: 320px; max-height: 96px; object-fit: contain; object-position: left bottom; filter: drop-shadow(0 6px 24px rgba(0,0,0,.6)); margin-bottom: 2px; }
+  .hero-title { font-size: 40px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.06; margin: 0; color: var(--on-media); }
+  .hero-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--on-media-dim); font-size: 13.5px; }
+  .hero-progress { display: flex; align-items: center; gap: 12px; max-width: 360px; }
+  .hero-progress .bar-track { flex: 1; margin-top: 0; background: rgba(255,255,255,.24); }
+  .hero-progress span { color: var(--on-media-dim); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hero-actions { display: flex; gap: 10px; margin-top: 4px; }
+  #hero .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--on-media-dim); }
+  .hero-actions .btn.ghost { color: var(--on-media); border-color: var(--on-media-line); background: rgba(255,255,255,.10); }
+  .dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: .55; }
+  .rail { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+  .r-card { position: relative; display: block; padding: 0; border: 0; border-radius: var(--r-card); overflow: hidden; aspect-ratio: 16 / 9; background: var(--raised); box-shadow: 0 0 0 1px var(--line); cursor: pointer; text-align: left; color: inherit; font: inherit; transition: transform var(--t-base) var(--ease), box-shadow var(--t-base) var(--ease); }
+  .r-card > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .92; }
+  .r-card .wash { position: absolute; inset: 0; background: linear-gradient(0deg, rgba(4,5,8,.94) 0%, rgba(4,5,8,.18) 58%, rgba(4,5,8,0) 100%); }
+  .r-body { position: absolute; left: 0; right: 0; bottom: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 1px; }
+  .r-title { font-size: 13px; font-weight: 600; color: var(--on-media); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .r-meta { font-size: 11.5px; color: var(--on-media-dim); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .r-track { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255,255,255,.22); }
+  .r-track > div { height: 100%; background: var(--brand); }
+  .r-card:hover { transform: translateY(-3px); box-shadow: 0 18px 36px rgba(0,0,0,.45), 0 0 0 1px color-mix(in srgb, var(--ring) 40%, transparent); }
+  .r-card:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+  .badge.live { display: inline-flex; align-items: center; gap: 5px; background: var(--live); color: #fff; border: 0; align-self: flex-start; margin-bottom: 2px; }
+  .badge.live::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: #fff; }
+  .r-card.live .r-track { display: none; }
+  #detail { width: min(760px, calc(100% - 24px)); max-height: calc(100% - 48px); padding: 0; border: 1px solid var(--line); border-radius: var(--r-panel); background: var(--surface); color: var(--text); box-shadow: 0 40px 90px rgba(0,0,0,.5); }
+  #detail::backdrop { background: color-mix(in srgb, #05060a 72%, transparent); backdrop-filter: blur(6px); }
+  #detail .bar { padding: 14px 14px 0 22px; justify-content: flex-end; }
+  #detailBody { padding: 0 22px 22px; }
+  .detail-head { display: flex; gap: 20px; align-items: flex-start; margin-bottom: 20px; }
+  .detail-head .poster { width: 128px; height: 192px; font-size: 40px; border-radius: var(--r-card); }
+  .detail-head h3 { font-size: 24px; font-weight: 700; letter-spacing: -0.015em; line-height: 1.2; margin: 2px 0 8px; }
   .rows { display: flex; flex-direction: column; }
-  .row-item { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
-  #detail .meta { white-space: normal; }
-  .bar-track { height: 6px; background: var(--raised); border-radius: 3px; margin-top: 8px; overflow: hidden; }
-  .bar-track > div { height: 100%; background: var(--brand); transition: width .3s; }
-  .tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--raised); color: var(--dim); white-space: nowrap; font-weight: 500; }
+  .row-item { display: flex; gap: 12px; align-items: center; padding: 12px 0; border-top: 1px solid var(--line); }
+  #detail .meta { white-space: normal; font-size: 13px; line-height: 1.5; }
+  .bar-track { height: 3px; background: var(--raised); border-radius: 2px; margin-top: 10px; overflow: hidden; }
+  .bar-track > div { height: 100%; background: var(--brand); border-radius: 2px; transition: width var(--t-base) var(--ease); }
+  .tag { font-size: 11.5px; padding: 3px 9px; border-radius: var(--r-pill); background: var(--raised); color: var(--dim); white-space: nowrap; font-weight: 600; letter-spacing: .01em; }
   .tag.warn { color: var(--warn); }
   .tag.ok { color: var(--ok); }
   .tag.bad { color: var(--bad); }
@@ -94,7 +157,7 @@ export const page = `<!doctype html>
   .empty { color: var(--dim); padding: 24px 0; text-align: center; }
   .switch { position: relative; display: inline-flex; align-items: center; gap: 10px; cursor: pointer; min-height: 40px; }
   .switch input { appearance: none; width: 44px; height: 26px; border-radius: 13px; background: var(--line); position: relative; cursor: pointer; flex: none; margin: 0; transition: background .2s; }
-  .switch input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: transform .2s; box-shadow: 0 1px 2px #0004; }
+  .switch input::after { content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: var(--on-media); transition: transform .2s; box-shadow: 0 1px 2px #0004; }
   .switch input:checked { background: var(--brand); }
   .switch input:checked::after { transform: translateX(18px); }
   .switch input:disabled { opacity: .5; cursor: default; }
@@ -122,45 +185,71 @@ export const page = `<!doctype html>
   #castBar .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 50; background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px; max-width: calc(100% - 24px); }
   .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  @media (max-width: 600px) {
+  @media (max-width: 1100px) { .rail { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 640px) {
+    .bar { padding: 10px 16px 0; flex-wrap: nowrap; }
+    #hero { min-height: 300px; }
+    .hero-body { padding: 18px; gap: 8px; }
+    .hero-title { font-size: 26px; letter-spacing: -0.015em; }
+    .hero-logo { max-width: 190px; max-height: 58px; }
+    .hero-meta { font-size: 12px; gap: 7px; }
+    .rail { display: flex; overflow-x: auto; gap: 10px; scrollbar-width: none; padding-bottom: 2px; }
+    .rail .r-card { flex: 0 0 214px; }
+    .bar-right { min-width: 0; flex: 1; }
+    .pills { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; justify-content: flex-end; }
+    .pills::-webkit-scrollbar { display: none; }
+    .pill { flex: none; }
+    .pill.rate { display: none; }
+    .tabs { padding: 0 8px; }
+    main { padding: 16px 16px 96px; }
+    h2 { font-size: 18px; margin: 28px 0 12px; }
     .item { flex-wrap: wrap; }
     .item.job { flex-wrap: nowrap; }
     .item:not(.job) .acts { width: 100%; justify-content: flex-start; }
-    .tabs a { padding: 12px 9px 10px; }
+    .tabs a { padding: 12px 10px 10px; }
     .thumb { width: 96px; height: 54px; }
     .setting .control { max-width: none; }
-    .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 14px 10px; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 20px 10px; }
     .tile .poster { font-size: 28px; }
-    .detail-head .poster { width: 72px; height: 108px; font-size: 24px; }
+    .detail-head .poster { width: 96px; height: 144px; font-size: 30px; }
     .p-top { flex-wrap: wrap; }
     #playerModal .p-head { flex-basis: 100%; }
     #playerModal .p-title { white-space: normal; }
   }
-  #playerModal { position: fixed; inset: 0; background: rgba(7, 9, 13, .96); color: #e8eaf0; z-index: 100; display: none; flex-direction: column; }
+  /* The player is always dark chrome, in both themes: video wants black around it. */
+  #playerModal { --p-bg:#08090c; --p-surface:#101218; --p-raised:#171a22; --p-line:#232733; --p-text:#f2f4f8; --p-dim:#98a0b3;
+    position: fixed; inset: 0; background: var(--p-bg); color: var(--p-text); z-index: 100; display: none; flex-direction: column; }
   #playerModal.open { display: flex; }
-  #playerModal .btn { background: #262b36; border-color: #363d4d; color: #e8eaf0; min-height: 36px; padding: 0 12px; }
-  #playerModal .btn.primary { background: #2f6fed; border-color: #4c8dff; }
-  #playerModal select { background: #171a21; color: #e8eaf0; border-color: #363d4d; min-height: 36px; width: auto; }
-  .p-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 16px; background: rgba(15, 17, 21, .9); border-bottom: 1px solid #262b36; }
+  #playerModal .btn { background: var(--p-raised); border-color: var(--p-line); color: var(--p-text); min-height: 36px; padding: 0 12px; }
+  #playerModal .btn:hover:not(:disabled) { border-color: var(--p-dim); }
+  #playerModal .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+  #playerModal .btn.primary:hover:not(:disabled) { background: var(--brand-hover); border-color: var(--brand-hover); }
+  #playerModal select { background: var(--p-raised); color: var(--p-text); border-color: var(--p-line); min-height: 36px; width: auto; }
+  .p-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 16px; background: color-mix(in srgb, var(--p-surface) 92%, transparent); border-bottom: 1px solid var(--p-line); }
   .p-head { min-width: 0; flex: 1; }
   .p-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .p-badge { font-size: 12px; color: #9aa2b4; }
+  .p-badge { font-size: 12px; color: var(--p-dim); font-variant-numeric: tabular-nums; }
   .p-stage { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; background: #000; overflow: hidden; cursor: pointer; }
   #pVideo, #pGlCanvas, #pCanvas { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; display: none; }
   #pSubCanvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
-  #pSubText { position: absolute; left: 8%; right: 8%; bottom: 28px; text-align: center; font-size: clamp(16px, 2.2vw, 28px); font-weight: 600; color: #fff; text-shadow: 0 2px 6px #000, 0 0 3px #000, 1px 1px 0 #000, -1px -1px 0 #000; white-space: pre-wrap; pointer-events: none; }
-  #pStatus { position: absolute; padding: 8px 14px; border-radius: 8px; background: rgba(15, 17, 21, .82); border: 1px solid #262b36; font-size: 14px; pointer-events: none; display: none; }
-  .p-bar { padding: 10px 16px 14px; background: rgba(15, 17, 21, .94); border-top: 1px solid #262b36; display: flex; flex-direction: column; gap: 8px; }
+  #pSubText { position: absolute; left: 8%; right: 8%; bottom: 28px; text-align: center; font-size: clamp(16px, 2.2vw, 28px); font-weight: 600; color: var(--on-media); text-shadow: 0 2px 6px #000, 0 0 3px #000, 1px 1px 0 #000, -1px -1px 0 #000; white-space: pre-wrap; pointer-events: none; }
+  #pStatus { position: absolute; padding: 8px 14px; border-radius: var(--r-control); background: color-mix(in srgb, var(--p-surface) 88%, transparent); border: 1px solid var(--p-line); font-size: 13px; color: var(--p-text); pointer-events: none; display: none; }
+  .p-bar { padding: 10px 16px 14px; background: color-mix(in srgb, var(--p-surface) 94%, transparent); border-top: 1px solid var(--p-line); display: flex; flex-direction: column; gap: 8px; }
   .p-bar .row { justify-content: space-between; }
-  #pSeek { width: 100%; accent-color: #4c8dff; padding: 0; cursor: pointer; }
-  .clock { font-variant-numeric: tabular-nums; font-size: 13px; color: #9aa2b4; min-width: 96px; }
+  #pSeek { width: 100%; accent-color: var(--brand); padding: 0; cursor: pointer; }
+  .clock { font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--p-dim); min-width: 96px; }
 </style>
 </head>
 <body>
 <header class="top">
   <div class="bar">
-    <a class="brand" href="#library"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="#2f6fed"/><path d="M12 9l12 7-12 7z" fill="#fff"/></svg>PearTube</a>
-    <div class="pills" id="pills"></div>
+    <a class="brand" href="#library"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8"/><path d="M12 9l12 7-12 7z"/></svg>PearTube</a>
+    <div class="bar-right">
+      <div class="pills" id="pills"></div>
+      <button class="btn quiet theme-toggle" id="themeToggle" type="button" aria-label="Theme" title="Theme">
+        <svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="6.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10 3.4a6.6 6.6 0 010 13.2z" fill="currentColor"/></svg>
+      </button>
+    </div>
   </div>
   <nav class="tabs" aria-label="Sections">
     <a href="#library" data-tab="library">Library</a>
@@ -181,6 +270,9 @@ export const page = `<!doctype html>
   </form>
 
   <section id="tab-library" data-panel="library">
+    <section id="hero" hidden></section>
+    <div id="resumeWrap" hidden><h2>Continue watching <span class="count" id="resumeCount"></span></h2><div class="rail" id="resume"></div></div>
+    <div id="liveWrap" hidden><h2>Live <span class="count" id="liveCount"></span></h2><div class="rail" id="live"></div></div>
     <div class="card">
       <form id="addForm">
         <div class="field" style="margin:0">
@@ -190,7 +282,7 @@ export const page = `<!doctype html>
       </form>
       <div class="chips" role="group" aria-label="More ways to add">
         <button class="chip" type="button" data-opens="folderForm" aria-expanded="false">Import a folder</button>
-        <button class="chip" type="button" data-opens="feedForm" aria-expanded="false">Follow a feed</button>
+        <button class="chip" type="button" data-opens="feedForm" aria-expanded="false">Mirror a catalog</button>
         <button class="chip" type="button" data-opens="copyForm" aria-expanded="false">Copy a channel</button>
       </div>
       <form id="folderForm" class="panel" hidden>
@@ -202,8 +294,9 @@ export const page = `<!doctype html>
       </form>
       <form id="feedForm" class="panel" hidden>
         <div class="field">
-          <label for="feedInput">Feed address</label>
-          <div class="row"><input class="grow" id="feedInput" type="url" spellcheck="false" placeholder="https://example.org/catalog.json" required><button class="btn primary" type="submit">Follow</button></div>
+          <label for="feedInput">Catalog URL</label>
+          <div class="row"><input class="grow" id="feedInput" type="url" spellcheck="false" placeholder="https://example.org/catalog.json" required><button class="btn primary" type="submit">Mirror</button></div>
+          <span class="hint">JSON list of titles and source URLs; another relay's /v1/entries works.</span>
         </div>
         <div class="listedit" id="feedList"></div>
       </form>
@@ -334,7 +427,7 @@ export const page = `<!doctype html>
         <select id="pAudioSel" aria-label="Audio track"></select>
         <select id="pSubSel" aria-label="Subtitles"></select>
         <button class="btn" id="pMuteBtn" type="button">Mute</button>
-        <input type="range" id="pVol" min="0" max="100" value="100" style="width:80px;padding:0;accent-color:#4c8dff" aria-label="Volume">
+        <input type="range" id="pVol" min="0" max="100" value="100" style="width:80px;padding:0;accent-color:var(--brand)" aria-label="Volume">
       </div>
     </div>
   </div>
@@ -421,7 +514,7 @@ function copyText (text) {
 const copyBtn = (label, text) => h('button', { class: 'btn', disabled: !text, title: text || '', onclick: () => copyText(text) }, label)
 
 // Holds the lists still while a finger is down, so an update never moves a button mid-press.
-let pressing = false, refreshQueued = false, player = null
+let pressing = false, refreshQueued = false, player = null, playerEntry = null, lastResumeSave = 0
 addEventListener('pointerdown', () => { pressing = true })
 for (const evName of ['pointerup', 'pointercancel', 'blur']) {
   addEventListener(evName, () => {
@@ -494,7 +587,7 @@ function renderPills () {
   if (S.offline) pills.push(h('span', { class: 'pill warn' }, 'Relay unreachable'))
   else {
     pills.push(h('span', { class: 'pill' + (st.peers || st.lanPeers ? ' ok' : '') }, h('b', null, String((st.peers || 0))), ' ', (st.peers === 1 ? 'peer' : 'peers'), st.lanPeers ? ' · ' + st.lanPeers + ' nearby' : ''))
-    pills.push(h('span', { class: 'pill' }, '↓ ', h('b', null, rate(st.downBps)), ' ↑ ', h('b', null, rate(st.upBps))))
+    pills.push(h('span', { class: 'pill rate' }, '↓ ', h('b', null, rate(st.downBps)), ' ↑ ', h('b', null, rate(st.upBps))))
   }
   const restart = S.settings ? S.settings.restartNeeded.length : 0
   if (restart) pills.push(h('a', { class: 'pill warn', href: '#settings' }, 'Restart to apply ' + plural(restart, 'change', 'changes')))
@@ -697,6 +790,101 @@ function tileState (t) {
   if (t.saved || t.partial) return [t.kind === 'show' && t.saved ? t.saved + ' saved here' : 'Partly saved', '']
   return ['On the network', '']
 }
+// Continue watching: where this browser stopped, remembered locally. No protocol change,
+// no relay state; a different browser starts its own list.
+const WATCH_KEY = 'peartube-watch'
+let watchStore = {}
+try { watchStore = JSON.parse(localStorage.getItem(WATCH_KEY) || '{}') || {} } catch {}
+const watchId = e => e.sha256 ? 's:' + e.sha256 : 'i:' + e.id
+function saveResume (entry, at, dur) {
+  if (!entry || !(dur > 0) || !isFinite(at)) return
+  watchStore[watchId(entry)] = { at: Math.max(0, at), dur, t: Date.now() }
+  const ids = Object.keys(watchStore)
+  if (ids.length > 300) ids.sort((a, b) => watchStore[a].t - watchStore[b].t).slice(0, ids.length - 300).forEach(i => delete watchStore[i])
+  try { localStorage.setItem(WATCH_KEY, JSON.stringify(watchStore)) } catch {}
+}
+function resumeTiles (tiles) {
+  const out = []
+  for (const t of tiles) {
+    for (const i of t.items) {
+      const w = watchStore[watchId(i.e)]
+      if (!w || !(w.dur > 0)) continue
+      const pct = w.at / w.dur
+      if (pct < 0.02 || pct > 0.95) continue
+      out.push({ t, i, w, pct })
+    }
+  }
+  return out.sort((a, b) => b.w.t - a.w.t).slice(0, 6)
+}
+function artImg (t, kind, cls) {
+  const img = h('img', { class: cls || '', alt: '', loading: 'lazy' })
+  if (!t.imdb) { img.style.display = 'none'; return img }
+  img.src = '/v1/' + kind + '/' + t.imdb
+  img.onerror = () => {
+    if (kind !== 'poster') { img.onerror = () => { img.style.visibility = 'hidden' }; img.src = '/v1/poster/' + t.imdb }
+    else img.style.visibility = 'hidden'
+  }
+  return img
+}
+function playLabel (t, i, w) {
+  const ep = t.kind === 'show' && i.season ? 'S' + i.season + 'E' + String(i.episode).padStart(2, '0') + ' · ' : ''
+  return ep + fmtClock(Math.max(0, w.dur - w.at)) + ' left'
+}
+function renderHero (list) {
+  const hero = $('hero')
+  const pick = list[0]
+  if (!pick) { hero.hidden = true; hero.replaceChildren(); return }
+  const { t, i, w, pct } = pick
+  hero.hidden = false
+  hero.classList.toggle('no-art', !t.imdb)
+  const from = sourceName(i.e.source)
+  hero.replaceChildren(
+    artImg(t, 'backdrop', 'hero-art'),
+    h('div', { class: 'hero-scrim' }),
+    h('div', { class: 'hero-body' },
+      h('span', { class: 'eyebrow' }, 'Continue watching · ' + Math.round(pct * 100) + '%'),
+      h('h2', { class: 'hero-title' }, t.title),
+      h('div', { class: 'hero-meta' },
+        h('span', null, tileLine(t)), h('span', { class: 'dot' }), h('span', null, tileState(t)[0]),
+        from ? h('span', { class: 'dot' }) : null, from ? h('span', null, 'From ' + from) : null,
+        h('span', { class: 'dot' }), h('span', null, playLabel(t, i, w))),
+      h('div', { class: 'hero-progress' },
+        h('div', { class: 'bar-track' }, h('div', { style: 'width:' + Math.round(pct * 100) + '%' })),
+        h('span', null, Math.round(pct * 100) + '%')),
+      h('div', { class: 'hero-actions' },
+        h('button', { class: 'btn primary', onclick: () => play(i.e) },
+          h('svg', { width: '13', height: '13', viewBox: '0 0 16 16', 'aria-hidden': 'true' }, h('path', { d: 'M4 2.4l9 5.6-9 5.6z', fill: 'currentColor' })),
+          'Resume'),
+        h('button', { class: 'btn ghost', onclick: () => openDetail(t.key) }, 'Details')))
+  )
+}
+function renderResume (list) {
+  // With a single title the hero already carries it; a one-card rail is noise.
+  const show = list.length > 1
+  $('resumeWrap').hidden = !show
+  $('resumeCount').textContent = show ? String(list.length) : ''
+  if (!show) { $('resume').replaceChildren(); return }
+  $('resume').replaceChildren(...list.map(({ t, i, w, pct }) => h('button', { class: 'r-card', onclick: () => play(i.e) },
+    artImg(t, 'backdrop'),
+    h('div', { class: 'wash' }),
+    h('div', { class: 'r-body' }, h('span', { class: 'r-title' }, t.title), h('span', { class: 'r-meta' }, playLabel(t, i, w))),
+    h('div', { class: 'r-track' }, h('div', { style: 'width:' + Math.round(pct * 100) + '%' }))
+  )))
+}
+// Live channels land with the streaming pipeline: this is the slot and the card shape they will fill.
+function renderLive () {
+  const items = Array.isArray(S.live) ? S.live.slice(0, 6) : []
+  $('liveWrap').hidden = !items.length
+  $('liveCount').textContent = items.length ? String(items.length) : ''
+  if (!items.length) { $('live').replaceChildren(); return }
+  $('live').replaceChildren(...items.map(l => h('button', { class: 'r-card live', onclick: () => l.key && openDetail(l.key) },
+    l.imdb ? artImg({ imdb: l.imdb }, 'backdrop') : null,
+    h('div', { class: 'wash' }),
+    h('div', { class: 'r-body' },
+      h('span', { class: 'badge live' }, 'LIVE'),
+      h('span', { class: 'r-title' }, l.title || 'Live'),
+      h('span', { class: 'r-meta' }, (l.channel ? l.channel + ' · ' : '') + (l.viewers != null ? l.viewers + ' watching' : ''))))))
+}
 
 let libKind = 'all'
 let libShown = 60
@@ -705,6 +893,10 @@ const KINDS = [['all', 'All'], ['movie', 'Movies'], ['show', 'Shows'], ['video',
 function renderLibrary (force) {
   renderJobs()
   const all = libraryTiles()
+  const resume = resumeTiles(all)
+  renderHero(resume)
+  renderResume(resume)
+  renderLive()
   const q = $('libFilter').value.trim().toLowerCase()
   const list = all.filter(t => (libKind === 'all' || t.kind === libKind) && (!q || t.title.toLowerCase().includes(q)))
   // Progress polls arrive every few seconds; redraw only when what the grid shows has changed.
@@ -730,7 +922,7 @@ function renderLibrary (force) {
     return h('button', { class: 'tile', 'data-tile': t.key, onclick: () => openDetail(t.key) },
       posterBox(t.imdb ? '/v1/poster/' + t.imdb : null, t.title),
       h('span', { class: 'tile-title' }, t.title),
-      h('span', { class: 'tile-meta' }, tileLine(t)),
+      h('span', { class: 'tile-meta' }, [tileLine(t), sourceName(t.items[0].e.source)].filter(Boolean).join(' · ')),
       h('span', { class: 'tile-meta' + (tone ? ' ' + tone : '') }, state))
   }), ...(list.length > libShown ? [h('div', { class: 'more', id: 'libMore' }, h('button', { class: 'btn', onclick: showMore }, 'Show more'))] : []))
   const more = $('libMore')
@@ -767,9 +959,13 @@ function castButton (e) {
   } }, 'Cast'))
   return wrap
 }
-function play (e) {
+const resumeAtFor = e => {
+  const w = watchStore[watchId(e)]
+  return w && w.dur > 0 && w.at / w.dur < 0.95 ? w.at : 0
+}
+function play (e, at) {
   $('detail').close()
-  openPlayer(e)
+  openPlayer(e, at == null ? resumeAtFor(e) : at)
 }
 function fileRow (label, e) {
   const from = sourceName(e.source)
@@ -854,7 +1050,7 @@ function renderChannels () {
   const st = S.status
   const src = S.sources
   const published = new Set((src.published || []).map(p => p.key))
-  const tracker = (src.sources || []).find(s => s.primary && s.kind === 'tracker')?.key || st.tracker
+  const tracker = (src.sources || []).find(s => s.primary && s.kind === 'tracker')?.key || (st.tracker || '')
   $('mine').replaceChildren(
     h('div', { class: 'item' }, h('div', { class: 'info' }, h('div', { class: 'name' }, 'Tracker'), h('div', { class: 'meta' }, 'Everything this relay announces · ' + short(tracker))),
       h('div', { class: 'acts' }, copyBtn('Copy link', tracker ? 'peartube://tracker/' + tracker : ''))),
@@ -1017,37 +1213,38 @@ function renderCast () {
 
 // ---- Settings
 const GROUPS = [
-  { title: 'Network', items: [
-    { key: 'streamHost', label: 'Address viewers stream from', ph: '192.168.1.20' },
-    { key: 'streamPort', label: 'Stream port', ph: '8175' },
-    { key: 'lan', label: 'Find peers on this network' },
-    { key: 'lanHost', label: 'Network address', ph: '192.168.1.20' },
-    { key: 'dhtPort', label: 'Peer port (UDP, 0 picks one)', ph: '49737' },
-    { key: 'privateRouting', label: 'Private routing' },
-    { key: 'relayThrough', label: 'Blind relays', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' },
-    { key: 'bootstrap', label: 'DHT bootstrap nodes', ph: '88.99.3.86:49737' },
-    { key: 'allowedPeers', label: 'Only connect to these peers', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' }
+  { title: 'Network', hint: 'How this relay is reached and who it talks to.', items: [
+    { key: 'streamHost', label: 'Stream address for viewers', hint: 'Reachable IP viewers use for playback; never 127.0.0.1.', ph: '192.168.1.20' },
+    { key: 'streamPort', label: 'Stream port', hint: 'HTTP blob port players fetch from; open it if firewalled.', ph: '8175' },
+    { key: 'lan', label: 'Find peers on this network', hint: 'mDNS discovery on the LAN; needs both on the same Wi-Fi.' },
+    { key: 'lanHost', label: 'Advertised LAN address', hint: 'Interface peers dial; picks Wi-Fi or Ethernet automatically.', ph: '192.168.1.20' },
+    { key: 'dhtPort', label: 'Peer port (UDP)', hint: '0 picks a random port; fix it to forward through NAT.', ph: '49737' },
+    { key: 'privateRouting', label: 'Private routing (2-hop guards)', hint: 'Sends traffic through two guards; slower, hides your IP.' },
+    { key: 'relayThrough', label: 'Blind relays', hint: 'DHT relay keys that forward when both sides are behind NAT.', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' },
+    { key: 'bootstrap', label: 'DHT bootstrap nodes', hint: 'Leave empty to use the public HyperDHT bootstrap list.', ph: '88.99.3.86:49737' },
+    { key: 'allowedPeers', label: 'Only connect to these peers', hint: 'Allowlist of peer keys; empty means anyone.', ph: '3a8f0c1e5b7d92f4a6c0e8b1d3f5a7c9e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2' }
   ] },
-  { title: 'Library', items: [
-    { key: 'tracker', label: 'Join a tracker', ph: 'bc7d85ea0eec017d3f6875b4c06c3c16091a50337b4d1709425e3bd35122fbeb' },
-    { key: 'publishChannel', label: 'Publish new videos to my channel' },
-    { key: 'directory', label: 'List followed channels in my directory' },
-    { key: 'acquireConcurrency', label: 'Downloads at once', ph: '4' },
-    { key: 'cinemetaUrl', label: 'Title lookup service', ph: 'https://v3-cinemeta.strem.io' },
-    { key: 'watchDir', label: 'Import folder', ph: '/data/import' },
-    { key: 'feeds', label: 'Followed feeds', ph: 'https://example.org/catalog.json' }
+  { title: 'Library', hint: 'What it collects and publishes.', items: [
+    { key: 'tracker', label: 'Join a tracker', hint: '64-hex tracker key; this relay writes its own channel.', ph: 'bc7d85ea0eec017d3f6875b4c06c3c16091a50337b4d1709425e3bd35122fbeb' },
+    { key: 'publishChannel', label: 'Publish new videos to my channel', hint: 'Off keeps this relay’s library private to itself.' },
+    { key: 'directory', label: 'List followed channels in my directory', hint: 'Lets others discover the channels you follow.' },
+    { key: 'acquireConcurrency', label: 'Concurrent downloads', hint: 'Each one is a yt-dlp process; higher costs CPU.', ph: '4' },
+    { key: 'cinemetaUrl', label: 'Title lookup service', hint: 'Matches titles to IMDb ids; supplies posters and backdrops.', ph: 'https://v3-cinemeta.strem.io' },
+    { key: 'watchDir', label: 'Import folder', hint: 'Absolute path on the relay; new files are added automatically.', ph: '/data/import' },
+    { key: 'feeds', label: 'Mirrored catalogs (feeds)', hint: 'JSON list of titles and sources; another relay’s /v1/entries works.', ph: 'https://example.org/catalog.json' }
   ] },
-  { title: 'Sharing', items: [
-    { key: 'replicate', label: 'Keep copies of what I follow' },
-    { key: 'replicateFreeGb', label: 'Keep this much disk free (GB)', ph: '20' },
-    { key: 'replicateMbps', label: 'Copy speed limit (Mbps)', ph: '80' },
-    { key: 'hiverelayDiscover', label: 'Find HiveRelays automatically' },
-    { key: 'hiverelays', label: 'HiveRelays', ph: 'http://192.168.1.50:9100' },
-    { key: 'hiverelayApiKey', label: 'HiveRelay access key', ph: 'hr_4f1c2a9b7d' },
-    { key: 'hiverelayReplicas', label: 'Copies per video on HiveRelays', ph: '3' },
-    { key: 'hiverelayUploadMbps', label: 'HiveRelay upload limit (Mbps)', ph: '50' }
+  { title: 'Sharing', hint: 'What it keeps for others.', items: [
+    { key: 'replicate', label: 'Keep copies of what I follow', hint: 'Seeds followed content until the free-space floor is hit.' },
+    { key: 'replicateFreeGb', label: 'Keep this much disk free (GB)', hint: 'Replication stops when free space reaches this.', ph: '20' },
+    { key: 'replicateMbps', label: 'Copy speed limit (Mbps)', hint: '0 removes the limit; applies immediately.', ph: '80' },
+    { key: 'hiverelayDiscover', label: 'Find HiveRelays automatically', hint: 'Uses a public discovery topic to recruit seeders.' },
+    { key: 'hiverelays', label: 'HiveRelays', hint: 'Base URLs of seeding helpers that keep copies.', ph: 'http://192.168.1.50:9100' },
+    { key: 'hiverelayApiKey', label: 'HiveRelay access key', hint: 'One key for every HiveRelay listed above.', ph: 'hr_4f1c2a9b7d' },
+    { key: 'hiverelayReplicas', label: 'Copies per video on HiveRelays', hint: 'How many HiveRelays hold each video.', ph: '3' },
+    { key: 'hiverelayUploadMbps', label: 'HiveRelay upload limit (Mbps)', hint: 'Caps seeding speed to helpers.', ph: '50' }
   ] }
 ]
+
 const INPUT_TYPE = { host: 'text', port: 'number', number: 'number', key: 'text', path: 'text', url: 'url', secret: 'password' }
 let settingsDirty = false
 
@@ -1068,7 +1265,7 @@ function settingRow (item) {
   const locked = s.source === 'env'
   const tags = [h('span', { class: s.live ? 'tag ok' : 'tag warn' }, s.live ? 'Applies now' : 'After restart')]
   if (locked) tags.push(h('span', { class: 'tag' }, 'Set by ' + s.env))
-  const what = h('div', { class: 'what' }, h('label', { for: id }, item.label), h('div', { class: 'row' }, tags))
+  const what = h('div', { class: 'what' }, h('label', { for: id }, item.label), item.hint ? h('div', { class: 'hint' }, item.hint) : null, h('div', { class: 'row' }, tags))
   if (s.type === 'bool') {
     const input = h('input', { id, type: 'checkbox', role: 'switch', checked: Boolean(s.value), disabled: locked })
     input.onchange = () => act(input, () => saveSettings({ [item.key]: input.checked }))
@@ -1120,7 +1317,7 @@ function renderSettings (force) {
     blocks.push(h('div', { class: 'banner' }, h('div', { class: 'label' }, 'Restart the relay to apply ' + plural(pending.length, 'change', 'changes') + '.'), h('div', { class: 'row', style: 'margin-top:8px' }, names.map(n => h('span', { class: 'tag' }, n)))))
   }
   for (const g of GROUPS) {
-    const card = h('div', { class: 'card' }, h('h3', null, g.title), g.items.map(settingRow))
+    const card = h('div', { class: 'card' }, h('h3', null, g.title), g.hint ? h('div', { class: 'hint', style: 'margin:-2px 0 6px' }, g.hint) : null, g.items.map(settingRow))
     const save = h('button', { class: 'btn primary save', disabled: true }, 'Save changes')
     save.onclick = () => {
       const patch = {}
@@ -1247,7 +1444,7 @@ function getYuvGl () {
   const gl = c.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false })
   if (!gl) { yuvGl = false; return false }
   const vs = gl.createShader(gl.VERTEX_SHADER)
-  gl.shaderSource(vs, 'attribute vec2 a_pos;varying vec2 v_uv;void main(){v_uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);gl_Position=vec4(a_pos,0.0,1.0);}')
+  gl.shaderSource(vs, 'attribute vec2 a_pos;varying vec2 v_uv;uniform vec4 u_crop;void main(){vec2 uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);v_uv=mix(u_crop.xy,u_crop.zw,uv);gl_Position=vec4(a_pos,0.0,1.0);}')
   gl.compileShader(vs)
   const fs = gl.createShader(gl.FRAGMENT_SHADER)
   gl.shaderSource(fs, 'precision mediump float;varying vec2 v_uv;uniform sampler2D u_y;uniform sampler2D u_u;uniform sampler2D u_v;void main(){float y=(texture2D(u_y,v_uv).r-0.062745)*1.164384;float u=texture2D(u_u,v_uv).r-0.5;float v=texture2D(u_v,v_uv).r-0.5;gl_FragColor=vec4(y+1.792741*v,y-0.213249*u-0.532909*v,y+2.112402*u,1.0);}')
@@ -1275,7 +1472,9 @@ function getYuvGl () {
   gl.uniform1i(gl.getUniformLocation(prog, 'u_y'), 0)
   gl.uniform1i(gl.getUniformLocation(prog, 'u_u'), 1)
   gl.uniform1i(gl.getUniformLocation(prog, 'u_v'), 2)
-  yuvGl = { gl, canvas: c, texY, texU, texV, w: 0, h: 0 }
+  const cropLoc = gl.getUniformLocation(prog, 'u_crop')
+  gl.uniform4f(cropLoc, 0, 0, 1, 1)
+  yuvGl = { gl, canvas: c, texY, texU, texV, cropLoc, w: 0, h: 0 }
   return yuvGl
 }
 
@@ -1293,15 +1492,8 @@ function nowWallMs () { return (performance.timeOrigin || 0) + performance.now()
 function getWorker () {
   if (!sharedWorker) {
     sharedWorker = new Worker('/web/player-worker.js' + ASSET_VER)
-    const glc = $('pGlCanvas')
-    if (!workerCanvasTransferred && glc && typeof glc.transferControlToOffscreen === 'function') {
-      try {
-        const off = glc.transferControlToOffscreen()
-        workerCanvasTransferred = true
-        workerOffscreenReady = true
-        sharedWorker.postMessage({ cmd: 'initCanvas', canvas: off }, [off])
-      } catch {}
-    }
+    // The Worker's OffscreenCanvas renderer dropped pictures on long titles (18 fps on Batman's
+    // VC-1 where this page-side GL holds 24). Keep the canvas here and let the worker post frames.
     sharedWorker.postMessage({ cmd: 'warmup', wasmUrl: location.origin + '/web/peartube_web.wasm' + ASSET_VER })
   }
   return sharedWorker
@@ -1338,8 +1530,9 @@ function closePlayer () {
   if (refreshQueued) { refreshQueued = false; setTimeout(refresh, 50) }
 }
 
-function openPlayer (entry) {
+function openPlayer (entry, at = 0) {
   closePlayer()
+  playerEntry = entry
   const streamUrl = resolveStreamUrl(entry.streamUrl)
   const worker = getWorker()
   $('pTitle').textContent = entry.title || entry.id
@@ -1372,6 +1565,7 @@ function openPlayer (entry) {
   const seq = ++openCounter
   const p = {
     entry,
+    startAt: Math.max(0, Number(at) || 0),
     streamUrl,
     worker,
     audioCtx,
@@ -1393,6 +1587,10 @@ function openPlayer (entry) {
     videoStream: -1,
     audioStream: -1,
     subStream: -1,
+    videoCrop: null,
+    lastReadBlock: -1,
+    prefetchInFlight: new Map(),
+    prefetchDone: new Set(),
     useMse: false,
     allowWebCodecs: false,
     usingWebCodecs: false,
@@ -1448,7 +1646,7 @@ function openPlayer (entry) {
     }
   }
   function syncWorkerClock (timeSecs, playing) {
-    try { worker.postMessage({ cmd: 'clock', time: timeSecs, wallMs: nowWallMs(), playing }) } catch {}
+    try { worker.postMessage({ cmd: 'clock', time: timeSecs, wallMs: nowWallMs(), playing, hidden: document.visibilityState !== 'visible' }) } catch {}
   }
   p.syncWorkerClock = syncWorkerClock
 
@@ -1531,10 +1729,9 @@ function openPlayer (entry) {
     p.subCues.length = 0
     $('pSubText').textContent = ''
     subCtx.clearRect(0, 0, subCanvas.width, subCanvas.height)
-    if (p.useMse && p.videoStream >= 0) setupMse(targetSecs)
+    if (p.useMse) setupMse(targetSecs)
   }
   p.resetMediaOutputs = resetMediaOutputs
-  p.currentMediaTime = currentMediaTime
 
   function setupMse (startAt) {
     video.pause()
@@ -1680,7 +1877,7 @@ function openPlayer (entry) {
       p.allowWebCodecs = Boolean(!p.useMse && p.videoStream >= 0 && p.webCodecsSupported)
       p.usingWebCodecs = p.allowWebCodecs
       if (p.useMse) {
-        setupMse(0)
+        setupMse(p.startAt)
       } else {
         video.style.display = 'none'
         glCanvas.style.display = workerOffscreenReady ? 'block' : 'none'
@@ -1689,6 +1886,7 @@ function openPlayer (entry) {
       updateBadge()
       worker.postMessage({ cmd: 'start', seq: p.seq, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: p.useMse, allowWebCodecs: p.allowWebCodecs })
     } else if (m.type === 'mseInit' || m.type === 'mseSeg') {
+      if (document.visibilityState !== 'visible') return
       p.mseQueue.push(m.buf)
       drainMseQueue()
     } else if (m.type === 'videoPrimed') {
@@ -1698,6 +1896,12 @@ function openPlayer (entry) {
       updateBadge()
       tryPrime()
     } else if (m.type === 'videoFrame') {
+      if (document.visibilityState !== 'visible') {
+        // Hidden: a picture nobody can see must not queue in RAM. The Worker stops sending these
+        // on its own once the visibility report lands; this covers the transition.
+        try { p.worker.postMessage({ cmd: 'recycleVideo', buf: m.buf }, [m.buf]) } catch {}
+        return
+      }
       p.swFrames.push(m)
       if (p.drawnFrames === 0) drawSwFrame(m)
       tryPrime()
@@ -1712,14 +1916,54 @@ function openPlayer (entry) {
       p.subCues.push({ kind: 'text', start: m.start, end: m.end, text: m.text })
     } else if (m.type === 'subBitmap') {
       p.subCues.push({ kind: 'bitmap', start: m.start, end: m.end, x: m.x, y: m.y, w: m.w, h: m.h, cw: m.cw, ch: m.ch, buf: m.buf })
+    } else if (m.type === 'readBlock') {
+      p.lastReadBlock = m.block
+      pumpPrefetch(p)
+    } else if (m.type === 'videoCrop') {
+      p.videoCrop = m.full ? null : { x: m.left, y: m.top, w: m.right - m.left, h: m.bottom - m.top, cw: m.w, ch: m.h }
+    } else if (m.type === 'flushed') {
+      // A seek with the same streams (audio or subtitle switch) does not re-prime, so clear the
+      // buffering notice here instead of leaving "Seeking…" over a playing picture forever.
+      if (player === p) $('pStatus').style.display = 'none'
     } else if (m.type === 'eof') {
       p.eof = true
       tryPrime()
     }
   }
 
+  // Blocks the demuxer is about to need, fetched here where fetch() is reliable (the Worker's own
+  // prefetch can hang, and one blocked sync read drops every picture due behind it).
+  const BLOCK_BYTES = 2 * 1024 * 1024
+  function pumpPrefetch (p) {
+    if (!p || player !== p || !p.worker || !p.streamUrl) return
+    const base = p.lastReadBlock
+    if (!Number.isFinite(base)) return
+    for (let i = 1; i <= 8; i++) {
+      if (p.prefetchInFlight.size >= 3) break
+      const idx = base + i
+      if (p.prefetchDone.has(idx) || p.prefetchInFlight.has(idx)) continue
+      const start = idx * BLOCK_BYTES
+      const end = start + BLOCK_BYTES - 1
+      const ctl = new AbortController()
+      p.prefetchInFlight.set(idx, ctl)
+      fetch(p.streamUrl, { headers: { range: 'bytes=' + start + '-' + end }, signal: ctl.signal })
+        .then(r => (r.ok || r.status === 206) ? r.arrayBuffer() : null)
+        .then(ab => {
+          p.prefetchInFlight.delete(idx)
+          if (!ab || player !== p) return
+          p.prefetchDone.add(idx)
+          if (p.prefetchDone.size > 96) p.prefetchDone.clear()
+          try { p.worker.postMessage({ cmd: 'block', block: idx, buf: ab }, [ab]) } catch {}
+          pumpPrefetch(p)
+        })
+        .catch(() => p.prefetchInFlight.delete(idx))
+    }
+  }
+
   function drawSwFrame (f) {
     const r = (f.yuv && !workerCanvasTransferred) ? getYuvGl() : false
+    const crop = p.videoCrop && p.videoCrop.w > 0 && p.videoCrop.cw === f.w && p.videoCrop.ch === f.h ? p.videoCrop : null
+    const ow = crop ? crop.w : f.w, oh = crop ? crop.h : f.h
     if (r) {
       if (glCanvas.style.display !== 'block') { glCanvas.style.display = 'block'; canvas.style.display = 'none' }
       const { gl } = r
@@ -1729,12 +1973,15 @@ function openPlayer (entry) {
       const ySub = u8.subarray(0, yLen)
       const uSub = u8.subarray(yLen, yLen + cLen)
       const vSub = u8.subarray(yLen + cLen, yLen + cLen * 2)
-      const resized = (r.w !== f.w || r.h !== f.h)
+      const resized = (r.w !== ow || r.h !== oh)
       if (resized) {
-        r.w = f.w; r.h = f.h
-        glCanvas.width = f.w; glCanvas.height = f.h
-        gl.viewport(0, 0, f.w, f.h)
+        r.w = ow; r.h = oh
+        glCanvas.width = ow; glCanvas.height = oh
+        gl.viewport(0, 0, ow, oh)
       }
+      const u0 = crop ? crop.x / f.w : 0, u1 = crop ? (crop.x + crop.w) / f.w : 1
+      const v0 = crop ? crop.y / f.h : 0, v1 = crop ? (crop.y + crop.h) / f.h : 1
+      gl.uniform4f(r.cropLoc, u0, v0, u1, v1)
       const up = (unit, tex, tw, th, data) => {
         gl.activeTexture(gl.TEXTURE0 + unit)
         gl.bindTexture(gl.TEXTURE_2D, tex)
@@ -1759,20 +2006,6 @@ function openPlayer (entry) {
     p.drawnFrames++
   }
 
-  // How much has played goes to the worker on a timer, not from the frame loop: hidden tabs get no animation frames,
-  // and without these reports the worker stops decoding once its buffer is full, so sound ran dry after about 8 s.
-  let lastCreditReport = performance.now()
-  function reportConsumed () {
-    if (player !== p) return clearInterval(p.creditTimer)
-    if (!p.primed) return
-    const vSec = p.consumedVideoSec
-    const aSec = p.consumedAudioSec
-    p.consumedVideoSec = 0
-    p.consumedAudioSec = 0
-    lastCreditReport = performance.now()
-    worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: currentMediaTime(), wallMs: nowWallMs(), playing: !p.paused })
-  }
-  p.creditTimer = setInterval(reportConsumed, 250)
   function tick () {
     if (player !== p) return
     p.raf = requestAnimationFrame(tick)
@@ -1870,13 +2103,33 @@ function openPlayer (entry) {
     }
 
     if (!p.seeking && p.duration > 0) {
-      $('pSeek').value = String(Math.min(1000, Math.round((now / p.duration) * 1000)))
+      const seekVal = String(Math.min(1000, Math.round((now / p.duration) * 1000)))
+      if (seekVal !== p.lastSeekVal) { p.lastSeekVal = seekVal; $('pSeek').value = seekVal }
     }
-    $('pClock').textContent = fmtClock(now) + ' / ' + fmtClock(p.duration)
+    // Rewriting the same text node every frame makes the clock shimmer; only touch the DOM when
+    // the formatted time actually changes (once a second), not on every animation frame.
+    const clockText = fmtClock(now) + ' / ' + fmtClock(p.duration)
+    if (clockText !== p.lastClockText) { p.lastClockText = clockText; $('pClock').textContent = clockText }
+    if (p.duration > 0 && playerEntry && Date.now() - lastResumeSave > 4000) {
+      lastResumeSave = Date.now()
+      saveResume(playerEntry, now, p.duration)
+    }
 
-    if (p.primed && pf - lastCreditReport > 120 && (p.consumedVideoSec > 0 || p.consumedAudioSec > 0)) reportConsumed()
   }
   p.raf = requestAnimationFrame(tick)
+  // Visibility, credits and the worker's clock must not ride requestAnimationFrame: a hidden or
+  // unfocused window stops that loop, so the Worker never learns it is hidden and keeps posting
+  // pictures nobody consumes until the tab balloons and freezes. A 250 ms timer (Clamped to ~1 s
+  // while hidden) reports instead; the Worker still owns decode and the audio-only switch.
+  p.creditTimer = setInterval(() => {
+    if (player !== p) { clearInterval(p.creditTimer); return }
+    if (!p.primed || !p.worker) return
+    const vSec = p.consumedVideoSec
+    const aSec = p.consumedAudioSec
+    p.consumedVideoSec = 0
+    p.consumedAudioSec = 0
+    p.worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: currentMediaTime(), wallMs: nowWallMs(), playing: !p.paused, hidden: document.visibilityState !== 'visible' })
+  }, 250)
 
   const extMatch = (entry.streamUrl || '').split('?')[0].split('.').pop() || ''
   worker.postMessage({ cmd: 'open', seq: p.seq, streamUrl, wasmUrl: location.origin + '/web/peartube_web.wasm' + ASSET_VER, ext: extMatch.length <= 5 ? extMatch : '' })
@@ -1929,6 +2182,11 @@ function seekTo (targetSecs) {
   $('pStatus').style.display = ''
   $('pStatus').textContent = 'Seeking…'
   player.drawnFrames = 0
+  player.videoCrop = null
+  for (const ctl of player.prefetchInFlight.values()) { try { ctl.abort() } catch {} }
+  player.prefetchInFlight.clear()
+  player.prefetchDone.clear()
+  player.lastReadBlock = -1
   player.resetMediaOutputs(clamped)
   player.worker.postMessage({
     cmd: 'seek',
@@ -1942,26 +2200,15 @@ function seekTo (targetSecs) {
   })
 }
 
-// A hidden tab (another tab, a minimised or fully covered window) gets no animation frames, and the browser pauses
-// the muted <video> the picture plays in. Keep the sound going on its own, then bring the picture back at the same
-// moment instead of jumping to catch up.
-document.addEventListener('visibilitychange', () => {
-  const p = player
-  if (!p || !p.manifest) return
-  if (document.hidden) {
-    if (p.paused || p.videoStream < 0 || p.audioStream < 0) return
-    p.hiddenVideo = p.videoStream
-    p.videoStream = -1
-    seekTo(p.currentMediaTime())
-  } else if (p.hiddenVideo != null) {
-    p.videoStream = p.hiddenVideo
-    p.hiddenVideo = null
-    seekTo(p.currentMediaTime())
-  }
-})
 $('pCloseBtn').onclick = closePlayer
 $('pPlayBtn').onclick = togglePlay
-$('pStage').onclick = togglePlay
+$('pStage').onclick = () => {
+  // A click into an unfocused window only focuses it; the first click after returning must not
+  // pause the film. Real clicks (document focused, outside the grace window) still toggle.
+  if (!document.hasFocus()) return
+  if (player && performance.now() < (player.suppressStageClickUntil || 0)) return
+  togglePlay()
+}
 $('pStage').ondblclick = () => $('pFsBtn').click()
 // Repeated ±10 s presses add up into one seek: each seek restarts the demuxer and its range reads.
 let seekTimer = 0
@@ -2018,6 +2265,61 @@ addEventListener('keydown', ev => {
   else if (ev.key === 'f' || ev.key === 'F') { ev.preventDefault(); $('pFsBtn').click() }
   else if (ev.key === 'm' || ev.key === 'M') { ev.preventDefault(); $('pMuteBtn').click() }
 })
+// A hidden tab has no picture to show, but the player keeps its timeline (the Worker owns decode and
+// the clock). On return, make the browser's video element play again if it paused it in the
+// background; the GL path restarts its render loop from the first clock message of the next frame.
+function resyncOnReturn () {
+  if (!player || player.paused) return
+  const p = player
+  const audio = p.freeBaseMedia || 0
+  // The first click that brings the window back is a focus click, not a play/pause command.
+  p.suppressStageClickUntil = performance.now() + 900
+  if (p.audioCtx?.state === 'suspended') p.audioCtx.resume().catch(() => {})
+  if (p.useMse) {
+    const v = $('pVideo')
+    v.playbackRate = 1
+    if (v.paused) v.play().catch(() => {})
+    // Hard A/V sync after any absence: a paused background <video> and rapid hide/show left its
+    // clock drifting from the audio clock. Snap it back instead of letting rate nudges chase it.
+    if (Math.abs(v.currentTime - audio) > 0.35) { try { v.currentTime = audio } catch {} }
+    p.lastMseTime = audio
+    p.lastHardSync = performance.now()
+  } else {
+    // Pictures decoded while hidden are stale; drop them so the next drawn frame is the live one.
+    while (p.swFrames.length > 0) recycleVideoBuf(p.swFrames.shift().buf)
+    p.lastSwPts = null
+  }
+  p.syncWorkerClock?.(audio, true)
+}
+addEventListener('visibilitychange', () => {
+  if (!player) return
+  const hidden = document.visibilityState !== 'visible'
+  player.syncWorkerClock?.(player.freeBaseMedia || 0, !player.paused)
+  if (!hidden) resyncOnReturn()
+})
+addEventListener('focus', () => {
+  if (document.visibilityState === 'visible') resyncOnReturn()
+})
+
+
+// Theme follows the device until someone picks dark or light; the choice sticks per browser.
+const THEME_KEY = 'peartube-theme'
+const THEME_ORDER = ['system', 'dark', 'light']
+const themeLabel = mode => mode === 'system' ? 'Theme: follow this device' : 'Theme: ' + mode
+function applyTheme (mode) {
+  document.documentElement.dataset.theme = mode
+  const t = $('themeToggle')
+  if (!t) return
+  t.setAttribute('aria-label', themeLabel(mode))
+  t.title = themeLabel(mode) + ' — click to change'
+}
+applyTheme(document.documentElement.dataset.theme || 'system')
+$('themeToggle').onclick = () => {
+  const now = document.documentElement.dataset.theme || 'system'
+  const next = THEME_ORDER[(THEME_ORDER.indexOf(now) + 1) % THEME_ORDER.length]
+  try { localStorage.setItem(THEME_KEY, next) } catch {}
+  applyTheme(next)
+}
 </script>
 </body>
 </html>

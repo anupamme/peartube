@@ -137,7 +137,9 @@ async function launchBrowser () {
   const exe = process.env.PUPPETEER_EXECUTABLE_PATH
   assert.ok(exe && existsSync(exe), 'PUPPETEER_EXECUTABLE_PATH must point at a Chromium-family browser')
   const dir = mkdtempSync(join(tmpdir(), 'peartube-ui-browser-'))
-  const proc = spawn(exe, ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + dir, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', 'about:blank'], { stdio: 'ignore' })
+  // `--use-mock-keychain` keeps macOS from asking the login keychain for Brave's storage key on every
+  // throwaway profile; an automation run must never put a system dialog in front of the machine.
+  const proc = spawn(exe, ['--headless=new', '--remote-debugging-port=0', '--user-data-dir=' + dir, '--no-first-run', '--no-default-browser-check', '--disable-gpu', '--disable-extensions', '--use-mock-keychain', 'about:blank'], { stdio: 'ignore' })
   const portFile = join(dir, 'DevToolsActivePort')
   for (let i = 0; i < 200 && !existsSync(portFile); i++) await sleep(100)
   const port = readFileSync(portFile, 'utf8').split('\n')[0]
@@ -467,9 +469,9 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
 
     // Follow a feed.
     clicks = 0
-    await clickText('Follow a feed')
+    await clickText('Mirror a catalog')
     await type('#feedInput', stub.base + '/feed.json?token=feedsecret123')
-    await clickText('Follow', '#feedForm')
+    await clickText('Mirror', '#feedForm')
     result.interactions.followFeed = clicks
     mark('followFeedClicked')
     await waitApi(async () => (await entries()).find(e => e.id === 'clip:feeditem1'), 'feed item mirrored')

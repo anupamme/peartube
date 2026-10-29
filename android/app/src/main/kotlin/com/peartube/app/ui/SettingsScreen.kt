@@ -81,13 +81,13 @@ fun SettingsScreen(model: AppModel) {
             problem?.let { Text(it, color = Danger) }
             Text("Sources & Channels", color = Ink, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Text("A home for everything you love watching.", color = Dim, fontSize = 14.sp)
-            Field("Primary channel or tracker", "Have a 64-character key? Add it here to get started.") {
+            Field("Tracker key (optional)", "The 64-character key of a tracker to write into. Leave empty to follow channels only — a channel key belongs below.") {
                 KeyField(tracker, singleLine = true) { tracker = it }
             }
             settings.sources.forEach { source ->
                 Text(source.alias.ifBlank { "Channel ${source.key.take(8)}" }, color = Ink)
             }
-            Field("Add channels & links", "One channel link or key per line. Your library brings them together.") {
+            Field("Follow channels or trackers", "One peartube:// channel or tracker link per line. Your library brings them together.") {
                 KeyField(sources, singleLine = false) { sources = it }
             }
             HorizontalDivider(color = Line)

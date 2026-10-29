@@ -1,8 +1,9 @@
-import { request as httpRequest } from 'node:http'
-import { request as httpsRequest } from 'node:https'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import b4a from 'b4a'
+import { send } from './art.js'
+
+export { posterUrl, backdropUrl } from './art.js'
 
 // Tells what a link holds before it is acquired: a direct media file (named by its filename) or a
 // web page that yt-dlp can read (YouTube, Vimeo, ...). Movie and episode names get Cinemeta
@@ -36,27 +37,6 @@ export function parseName (raw) {
   }
 }
 
-function send (url, { method = 'GET', headers = {}, timeoutMs = 10_000, redirects = 0 } = {}) {
-  return new Promise((resolve, reject) => {
-    let u
-    try { u = new URL(url) } catch { return reject(new Error('Not a valid link')) }
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return reject(new Error('Only http(s) links can be added'))
-    const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(u, { method, headers: { 'user-agent': 'PearTube', ...headers } }, res => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirects < 5) {
-        res.resume()
-        resolve(send(new URL(res.headers.location, u).href, { method, headers, timeoutMs, redirects: redirects + 1 }))
-        return
-      }
-      const chunks = []
-      res.on('data', c => { if (method !== 'HEAD') chunks.push(c) })
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, url: u.href, body: b4a.toString(b4a.concat(chunks), 'utf8') }))
-      res.on('error', reject)
-    })
-    req.setTimeout?.(timeoutMs, () => req.destroy(new Error('Timed out')))
-    req.on('error', reject)
-    req.end()
-  })
-}
 
 function ytdlp (url, timeoutMs = 45_000) {
   return new Promise((resolve, reject) => {
@@ -184,17 +164,3 @@ export async function identify (url, { cinemetaUrl = '' } = {}) {
   }
 }
 
-const posterCache = new Map()
-export async function posterUrl (base, imdb) {
-  if (!base || !/^tt\d{5,10}$/.test(imdb)) return null
-  if (posterCache.has(imdb)) return posterCache.get(imdb)
-  let poster = null
-  for (const type of ['movie', 'series']) {
-    const res = await send(`${base}/meta/${type}/${imdb}.json`, { timeoutMs: 8000 }).catch(() => null)
-    try { poster = res?.status === 200 ? JSON.parse(res.body).meta?.poster || null : null } catch {}
-    if (poster) break
-  }
-  if (posterCache.size > 2000) posterCache.clear()
-  posterCache.set(imdb, poster)
-  return poster
-}

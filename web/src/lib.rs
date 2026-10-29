@@ -3,6 +3,10 @@
 //! SIMD128 surround-to-stereo planar downmixer, and zero-copy H.264/HEVC/AV1/VP9 fMP4 muxer
 //! behind a flat C ABI for Dedicated Web Workers.
 
+// The demux repair the native player already runs, so a movie stamped in
+// decode order keeps all 24 of its pictures here too.
+mod decode_order;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1761,7 +1765,23 @@ impl WebSession {
         if let Some(si) = self.sub_idx
             && let Some(s) = self.stream_info(si).cloned()
         {
-            self.sub_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&s.params)))
+            // A subtitle stream usually carries no dimensions of its own, but a bitmap subtitle
+            // (DVD/VobSub, PGS) is authored in the video's frame. Without the video size the
+            // decoder paints onto a 720x576 default, and a rect that lives lower or further right
+            // — Kung Fu Panda's at 758,709 on a 1920x816 frame — falls outside the canvas, so
+            // every cue comes out empty. Hand the subtitle decoder the picture it belongs to.
+            let mut params = s.params.clone();
+            if let Some(vi) = self.video_idx
+                && let Some(v) = self.stream_info(vi)
+            {
+                if let Some(w) = v.params.width.filter(|&w| w > 0) {
+                    params.width = Some(w);
+                }
+                if let Some(h) = v.params.height.filter(|&h| h > 0) {
+                    params.height = Some(h);
+                }
+            }
+            self.sub_dec = catch_unwind(AssertUnwindSafe(|| ctx.codecs.first_decoder(&params)))
                 .ok()
                 .and_then(Result::ok);
             self.sub_meta = Some((s.time_base, s.params.codec_id.as_str().to_string()));
@@ -2370,8 +2390,13 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             return set_json_error(&mut st, "Unsupported media container");
         };
 
+        // A file that stores decode times (no `ctts`) hands the decoder
+        // backward display stamps; the browser then throws half its pictures
+        // away as late. Repair presentation times before anything reads them.
         let mut demuxer = match catch_unwind(AssertUnwindSafe(|| {
-            ctx.containers.open_demuxer(&container, Box::new(src), &ctx.codecs)
+            ctx.containers
+                .open_demuxer(&container, Box::new(src), &ctx.codecs)
+                .map(decode_order::wrap)
         })) {
             Ok(Ok(d)) => d,
             Ok(Err(e)) => return set_json_error(&mut st, &format!("Demuxer error ({container}): {e}")),

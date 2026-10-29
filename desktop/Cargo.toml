@@ -19,6 +19,7 @@ path = "src/receiver_main.rs"
 # changes its API between snapshots.
 gpui-kit = "=0.7.3"
 futures-channel = "0.3"
+# GPUI ships no HTTP client of its own; this one fetches artwork (and follows redirects).
 futures-util = "0.3"
 libc = "0.2"
 parking_lot = "0.12"

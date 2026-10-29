@@ -9,6 +9,11 @@ let streamLen = 0
 let streamingMode = false
 let queuedVideoSec = 0
 let queuedAudioSec = 0
+// The page credits what it has played; these anchors let the worker drain those estimates on its
+// own when a hidden tab, an unfocused/occluded window, or a frozen timer stops the credits.
+let lastCreditAt = 0
+let lastDrawAt = 0
+let watchdog = null
 let lastVideoPts = null
 let hasVideo = false
 let hasAudio = false
@@ -26,19 +31,29 @@ let activeSeq = 0
 let clockMedia = 0
 let clockWallMs = 0
 let clockPlaying = false
+let pageHidden = false
+let lastPostedBlock = -1
 
 // OffscreenCanvas WebGL renderer + zero-GC recycled buffer pools
 let offRenderer = null
 let renderQueue = []
 let renderLoopActive = false
 let drawnInSession = 0
+let streamCropDone = false
+let streamCropCandidate = null
+let streamCropSame = 0
 const freeVideoPool = []
 const freeAudioPool = []
 
+// Six 2 MiB blocks ahead (12 MiB) in a 64 MiB ring. A 15 Mbps title decodes at ~3.8x realtime
+// while filling its buffer, so a three-block window fell through to the blocking sync read,
+// freezing the worker's frame clock and dropping pictures whenever a read took 300+ ms.
+// Measured on Batman Begins (VC-1 1080p, 13.7 Mbps): 3 blocks kept 13.3 of 24 pictures/s at
+// 300 ms latency; six keep all 24 (and 23.9 at 500 ms).
 const STREAM_BLOCK = 2 * 1024 * 1024
-const MAX_BLOCKS = 16
-const PREFETCH_AHEAD = 3
-const MAX_PREFETCH_INFLIGHT = 2
+const MAX_BLOCKS = 32
+const PREFETCH_AHEAD = 6
+const MAX_PREFETCH_INFLIGHT = 3
 const blockCache = new Map()
 const inflightPrefetch = new Map()
 let blockStamp = 0
@@ -94,9 +109,12 @@ function prefetchFrom (startBlockIdx) {
     if (startByte > endByte) continue
     const ctl = new AbortController()
     inflightPrefetch.set(idx, ctl)
+    // A fetch that never settles holds a prefetch slot forever, and with all slots stuck the engine
+    // waits at the next block edge while the relay sits idle. Free the slot after 8 s and retry.
+    const killTimer = setTimeout(() => { try { ctl.abort() } catch {} }, 8000)
     // Only this request's own settlement may clear its slot: after a seek, an aborted request settles late and would
     // otherwise untrack the new request for the same block, which then can't be aborted and holds a connection.
-    const settle = () => { if (inflightPrefetch.get(idx) === ctl) inflightPrefetch.delete(idx) }
+    const settle = () => { clearTimeout(killTimer); if (inflightPrefetch.get(idx) === ctl) inflightPrefetch.delete(idx) }
     fetch(url, { headers: { Range: 'bytes=' + startByte + '-' + endByte }, signal: ctl.signal })
       .then(res => (res.status === 200 || res.status === 206) ? res.arrayBuffer() : null)
       .then(ab => {
@@ -146,6 +164,12 @@ function readAtSync (offset, dstPtr, len) {
   }
 
   const bIdx = Math.floor(offset / STREAM_BLOCK)
+  // The page's fetch() is reliable where the Worker's can hang; tell it which block the demuxer is
+  // on and let it fill the cache ahead. One message per block, not per 256 KiB page.
+  if (bIdx !== lastPostedBlock) {
+    lastPostedBlock = bIdx
+    self.postMessage({ type: 'readBlock', block: bIdx })
+  }
   const bOff = offset - bIdx * STREAM_BLOCK
   const cached = blockCache.get(bIdx)
   if (cached && bOff < cached.data.byteLength) {
@@ -257,8 +281,8 @@ function initOffscreenRenderer (canvas) {
   if (!gl) return null
   const isGl2 = Boolean(gl2)
   const vsSrc = isGl2
-    ? '#version 300 es\nin vec2 a_pos;out vec2 v_uv;void main(){v_uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);gl_Position=vec4(a_pos,0.0,1.0);}'
-    : 'attribute vec2 a_pos;varying vec2 v_uv;void main(){v_uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);gl_Position=vec4(a_pos,0.0,1.0);}'
+    ? '#version 300 es\nin vec2 a_pos;out vec2 v_uv;uniform vec4 u_crop;void main(){vec2 uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);v_uv=mix(u_crop.xy,u_crop.zw,uv);gl_Position=vec4(a_pos,0.0,1.0);}'
+    : 'attribute vec2 a_pos;varying vec2 v_uv;uniform vec4 u_crop;void main(){vec2 uv=vec2(a_pos.x*0.5+0.5,0.5-a_pos.y*0.5);v_uv=mix(u_crop.xy,u_crop.zw,uv);gl_Position=vec4(a_pos,0.0,1.0);}'
   const fsSrc = isGl2
     ? '#version 300 es\nprecision mediump float;in vec2 v_uv;out vec4 outColor;uniform int u_mode;uniform sampler2D u_y;uniform sampler2D u_u;uniform sampler2D u_v;void main(){if(u_mode==1){outColor=vec4(texture(u_y,v_uv).rgb,1.0);return;}float y=(texture(u_y,v_uv).r-0.062745)*1.164384;float u=texture(u_u,v_uv).r-0.5;float v=texture(u_v,v_uv).r-0.5;outColor=vec4(y+1.792741*v,y-0.213249*u-0.532909*v,y+2.112402*u,1.0);}'
     : 'precision mediump float;varying vec2 v_uv;uniform int u_mode;uniform sampler2D u_y;uniform sampler2D u_u;uniform sampler2D u_v;void main(){if(u_mode==1){gl_FragColor=vec4(texture2D(u_y,v_uv).rgb,1.0);return;}float y=(texture2D(u_y,v_uv).r-0.062745)*1.164384;float u=texture2D(u_u,v_uv).r-0.5;float v=texture2D(u_v,v_uv).r-0.5;gl_FragColor=vec4(y+1.792741*v,y-0.213249*u-0.532909*v,y+2.112402*u,1.0);}'
@@ -295,12 +319,53 @@ function initOffscreenRenderer (canvas) {
   gl.uniform1i(gl.getUniformLocation(prog, 'u_u'), 1)
   gl.uniform1i(gl.getUniformLocation(prog, 'u_v'), 2)
   const modeLoc = gl.getUniformLocation(prog, 'u_mode')
-  return { gl, isGl2, canvas, texY, texU, texV, modeLoc, w: 0, h: 0, mode: -1 }
+  const cropLoc = gl.getUniformLocation(prog, 'u_crop')
+  gl.uniform4f(cropLoc, 0, 0, 1, 1)
+  return { gl, isGl2, canvas, texY, texU, texV, modeLoc, cropLoc, crop: [0, 0, 1, 1], cropPx: null, cropTries: 0, cropDone: false, w: 0, h: 0, mode: -1 }
+}
+
+// Encoded letterbox: a 16:9 frame can carry a 2.39 picture with black rows baked in, and then the
+// stage's own contain adds side bars too (black on all four sides). Find the active rectangle on
+// the first bright software frame and let the shader sample only that, so the picture fills the
+// width. Rows count as bars only when every sampled pixel there is black; dark scenes are skipped.
+function detectLetterbox (u8, w, h) {
+  let sum = 0, n = 0
+  for (let y = 0; y < h; y += 16) for (let x = 0; x < w; x += 16) { sum += u8[y * w + x]; n++ }
+  if (n === 0 || sum / n < 25) return null
+  const blackRow = y => { for (let x = 0; x < w; x += 8) if (u8[y * w + x] > 24) return false; return true }
+  let top = 0
+  while (top < h && blackRow(top)) top++
+  let bottom = h - 1
+  while (bottom > top && blackRow(bottom)) bottom--
+  if (bottom - top + 1 < h * 0.5) return null
+  const blackCol = x => { for (let y = top; y <= bottom; y += 8) if (u8[y * w + x] > 24) return false; return true }
+  let left = 0
+  while (left < w && blackCol(left)) left++
+  let right = w - 1
+  while (right > left && blackCol(right)) right--
+  // Letterbox only: the active picture spans the full width, so a narrow bright object on black
+  // (a studio logo) is not mistaken for the picture, and side pillars are left alone.
+  if (right - left + 1 < w * 0.95) return null
+  if (top < 2 && h - 1 - bottom < 2 && left < 2 && w - 1 - right < 2) {
+    return { left: 0, top: 0, right: w, bottom: h, full: true }
+  }
+  return { left, top, right: right + 1, bottom: bottom + 1 }
+}
+
+function applyCrop (r, c) {
+  const { gl } = r
+  r.crop = [c.left / r.w, c.top / r.h, c.right / r.w, c.bottom / r.h]
+  r.cropPx = c
+  r.canvas.width = c.right - c.left
+  r.canvas.height = c.bottom - c.top
+  gl.viewport(0, 0, r.canvas.width, r.canvas.height)
+  gl.uniform4f(r.cropLoc, r.crop[0], r.crop[1], r.crop[2], r.crop[3])
 }
 
 function drawOnWorkerGl (item) {
   const r = offRenderer
   if (!r) return
+  const tDraw = performance.now()
   const { gl, isGl2 } = r
   if (item.hwFrame) {
     const vf = item.hwFrame
@@ -324,8 +389,34 @@ function drawOnWorkerGl (item) {
     r.w = item.w; r.h = item.h
     r.canvas.width = item.w; r.canvas.height = item.h
     gl.viewport(0, 0, item.w, item.h)
+    r.crop = [0, 0, 1, 1]
+    r.cropPx = null
+    r.cropCandidate = null
+    r.cropSame = 0
+    r.cropTries = 0
+    r.cropDone = false
+    gl.uniform4f(r.cropLoc, 0, 0, 1, 1)
   }
   const u8 = new Uint8Array(item.ab, 0, item.len)
+  if (item.yuv && !r.cropDone) {
+    r.cropTries++
+    const c = detectLetterbox(u8, item.w, item.h)
+    if (c && c.full) {
+      r.cropDone = true
+    } else if (c) {
+      // Three bright frames must agree before cropping: a dark scene with black sky rows must not
+      // be mistaken for a letterbox, and the real bars repeat identically.
+      const p = r.cropCandidate
+      const same = p && Math.abs(p.left - c.left) <= 2 && Math.abs(p.top - c.top) <= 2 &&
+        Math.abs(p.right - c.right) <= 2 && Math.abs(p.bottom - c.bottom) <= 2
+      r.cropCandidate = c
+      r.cropSame = same ? (r.cropSame || 1) + 1 : 1
+      if (r.cropSame >= 3) {
+        applyCrop(r, c)
+        r.cropDone = true
+      }
+    }
+  }
   if (item.yuv) {
     const modeChanged = r.mode !== 0
     if (modeChanged) { r.mode = 0; gl.uniform1i(r.modeLoc, 0) }
@@ -372,7 +463,10 @@ function clearRenderQueue () {
 function ensureRenderLoop () {
   if (renderLoopActive || !offRenderer || useMse || closed) return
   renderLoopActive = true
-  const sched = self.requestAnimationFrame || (fn => setTimeout(fn, 16))
+  // A worker's requestAnimationFrame is compositor-driven but can tick slower than the display
+  // wants; an 8 ms timer checks due pictures often enough that a 24 fps frame is never skipped by a
+  // late tick. Drawing only happens when a frame is actually due, so the extra checks cost nothing.
+  const sched = fn => setTimeout(fn, 8)
   const step = () => {
     if (closed || useMse || !offRenderer) {
       renderLoopActive = false
@@ -383,6 +477,7 @@ function ensureRenderLoop () {
         const first = renderQueue[0]
         drawOnWorkerGl(first)
         drawnInSession = 1
+        lastDrawAt = nowWall()
         self.postMessage({ type: 'videoPrimed', seq: activeSeq, hw: useWebCodecs })
       } else if (clockPlaying) {
         const now = workerMediaTime()
@@ -396,6 +491,7 @@ function ensureRenderLoop () {
         if (pick) {
           drawOnWorkerGl(pick)
           drawnInSession++
+          lastDrawAt = nowWall()
           releaseRenderItem(pick)
           if (!eof && !bufferedAhead()) schedulePump(0)
         }
@@ -492,10 +588,32 @@ let currentSubStream = -1
 function bufferedAhead () {
   const wcQueueSec = (useWebCodecs && wcDecoder) ? (wcDecoder.decodeQueueSize / 30) : 0
   const maxVideo = useMse ? 8.0 : (offRenderer ? 1.0 : 1.5)
-  const maxAudio = useMse ? 6.0 : 2.2
-  const vOk = !hasVideo || (queuedVideoSec + wcQueueSec) >= maxVideo
-  const aOk = !hasAudio || queuedAudioSec >= maxAudio
+  const maxAudio = 6.0
+  // Credits arrive from the page's playback clock; when they stop, drain the estimates at wall
+  // speed instead of believing the buffers are still full. Otherwise the worker stops decoding and
+  // playback dies about one buffer after the window loses focus.
+  const sinceCredit = clockPlaying ? Math.min(30, Math.max(0, (nowWall() - lastCreditAt) / 1000)) : 0
+  const pageOwnsVideo = useMse || !offRenderer
+  const sinceDraw = pageOwnsVideo ? sinceCredit : Math.min(30, Math.max(0, (nowWall() - lastDrawAt) / 1000))
+  const videoSec = Math.max(0, queuedVideoSec - sinceDraw)
+  const audioSec = Math.max(0, queuedAudioSec - sinceCredit)
+  const vOk = pageHidden || !hasVideo || (videoSec + wcQueueSec) >= maxVideo
+  const aOk = !hasAudio || audioSec >= maxAudio
   return (hasVideo || hasAudio) ? (vOk && aOk) : false
+}
+
+// Nobody calls the pump when the page goes quiet, so a small worker timer re-checks the decaying
+// buffers and keeps decoding. It self-arms while playback runs and dies with the player.
+function armWatchdog () {
+  if (watchdog !== null) return
+  watchdog = setTimeout(() => {
+    watchdog = null
+    if (closed || eof || !configured) return
+    if (clockPlaying) {
+      if (!pumping && !bufferedAhead()) schedulePump(0)
+      armWatchdog()
+    }
+  }, 250)
 }
 
 function schedulePump (delay = 0) {
@@ -563,8 +681,31 @@ function pump () {
       const h = wasm.pt_out_h() >>> 0
       const step = lastVideoPts !== null ? Math.max(0.01, Math.min(0.2, pts - lastVideoPts)) : (1 / 30)
       lastVideoPts = pts
+      if (pageHidden && !useMse) {
+        // Audio-only while hidden: do not copy or transfer pictures nobody can see, and do not let
+        // the queue keep the pump from feeding audio. The timeline stays on the audio clock.
+        queuedVideoSec = 0
+        continue
+      }
       queuedVideoSec += step
       const { ab, len } = copyPooledBuf(freeVideoPool)
+      if (!offRenderer && code === 7 && !streamCropDone) {
+        const c = detectLetterbox(new Uint8Array(ab, 0, len), w, h)
+        if (c && c.full) {
+          streamCropDone = true
+          self.postMessage({ type: 'videoCrop', full: true, w, h })
+        } else if (c) {
+          const p = streamCropCandidate
+          const same = p && Math.abs(p.left - c.left) <= 2 && Math.abs(p.top - c.top) <= 2 &&
+            Math.abs(p.right - c.right) <= 2 && Math.abs(p.bottom - c.bottom) <= 2
+          streamCropCandidate = c
+          streamCropSame = same ? streamCropSame + 1 : 1
+          if (streamCropSame >= 3) {
+            streamCropDone = true
+            self.postMessage({ type: 'videoCrop', full: false, left: c.left, top: c.top, right: c.right, bottom: c.bottom, w, h })
+          }
+        }
+      }
       if (offRenderer) {
         renderQueue.push({ pts, step, w, h, yuv: code === 7, ab, len })
         ensureRenderLoop()
@@ -603,6 +744,7 @@ function pump () {
     if (bufferedAhead() || (performance.now() - tStart) >= maxSliceMs) break
   }
   if (!bufferedAhead()) schedulePump(0)
+  armWatchdog()
 }
 
 async function handleCmd (msg) {
@@ -669,8 +811,12 @@ async function handleCmd (msg) {
     clockMedia = 0
     clockWallMs = nowWall()
     clockPlaying = false
+    streamCropDone = false
+    streamCropCandidate = null
+    streamCropSame = 0
     queuedVideoSec = 0
     queuedAudioSec = 0
+    lastCreditAt = lastDrawAt = nowWall()
     lastVideoPts = null
     eof = false
     const modeInt = useMse ? 1 : (useWebCodecs ? 2 : 0)
@@ -683,6 +829,7 @@ async function handleCmd (msg) {
     wasm.pt_set_clock?.(0)
     if (offRenderer && !useMse) ensureRenderLoop()
     schedulePump(0)
+    armWatchdog()
   } else if (msg.cmd === 'seek') {
     activeSeq = msg.seq
     currentVideoStream = msg.videoStream
@@ -700,8 +847,12 @@ async function handleCmd (msg) {
     clockMedia = target
     clockWallMs = nowWall()
     clockPlaying = false
+    streamCropDone = false
+    streamCropCandidate = null
+    streamCropSame = 0
     queuedVideoSec = 0
     queuedAudioSec = 0
+    lastCreditAt = lastDrawAt = nowWall()
     lastVideoPts = null
     eof = false
     const modeInt = useMse ? 1 : (useWebCodecs ? 2 : 0)
@@ -712,13 +863,17 @@ async function handleCmd (msg) {
     self.postMessage({ type: 'flushed', seq: activeSeq, time: target })
     if (offRenderer && !useMse) ensureRenderLoop()
     schedulePump(0)
+    armWatchdog()
   } else if (msg.cmd === 'clock') {
     if (typeof msg.time === 'number') clockMedia = Math.max(0, msg.time)
     clockWallMs = typeof msg.wallMs === 'number' ? msg.wallMs : nowWall()
     clockPlaying = Boolean(msg.playing)
+    if (typeof msg.hidden === 'boolean') pageHidden = msg.hidden
+    lastCreditAt = nowWall()
     if (wasm) wasm.pt_set_clock?.(workerMediaTime())
     if (offRenderer && !useMse && clockPlaying) ensureRenderLoop()
     if (!eof && !bufferedAhead()) schedulePump(0)
+    if (clockPlaying) armWatchdog()
   } else if (msg.cmd === 'consumed') {
     if (!offRenderer || useMse) {
       queuedVideoSec = Math.max(0, queuedVideoSec - (Number(msg.videoSec) || 0))
@@ -727,9 +882,15 @@ async function handleCmd (msg) {
     if (typeof msg.time === 'number') clockMedia = Math.max(0, msg.time)
     clockWallMs = typeof msg.wallMs === 'number' ? msg.wallMs : nowWall()
     if (typeof msg.playing === 'boolean') clockPlaying = msg.playing
+    if (typeof msg.hidden === 'boolean') pageHidden = msg.hidden
+    lastCreditAt = nowWall()
     if (wasm) wasm.pt_set_clock?.(workerMediaTime())
     if (!eof && !bufferedAhead()) schedulePump(0)
+    if (clockPlaying) armWatchdog()
+  } else if (msg.cmd === 'block') {
+    if (msg.buf && msg.buf.byteLength > 0) putBlock(Number(msg.block) || 0, new Uint8Array(msg.buf))
   } else if (msg.cmd === 'close') {
+    if (watchdog !== null) { clearTimeout(watchdog); watchdog = null }
     closed = true
     configured = false
     eof = true

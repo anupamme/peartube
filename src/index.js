@@ -19,6 +19,8 @@ const HEX64 = /^[0-9a-f]{64}$/
 const MAX_TITLE = 300
 const BLOB_BLOCK_SIZE = 512 * 1024
 const MAX_CONTENT_TOPICS = 24
+// How often content beyond the announcement cap gets its turn on the DHT.
+const CONTENT_TOPIC_ROTATE_MS = 20_000
 const isUniform512 = blob => Boolean(blob && (
   blob.byteLength === 0 || (
     blob.blockLength > 0 &&
@@ -348,12 +350,24 @@ export async function createNode ({
 
   // Spreads both PearTube's merged blob topic and stock Hypercore discoveryKey wide on public swarms so supplemental HiveRelays find every wet 512 KiB block.
   const contentTopics = new Map()
-  function joinContentSwarm (blobsHex) {
-    if (dht || closing || !str(blobsHex, HEX64) || contentTopics.has(blobsHex)) return
+  function joinContentSwarm (blobsHex, evict = true) {
+    if (dht || closing || !str(blobsHex, HEX64)) return
+    // Re-joining an announced topic only refreshes its place in line: the eviction order is the
+    // serving order, so a title being played is the last one dropped.
+    if (contentTopics.has(blobsHex)) {
+      const live = contentTopics.get(blobsHex)
+      contentTopics.delete(blobsHex)
+      contentTopics.set(blobsHex, live)
+      return
+    }
     if (contentTopics.size >= MAX_CONTENT_TOPICS) {
-      const oldest = contentTopics.keys().next().value
-      const oldTopics = contentTopics.get(oldest)
-      contentTopics.delete(oldest)
+      // Catalog reads never displace a topic just because a refresh saw a cached copy. Deliberate
+      // joins still rotate the least recently served title out, owned or not: a finished download
+      // walks the same queue, so a large library still gets its turn.
+      if (!evict) return
+      const victim = contentTopics.keys().next().value
+      const oldTopics = contentTopics.get(victim)
+      contentTopics.delete(victim)
       for (const t of oldTopics) {
         swarm.leave(t).catch(() => {})
         lan?.leave?.(t)
@@ -377,6 +391,20 @@ export async function createNode ({
     if (contentTopics.size >= MAX_CONTENT_TOPICS) break
     joinContentSwarm(hex)
   }
+  // Content past the cap gets its turn slowly, one complete copy at a time. The status poll used to
+  // join every cached core it walked, which churned the DHT and evicted whatever it happened to see.
+  const rotateTimer = setInterval(() => {
+    if (closing) return
+    const candidates = []
+    for (const [hex, core] of blobCores) {
+      if (contentTopics.has(hex) || !core.opened || core.length === 0) continue
+      ensureBlockCounter(core)
+      if (localBlocks(core) >= core.length) candidates.push(hex)
+    }
+    for (const hex of ownedBlobs.keys()) if (!contentTopics.has(hex)) candidates.push(hex)
+    if (candidates.length > 0) joinContentSwarm(candidates[0])
+  }, CONTENT_TOPIC_ROTATE_MS)
+  rotateTimer.unref?.()
   function leaveContentSwarm (blobsHex) {
     const oldTopics = contentTopics.get(blobsHex)
     if (!oldTopics) return
@@ -731,7 +759,7 @@ export async function createNode ({
       const owned = ownedBlobs.get(entry.blobs)
       const core = owned ? null : blobCores.get(entry.blobs)
       const cached = owned ? entry.size : await entryCachedBytes(core, entry)
-      if (cached > 0 && !owned) joinContentSwarm(entry.blobs)
+      if (cached > 0 && !owned) joinContentSwarm(entry.blobs, false)
       return {
         key,
         id: entry.id,
@@ -1357,6 +1385,8 @@ export async function createNode ({
       ? 'seeder'
       : (seededBytes > 0 || contributingPeers > 0 ? 'peer' : 'leecher')
     // Mobile/TV BareKit worklets share Android's 256 KiB rmem_max UDP socket; never let background cores blast [16,48] retransmits over Wi-Fi.
+    // Measured 2026-10-29: widening this to [24,64] made a 5 GHz phone worse (erratic 0.9–15.9 MB/s,
+    // decoded fps 15.7 → 11.5). Keep the small window until the socket buffers are tuned with evidence.
     const next = dht
       ? (tier === 'seeder' ? [64, 192] : tier === 'peer' ? [48, 128] : [24, 64])
       : isWorklet
@@ -1410,7 +1440,6 @@ export async function createNode ({
         const blocks = localBlocks(c)
         if (blocks > 0) {
           cachedBytes += Math.min(coreByteLen(c), Math.round((blocks / c.length) * coreByteLen(c)))
-          joinContentSwarm(k)
         }
       }
     }
@@ -1425,7 +1454,8 @@ export async function createNode ({
     }, 0)
     const reciprocity = applyReciprocity(blobBytes + cachedBytes, txBytes, rxBytes, contributingPeers)
     return {
-      tracker: usePrimaryTracker ? primaryKey : (extraSources.keys().next().value || primaryKey),
+      // No primary tracker means the node follows channels only; never report a channel as a tracker.
+      tracker: usePrimaryTracker ? primaryKey : '',
       channel: channelKey,
       writer: b4a.toString(tracker.local.key, 'hex'),
       blobs: blobsKey,
@@ -1479,6 +1509,7 @@ export async function createNode ({
     closingPromise = (async () => {
       clearInterval(peerTimer)
       clearInterval(refreshTimer)
+      clearInterval(rotateTimer)
       for (const ranges of warmRanges.values()) for (const r of ranges) r.destroy()
       warmRanges.clear()
       await lan?.destroy()

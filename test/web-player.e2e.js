@@ -1,0 +1,160 @@
+// End-to-end check of the shipped browser engine (`web/assets/peartube_web.wasm`) on files whose
+// timestamps are stored in decode order — the shape of Spider-Man: Far From Home's MP4 (no `ctts`).
+//
+// Each codec gets a normal twin (presentation times in the container) and a decode-order twin
+// (`setts=pts=DTS`, every packet stamped with its decode time). Both go through the engine over its
+// real C ABI in all three output modes, and the decode-order twin must come out identical to the
+// normal one:
+//   - software decode: the same 72 pictures at 24 fps, never stepping backward;
+//   - MSE: the same init and media segment bytes, so the browser muxes display times;
+//   - WebCodecs: the same packet timestamps, so the platform decoder shows them in order.
+// Before the demux repair the software path lost 4 of 72 pictures and stepped backward 28 times,
+// and the worker drew half of them as late.
+//
+// Needs ffmpeg. Writes `desktop/target/e2e/web-player-result.json`.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+const root = new URL('..', import.meta.url).pathname
+const wasmPath = join(root, 'web/assets/peartube_web.wasm')
+const outDir = join(root, 'desktop/target/e2e')
+const FPS = 24000 / 1001
+const FRAMES = 72
+const MODE = { software: 0, mse: 1, webcodecs: 2 }
+
+// The two bodies: a normal file and the same movie with every stamp pulled back to its decode time.
+function twins (name, videoArgs) {
+  const dir = mkdtempSync(join(tmpdir(), 'peartube-web-player-'))
+  const normal = join(dir, `${name}.mp4`)
+  const decodeOrder = join(dir, `${name}-decode-order.mp4`)
+  execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=24000/1001',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000',
+    '-t', '3', '-map', '0:v', '-map', '1:a', ...videoArgs,
+    '-c:a', 'aac', '-ac', '2', '-f', 'mp4', normal])
+  execFileSync('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', normal,
+    '-map', '0', '-c', 'copy', '-bsf:v', 'setts=pts=DTS', '-f', 'mp4', decodeOrder])
+  return { dir, normal: readFileSync(normal), decodeOrder: readFileSync(decodeOrder) }
+}
+
+// One file through the engine exactly as the Worker drives it: a host that answers Range reads and,
+// for the software path, a clock that follows the pictures already shown.
+async function run (bytes, mode) {
+  const wasmBytes = readFileSync(wasmPath)
+  let wasm = null
+  const imports = {
+    env: {
+      host_stream_len: () => BigInt(bytes.length),
+      host_read_at: (offsetBig, dst, len) => {
+        const offset = Number(offsetBig)
+        if (offset >= bytes.length) return 0
+        const n = Math.min(len, bytes.length - offset)
+        new Uint8Array(wasm.memory.buffer, dst, n).set(bytes.subarray(offset, offset + n))
+        return n
+      }
+    }
+  }
+  const { instance } = await WebAssembly.instantiate(wasmBytes, imports)
+  wasm = instance.exports
+  const json = () => {
+    const ptr = wasm.pt_json_ptr() >>> 0
+    const len = wasm.pt_json_len() >>> 0
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(wasm.memory.buffer, ptr, len)))
+  }
+
+  assert.equal(wasm.pt_open(0, 0), 0, 'the engine opens the file')
+  const manifest = json()
+  assert.equal(wasm.pt_configure(manifest.defaultVideo, manifest.defaultAudio, -1, mode), 0, 'the engine takes the streams')
+  const out = { manifest, frames: [], audio: [], segments: [], packets: [] }
+  let code
+  let guard = 0
+  while ((code = wasm.pt_step()) !== 0 && guard++ < 100000) {
+    assert.ok(code > 0, 'decode stops only at the end: ' + JSON.stringify(json()))
+    if (code === 3 || code === 7) {
+      out.frames.push(wasm.pt_out_pts())
+      if (mode === MODE.software) wasm.pt_set_clock(out.frames.length / FPS)
+    } else if (code === 4) {
+      out.audio.push(wasm.pt_out_pts())
+    } else if (code === 1 || code === 2) {
+      const ptr = wasm.pt_out_ptr() >>> 0
+      const len = wasm.pt_out_len() >>> 0
+      const digest = createHash('sha256').update(Buffer.from(new Uint8Array(wasm.memory.buffer, ptr, len))).digest('hex')
+      out.segments.push({ code, start: wasm.pt_out_pts(), end: wasm.pt_out_dur(), digest })
+    } else if (code === 8) {
+      out.packets.push(wasm.pt_out_pts())
+    }
+  }
+  return out
+}
+
+function cadence (frames) {
+  const steps = frames.slice(1).map((pts, i) => pts - frames[i])
+  return {
+    count: frames.length,
+    backwards: steps.filter(step => step <= 0).length,
+    min: Math.min(...steps),
+    max: Math.max(...steps)
+  }
+}
+
+function same (a, b, what) {
+  assert.equal(a.length, b.length, `${what} count: ${a.length} vs ${b.length}`)
+  for (let i = 0; i < a.length; i++) {
+    if (typeof a[i] === 'number') assert.ok(Math.abs(a[i] - b[i]) < 1e-6, `${what}[${i}]: ${a[i]} vs ${b[i]}`)
+    else assert.deepEqual(a[i], b[i], `${what}[${i}]`)
+  }
+}
+
+test('the browser engine plays H.264 and HEVC stamped in decode order at presentation times', async () => {
+  const cases = [
+    { name: 'hevc', args: ['-pix_fmt', 'yuv420p10le', '-c:v', 'libx265', '-x265-params', 'keyint=24:min-keyint=24:log-level=error'] },
+    { name: 'h264', args: ['-pix_fmt', 'yuv420p', '-c:v', 'libx264', '-g', '24'] }
+  ]
+  const result = { cases: {}, at: new Date().toISOString() }
+  for (const { name, args } of cases) {
+    const twin = twins(name, args)
+    try {
+      const normal = {}
+      const decodedOrder = {}
+      for (const [kind, mode] of Object.entries(MODE)) {
+        normal[kind] = await run(twin.normal, mode)
+        decodedOrder[kind] = await run(twin.decodeOrder, mode)
+        const expected = name === 'hevc' ? 'hvc1.' : 'avc1.'
+        assert.ok(String(normal[kind].manifest.mseCodec).startsWith(expected), `${name} muxes as ${expected}: ${normal[kind].manifest.mseCodec}`)
+      }
+
+      // Software decode: every picture, in order, at 24 fps, and audio that follows the same clock.
+      for (const played of [normal.software, decodedOrder.software]) {
+        const shape = cadence(played.frames)
+        assert.equal(shape.count, FRAMES, `${name} software shows all ${FRAMES} pictures: ${shape.count}`)
+        assert.equal(shape.backwards, 0, `${name} software never steps backward: ${shape.backwards}`)
+        assert.ok(shape.min >= 0.03 && shape.max <= 0.06, `${name} software holds 24 fps: ${shape.min.toFixed(4)}..${shape.max.toFixed(4)}`)
+        assert.ok(played.audio.length > 0, `${name} software decodes audio`)
+      }
+      same(normal.software.frames, decodedOrder.software.frames, `${name} software picture times`)
+      assert.equal(normal.software.audio.length, decodedOrder.software.audio.length, `${name} software audio chunks`)
+
+      // MSE: the browser must receive byte-identical segments, so the muxed composition times are
+      // the same presentation times a normal file carries.
+      same(normal.mse.segments, decodedOrder.mse.segments, `${name} MSE segments`)
+      assert.ok(normal.mse.segments.length > 1, `${name} MSE emits media segments`)
+
+      // WebCodecs: the platform decoder must be handed the same display timestamps.
+      same(normal.webcodecs.packets, decodedOrder.webcodecs.packets, `${name} WebCodecs packet times`)
+      assert.ok(normal.webcodecs.packets.length === FRAMES, `${name} WebCodecs packets: ${normal.webcodecs.packets.length}`)
+
+      result.cases[`${name}-software`] = cadence(decodedOrder.software.frames)
+      result.cases[`${name}-mse`] = { segments: decodedOrder.mse.segments.length, first: decodedOrder.mse.segments.slice(0, 3) }
+      result.cases[`${name}-webcodecs`] = { packets: decodedOrder.webcodecs.packets.length, first: decodedOrder.webcodecs.packets.slice(0, 4) }
+    } finally {
+      rmSync(twin.dir, { recursive: true, force: true })
+    }
+  }
+  mkdirSync(outDir, { recursive: true })
+  writeFileSync(join(outDir, 'web-player-result.json'), JSON.stringify(result, null, 2))
+})
