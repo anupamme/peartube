@@ -57,6 +57,32 @@ export const page = `<!doctype html>
   .acts { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
   .poster { width: 48px; height: 72px; border-radius: 6px; flex: none; background: var(--raised); object-fit: cover; display: flex; align-items: center; justify-content: center; color: var(--dim); font-weight: 700; font-size: 18px; overflow: hidden; }
   .thumb { width: 128px; height: 72px; }
+  .lib-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .lib-tools .kinds { display: flex; gap: 6px; flex-wrap: wrap; }
+  .lib-tools input { flex: 1; min-width: 200px; width: auto; }
+  .chip[aria-pressed='true'] { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .chip .count { opacity: .7; font-size: 13px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px 14px; }
+  .tile { display: flex; flex-direction: column; gap: 2px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; min-width: 0; }
+  .tile .poster { width: 100%; height: auto; aspect-ratio: 2 / 3; border-radius: 10px; font-size: 40px; margin-bottom: 6px; background: linear-gradient(160deg, var(--raised), var(--line)); transition: transform .15s, box-shadow .15s; }
+  .grid > .empty { grid-column: 1 / -1; }
+  .tile:hover .poster, .tile:focus-visible .poster { transform: translateY(-2px); box-shadow: 0 6px 18px #0004; }
+  .tile:focus-visible { outline: none; }
+  .tile:focus-visible .poster { outline: 3px solid var(--focus); }
+  .tile-title { font-weight: 600; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .tile-meta { color: var(--dim); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile-meta.ok { color: var(--ok); }
+  .more { grid-column: 1 / -1; display: flex; justify-content: center; padding: 8px; }
+  #detail { width: min(720px, calc(100% - 24px)); max-height: calc(100% - 48px); padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--text); }
+  #detail::backdrop { background: #0009; }
+  #detail .bar { padding: 10px 10px 0 16px; justify-content: flex-end; }
+  #detailBody { padding: 0 20px 20px; }
+  .detail-head { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
+  .detail-head .poster { width: 96px; height: 144px; font-size: 32px; }
+  .detail-head h3 { font-size: 20px; margin: 4px 0 6px; }
+  .rows { display: flex; flex-direction: column; }
+  .row-item { display: flex; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+  #detail .meta { white-space: normal; }
   .bar-track { height: 6px; background: var(--raised); border-radius: 3px; margin-top: 8px; overflow: hidden; }
   .bar-track > div { height: 100%; background: var(--brand); transition: width .3s; }
   .tag { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--raised); color: var(--dim); white-space: nowrap; font-weight: 500; }
@@ -103,6 +129,9 @@ export const page = `<!doctype html>
     .tabs a { padding: 12px 9px 10px; }
     .thumb { width: 96px; height: 54px; }
     .setting .control { max-width: none; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 14px 10px; }
+    .tile .poster { font-size: 28px; }
+    .detail-head .poster { width: 72px; height: 108px; font-size: 24px; }
     .p-top { flex-wrap: wrap; }
     #playerModal .p-head { flex-basis: 100%; }
     #playerModal .p-title { white-space: normal; }
@@ -190,8 +219,11 @@ export const page = `<!doctype html>
     </div>
     <div id="jobsWrap" hidden><h2>Adding <span class="count" id="jobCount"></span></h2><div class="list" id="jobs"></div></div>
     <h2>Library <span class="count" id="libCount"></span></h2>
-    <div class="field" id="filterWrap" hidden><input id="libFilter" type="search" aria-label="Filter library" placeholder="Big Buck Bunny"></div>
-    <div class="list" id="entries"></div>
+    <div class="lib-tools" id="libTools" hidden>
+      <div class="kinds" id="libKinds" role="group" aria-label="Show"></div>
+      <input id="libFilter" type="search" aria-label="Search library" placeholder="Big Buck Bunny">
+    </div>
+    <div class="grid" id="entries"></div>
   </section>
 
   <section id="tab-channels" data-panel="channels" hidden>
@@ -263,6 +295,10 @@ export const page = `<!doctype html>
     <div id="settingsBody"></div>
   </section>
 </main>
+<dialog id="detail" aria-labelledby="detailTitle">
+  <div class="bar"><button class="btn quiet" id="detailClose" type="button">Close</button></div>
+  <div id="detailBody"></div>
+</dialog>
 <div id="castBar" hidden></div>
 <div id="toast" role="status" hidden></div>
 <div id="playerModal" role="dialog" aria-modal="true" aria-labelledby="pTitle">
@@ -620,55 +656,153 @@ function renderJobs () {
   }))
 }
 
-function entryKind (id) {
-  if (/^imdb:tt[0-9]+:s[0-9]+e[0-9]+$/.test(id)) return 'Episode'
-  if (/^imdb:tt[0-9]+$/.test(id)) return 'Movie'
-  return 'Video'
-}
+// ---- Library: one tile per title (the relay already returns one entry per file). Episodes group under their show,
+// numbered from the id, since their titles are usually just the show's name.
+const where = e => e.local ? 'Saved here' : e.cachedBytes ? 'Partly saved' : 'On the network'
 function sourceName (key) {
   const s = (S.sources.sources || []).find(x => x.key === key)
-  if (!s || s.writable) return 'this relay'
-  return s.alias || (s.kind === 'channel' ? 'channel ' : 'tracker ') + short(s.key)
+  if (!s || s.writable) return ''
+  return s.alias || (s.kind === 'channel' ? 'Channel ' : 'Tracker ') + short(s.key)
 }
-function renderLibrary () {
+function libraryTiles () {
+  const tiles = new Map()
+  for (const e of S.entries) {
+    const m = e.id.match(/^imdb:(tt[0-9]+)(?::s([0-9]+)e([0-9]+))?$/)
+    const kind = !m ? 'video' : m[2] ? 'show' : 'movie'
+    const key = kind === 'video' ? 'v:' + e.id + '/' + e.sha256 : kind + ':' + m[1]
+    let t = tiles.get(key)
+    if (!t) tiles.set(key, t = { key, kind, imdb: m ? m[1] : null, title: e.title.replace(/\\s+S[0-9]+E[0-9]+$/i, ''), items: [] })
+    t.items.push({ e, season: m && m[2] ? Number(m[2]) : null, episode: m && m[3] ? Number(m[3]) : null })
+  }
+  for (const t of tiles.values()) {
+    t.items.sort((a, b) => (a.season - b.season) || (a.episode - b.episode) || (b.e.size - a.e.size))
+    t.saved = t.items.filter(i => i.e.local).length
+    t.partial = t.items.some(i => !i.e.local && i.e.cachedBytes)
+  }
+  return [...tiles.values()].sort((a, b) => a.title.localeCompare(b.title))
+}
+function tileLine (t) {
+  const n = t.items.length
+  if (t.kind === 'show') {
+    const seasons = new Set(t.items.map(i => i.season)).size
+    return (seasons > 1 ? plural(seasons, 'season', 'seasons') + ' · ' : '') + plural(n, 'episode', 'episodes')
+  }
+  const e = t.items[0].e
+  return [t.kind === 'movie' ? 'Movie' : 'Video', n > 1 ? n + ' versions' : size(e.size)].join(' · ')
+}
+function tileState (t) {
+  if (t.saved === t.items.length) return ['Saved here', 'ok']
+  if (t.saved || t.partial) return [t.kind === 'show' && t.saved ? t.saved + ' saved here' : 'Partly saved', '']
+  return ['On the network', '']
+}
+
+let libKind = 'all'
+let libShown = 60
+let libSignature = ''
+const KINDS = [['all', 'All'], ['movie', 'Movies'], ['show', 'Shows'], ['video', 'Videos']]
+function renderLibrary (force) {
   renderJobs()
+  const all = libraryTiles()
   const q = $('libFilter').value.trim().toLowerCase()
-  const all = S.entries.slice().sort((a, b) => (Number(Boolean(b.local)) - Number(Boolean(a.local))) || a.title.localeCompare(b.title))
-  const list = q ? all.filter(e => e.title.toLowerCase().includes(q)) : all
+  const list = all.filter(t => (libKind === 'all' || t.kind === libKind) && (!q || t.title.toLowerCase().includes(q)))
+  // Progress polls arrive every few seconds; redraw only when what the grid shows has changed.
+  const signature = [libKind, q, libShown, S.offline, ...list.slice(0, libShown).map(t => t.key + tileState(t)[0] + t.items.length)].join('|')
+  if (!force && signature === libSignature) return
+  libSignature = signature
   $('libCount').textContent = all.length ? String(all.length) : ''
-  $('filterWrap').hidden = all.length < 8
+  $('libTools').hidden = all.length < 2
+  $('libKinds').replaceChildren(...KINDS.map(([k, label]) => {
+    const n = k === 'all' ? all.length : all.filter(t => t.kind === k).length
+    return n || k === 'all' ? h('button', { class: 'chip', 'aria-pressed': String(libKind === k), onclick: () => { libKind = k; libShown = 60; renderLibrary() } }, label + ' ', h('span', { class: 'count' }, String(n))) : null
+  }).filter(Boolean))
   if (!all.length) {
     $('entries').replaceChildren(h('div', { class: 'empty' }, S.offline ? 'Can’t reach the relay.' : 'Nothing here yet. Paste a link above to add a video.'))
     return
   }
-  const tvs = (S.cast && S.cast.receivers) || []
-  $('entries').replaceChildren(...(list.length ? list.map(e => {
-    const imdb = (e.id.match(/^imdb:(tt[0-9]+)/) || [])[1]
-    const where = e.local ? 'Saved here' : e.cachedBytes ? 'Partly saved' : 'On the network'
-    const castWrap = h('span', { class: 'wrap-rel' })
-    if (tvs.length) {
-      castWrap.append(h('button', { class: 'btn', 'aria-haspopup': 'menu', onclick: () => {
-        if (castWrap.querySelector('.menu')) return castWrap.querySelector('.menu').remove()
-        castWrap.append(h('div', { class: 'menu', role: 'menu' }, tvs.map(tv => h('button', { class: 'btn', role: 'menuitem', onclick: ev => act(ev.currentTarget, async () => {
-          await api('/v1/cast/play', { body: { receiverId: tv.id, key: e.key } })
-          castWrap.querySelector('.menu')?.remove()
-          toast('Playing on ' + tv.name)
-          loadCast()
-        }) }, tv.name))))
-      } }, 'Cast'))
-    }
-    return h('div', { class: 'item' },
-      posterBox(imdb ? '/v1/poster/' + imdb : null, e.title),
-      h('div', { class: 'info' },
-        h('div', { class: 'name' }, e.title),
-        h('div', { class: 'meta' }, [entryKind(e.id), size(e.size), where, 'from ' + sourceName(e.source)].filter(Boolean).join(' · '))),
-      h('div', { class: 'acts' },
-        h('button', { class: 'btn primary', 'data-play': true, onclick: () => openPlayer(e) }, 'Play'),
-        castWrap,
-        copyBtn('Copy link', e.magnetUrl)))
-  }) : [h('div', { class: 'empty' }, 'No titles match “' + q + '”.')]))
+  if (!list.length) {
+    $('entries').replaceChildren(h('div', { class: 'empty' }, q ? 'No titles match “' + q + '”.' : 'Nothing in this view.'))
+    return
+  }
+  $('entries').replaceChildren(...list.slice(0, libShown).map(t => {
+    const [state, tone] = tileState(t)
+    return h('button', { class: 'tile', 'data-tile': t.key, onclick: () => openDetail(t.key) },
+      posterBox(t.imdb ? '/v1/poster/' + t.imdb : null, t.title),
+      h('span', { class: 'tile-title' }, t.title),
+      h('span', { class: 'tile-meta' }, tileLine(t)),
+      h('span', { class: 'tile-meta' + (tone ? ' ' + tone : '') }, state))
+  }), ...(list.length > libShown ? [h('div', { class: 'more', id: 'libMore' }, h('button', { class: 'btn', onclick: showMore }, 'Show more'))] : []))
+  const more = $('libMore')
+  if (more && 'IntersectionObserver' in window) {
+    const io = new IntersectionObserver(entries => { if (entries.some(x => x.isIntersecting)) { io.disconnect(); showMore() } }, { rootMargin: '600px' })
+    io.observe(more)
+  }
+  if ($('detail').open) renderDetail()
 }
-$('libFilter').oninput = () => renderLibrary()
+function showMore () { libShown += 60; renderLibrary() }
+$('libFilter').oninput = () => { libShown = 60; renderLibrary() }
+
+// ---- Library: details sheet (play, cast, copy; a show's episodes by season)
+let detailKey = null
+let detailSeason = null
+function openDetail (key) {
+  detailKey = key
+  detailSeason = null
+  renderDetail()
+  if (!$('detail').open) $('detail').showModal()
+}
+function castButton (e) {
+  const tvs = (S.cast && S.cast.receivers) || []
+  if (!tvs.length) return null
+  const wrap = h('span', { class: 'wrap-rel' })
+  wrap.append(h('button', { class: 'btn', 'aria-haspopup': 'menu', onclick: () => {
+    if (wrap.querySelector('.menu')) return wrap.querySelector('.menu').remove()
+    wrap.append(h('div', { class: 'menu', role: 'menu' }, tvs.map(tv => h('button', { class: 'btn', role: 'menuitem', onclick: ev => act(ev.currentTarget, async () => {
+      await api('/v1/cast/play', { body: { receiverId: tv.id, key: e.key } })
+      wrap.querySelector('.menu')?.remove()
+      toast('Playing on ' + tv.name)
+      loadCast()
+    }) }, tv.name))))
+  } }, 'Cast'))
+  return wrap
+}
+function play (e) {
+  $('detail').close()
+  openPlayer(e)
+}
+function fileRow (label, e) {
+  const from = sourceName(e.source)
+  return h('div', { class: 'row-item' },
+    h('div', { class: 'grow' }, h('div', { class: 'label' }, label), h('div', { class: 'meta' }, [size(e.size), where(e), from && 'from ' + from].filter(Boolean).join(' · '))),
+    h('div', { class: 'acts' }, h('button', { class: 'btn primary', 'data-play': true, onclick: () => play(e) }, 'Play'), castButton(e), h('button', { class: 'btn quiet', title: e.magnetUrl, onclick: () => copyText(e.magnetUrl) }, 'Copy link')))
+}
+function renderDetail () {
+  const t = libraryTiles().find(x => x.key === detailKey)
+  const box = $('detailBody')
+  if (!t) { box.replaceChildren(h('div', { class: 'empty' }, 'This title is no longer in the library.')); return }
+  const head = h('div', { class: 'detail-head' },
+    posterBox(t.imdb ? '/v1/poster/' + t.imdb : null, t.title),
+    h('div', { class: 'grow' }, h('h3', { id: 'detailTitle' }, t.title), h('div', { class: 'meta' }, tileLine(t) + ' · ' + tileState(t)[0])))
+  let body
+  if (t.kind === 'show') {
+    const seasons = [...new Set(t.items.map(i => i.season))]
+    if (detailSeason == null || !seasons.includes(detailSeason)) detailSeason = seasons[0]
+    const pick = seasons.length > 1
+      ? h('div', { class: 'field' }, h('label', { for: 'seasonPick' }, 'Season'), h('select', { id: 'seasonPick', onchange: ev => { detailSeason = Number(ev.target.value); renderDetail() } },
+        seasons.map(s => h('option', { value: String(s), selected: s === detailSeason }, 'Season ' + s + ' (' + t.items.filter(i => i.season === s).length + ')'))))
+      : null
+    body = [pick, h('div', { class: 'rows' }, t.items.filter(i => i.season === detailSeason).map(i => fileRow('S' + String(i.season).padStart(2, '0') + 'E' + String(i.episode).padStart(2, '0'), i.e)))]
+  } else if (t.items.length > 1) {
+    body = [h('div', { class: 'rows' }, t.items.map((i, n) => fileRow('Version ' + (n + 1), i.e)))]
+  } else {
+    const e = t.items[0].e
+    const from = sourceName(e.source)
+    body = [h('div', { class: 'meta' }, [where(e), from && 'from ' + from].filter(Boolean).join(' · ')),
+      h('div', { class: 'row', style: 'margin-top:14px' }, h('button', { class: 'btn primary', 'data-play': true, onclick: () => play(e) }, 'Play'), castButton(e), copyBtn('Copy link', e.magnetUrl))]
+  }
+  box.replaceChildren(head, ...body)
+}
+$('detailClose').onclick = () => $('detail').close()
+$('detail').addEventListener('click', ev => { if (ev.target === $('detail')) $('detail').close() })
 
 // ---- Channels
 $('followInput').oninput = () => { $('followKindWrap').hidden = !HEX.test($('followInput').value.trim()) }

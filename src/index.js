@@ -727,7 +727,7 @@ export async function createNode ({
       if (!exists) return null
       return blobCore(h)
     }))
-    return Promise.all(raw.map(async ({ key, entry, source, sourceKind }) => {
+    const results = await Promise.all(raw.map(async ({ key, entry, source, sourceKind }) => {
       const owned = ownedBlobs.get(entry.blobs)
       const core = owned ? null : blobCores.get(entry.blobs)
       const cached = owned ? entry.size : await entryCachedBytes(core, entry)
@@ -746,6 +746,17 @@ export async function createNode ({
         sourceKind
       }
     }))
+    // One result per file. Writers that announced a file and were later reset leave copies nobody stores (old shared
+    // slots), and they can't be removed: only their writer could. Keep the copy most likely to play: owned, then most
+    // cached here, then a per-video core (offset 0), then the tracker founder's own.
+    const rank = r => [r.local ? 1 : 0, r.cachedBytes, r.key.endsWith(':0') ? 1 : 0, r.key.split('/')[1] === primaryKey ? 1 : 0]
+    const better = (a, b) => { const x = rank(a), y = rank(b); for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false }
+    const files = new Map()
+    for (const r of results) {
+      const k = `${r.id}/${r.sha256}`
+      if (!files.has(k) || better(r, files.get(k))) files.set(k, r)
+    }
+    return [...files.values()]
   }
 
   let discoveredCache = null

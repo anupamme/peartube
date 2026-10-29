@@ -325,6 +325,12 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     const movie = await waitApi(async () => (await entries()).find(e => e.id === 'imdb:tt1254207'), 'identified entry')
     assert.equal(movie.title, 'Big Buck Bunny 2008')
     assert.equal((await getJson('/v1/search?id=imdb:tt1254207')).results.length, 1, 'MediaStorm finds it by imdb id')
+    // The same file announced again (a second copy in its own core) is still one entry and one tile.
+    const again = await (await fetch(base + '/v1/acquire', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'imdb:tt1254207', title: 'Big Buck Bunny 2008', source: { url: stub.base + '/media/Big.Buck.Bunny.2008.1080p.BluRay.x264-GRP.mp4' } }) })).json()
+    await waitApi(async () => (await getJson('/v1/jobs/' + again.jobId)).status === 'done', 'second copy announced')
+    assert.equal((await getJson('/v1/search?id=imdb:tt1254207')).results.length, 1, 'two copies of one file are one entry')
+    await waitFor(`document.querySelectorAll('#entries .tile').length === 1`, 'one tile for the duplicated file')
+    result.checks.duplicateCopiesCollapse = true
     const poster = await fetch(base + '/v1/poster/tt1254207', { redirect: 'manual' })
     assert.equal(poster.status, 302)
     assert.equal(poster.headers.get('location'), stub.base + '/poster.png')
