@@ -1577,6 +1577,7 @@ export async function createNode ({
     streamUrl,
     blobServer: server,
     setLan,
+    lanStats: () => (lan ? lan.stats() : null),
     close,
     get closing () { return closing }
   }

@@ -223,7 +223,7 @@ const methods = {
         backdropUrl: imdb => backdropUrl(CINEMETA, imdb),
         get cast () { return cast },
         apiToken,
-        extraStatus: () => ({ lan: lanNote, apiUrl }),
+        extraStatus: () => ({ lan: lanNote, apiUrl, lanStats: node?.lanStats?.() ?? null }),
         onSourcesChanged: list => send({ event: 'sources', sources: list })
       })
       apiUrl = await listenLoopback(srv, Number(apiPort) || 8174)

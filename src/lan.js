@@ -441,6 +441,10 @@ class LanDiscovery extends EventEmitter {
     }
   }
 
+  stats () {
+    return { peers: this._peers.size, connections: this.connections.size, topics: this._topics.size, direct: this._directPeers.size }
+  }
+
   // Mounts a known LAN peer straight by IP:port when Wi-Fi multicast gags on mDNS.
   dialDirect (publicKey, host, port) {
     if (this.destroyed || this.suspended || !isIPv4(String(host || '')) || !(port > 0)) return
@@ -455,8 +459,10 @@ class LanDiscovery extends EventEmitter {
   }
 
   _dial (peer) {
-    const relayAddresses = [{ host: peer.host, port: peer.port }]
-    const socket = this.dht.connect(peer.publicKey, { keyPair: this.keyPair, relayAddresses })
+    // `connect` takes close DHT `nodes` to reach the peer (announce's `relayAddresses` is a different
+    // thing, for nodes that forward to us). Passing both keeps older behaviour and adds the documented path.
+    const address = { host: peer.host, port: peer.port }
+    const socket = this.dht.connect(peer.publicKey, { keyPair: this.keyPair, nodes: [address], relayAddresses: [address] })
     const entry = { socket, host: peer.host, port: peer.port }
     this._pending.set(peer.id, entry)
     socket.on('error', () => {})
