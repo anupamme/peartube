@@ -1,5 +1,5 @@
 // Dedicated Web Worker driving peartube-media's SIMD128 Rust/OxideAV WebAssembly engine:
-//   - Async fetch() 6 MiB read-ahead prefetcher over a 32 MiB RAM ring so WASM never stalls on sync XHR
+//   - The page fetches 2 MiB blocks ahead and posts them into a 64 MiB ring; a wasm read never blocks on sync XHR
 //   - Zero-allocation OffscreenCanvas WebGL2/WebGL1 YUV420 + RGBA + WebCodecs GPU renderer inside the Worker
 //   - Recycled Transferable ArrayBuffer pools for zero steady-state GC churn
 let wasm = null
@@ -45,20 +45,15 @@ let streamCropSame = 0
 const freeVideoPool = []
 const freeAudioPool = []
 
-// Six 2 MiB blocks ahead (12 MiB) in a 64 MiB ring. A 15 Mbps title decodes at ~3.8x realtime
-// while filling its buffer, so a three-block window fell through to the blocking sync read,
-// freezing the worker's frame clock and dropping pictures whenever a read took 300+ ms.
-// Measured on Batman Begins (VC-1 1080p, 13.7 Mbps): 3 blocks kept 13.3 of 24 pictures/s at
-// 300 ms latency; six keep all 24 (and 23.9 at 500 ms).
+// The page owns read-ahead: it fetches 2 MiB ranges with fetch() and posts them here, because this
+// Worker's event loop is blocked inside a wasm read, so its own async fetches settled too late and
+// every miss fell through to a blocking sync XHR that froze the frame clock for seconds. The ring
+// keeps 64 MiB so the demuxer's sequential pages hit long after the page fetched them.
 const STREAM_BLOCK = 2 * 1024 * 1024
 const MAX_BLOCKS = 32
-const PREFETCH_AHEAD = 6
-const MAX_PREFETCH_INFLIGHT = 3
 const blockCache = new Map()
-const inflightPrefetch = new Map()
 let blockStamp = 0
 let headProbe = null
-let prefetchEpoch = 0
 
 const dec = new TextDecoder()
 const enc = new TextEncoder()
@@ -67,14 +62,6 @@ const nowWall = () => (self.performance.timeOrigin || 0) + self.performance.now(
 function workerMediaTime () {
   if (!clockPlaying) return clockMedia
   return clockMedia + Math.max(0, (nowWall() - clockWallMs) / 1000)
-}
-
-function abortPrefetches () {
-  prefetchEpoch++
-  for (const ctl of inflightPrefetch.values()) {
-    try { ctl.abort() } catch {}
-  }
-  inflightPrefetch.clear()
 }
 
 function putBlock (idx, data) {
@@ -95,45 +82,12 @@ function putBlock (idx, data) {
   blockCache.set(idx, { data, stamp: blockStamp })
 }
 
-// Asynchronous sliding read-ahead: fills bIdx+1..bIdx+3 on browser I/O threads while WASM decodes CPU frames.
-function prefetchFrom (startBlockIdx) {
-  if (!streamingMode || closed || !streamUrl || streamLen <= 0) return
-  const totalBlocks = Math.ceil(streamLen / STREAM_BLOCK)
-  const epoch = prefetchEpoch
-  const url = streamUrl
-  for (let idx = startBlockIdx; idx < Math.min(totalBlocks, startBlockIdx + PREFETCH_AHEAD); idx++) {
-    if (inflightPrefetch.size >= MAX_PREFETCH_INFLIGHT) break
-    if (blockCache.has(idx) || inflightPrefetch.has(idx)) continue
-    const startByte = idx * STREAM_BLOCK
-    const endByte = Math.min(streamLen - 1, startByte + STREAM_BLOCK - 1)
-    if (startByte > endByte) continue
-    const ctl = new AbortController()
-    inflightPrefetch.set(idx, ctl)
-    // A fetch that never settles holds a prefetch slot forever, and with all slots stuck the engine
-    // waits at the next block edge while the relay sits idle. Free the slot after 8 s and retry.
-    const killTimer = setTimeout(() => { try { ctl.abort() } catch {} }, 8000)
-    // Only this request's own settlement may clear its slot: after a seek, an aborted request settles late and would
-    // otherwise untrack the new request for the same block, which then can't be aborted and holds a connection.
-    const settle = () => { clearTimeout(killTimer); if (inflightPrefetch.get(idx) === ctl) inflightPrefetch.delete(idx) }
-    fetch(url, { headers: { Range: 'bytes=' + startByte + '-' + endByte }, signal: ctl.signal })
-      .then(res => (res.status === 200 || res.status === 206) ? res.arrayBuffer() : null)
-      .then(ab => {
-        settle()
-        if (!ab || closed || epoch !== prefetchEpoch || url !== streamUrl) return
-        const u8 = new Uint8Array(ab)
-        if (u8.byteLength > 0) putBlock(idx, u8)
-        prefetchFrom(idx + 1)
-      })
-      .catch(settle)
-  }
-}
-
 function probeStream (url) {
-  abortPrefetches()
   blockCache.clear()
   headProbe = null
   const xhr = new XMLHttpRequest()
   xhr.open('GET', url, false)
+  xhr.timeout = 5000
   xhr.responseType = 'arraybuffer'
   xhr.setRequestHeader('Range', 'bytes=0-' + (STREAM_BLOCK - 1))
   xhr.send()
@@ -159,7 +113,6 @@ function readAtSync (offset, dstPtr, len) {
   const maxLen = Math.min(len, streamLen - offset)
   if (headProbe && offset + maxLen <= headProbe.byteLength) {
     new Uint8Array(wasm.memory.buffer, dstPtr, maxLen).set(headProbe.subarray(offset, offset + maxLen))
-    if (streamingMode) prefetchFrom(1)
     return maxLen
   }
 
@@ -168,7 +121,7 @@ function readAtSync (offset, dstPtr, len) {
   // on and let it fill the cache ahead. One message per block, not per 256 KiB page.
   if (bIdx !== lastPostedBlock) {
     lastPostedBlock = bIdx
-    self.postMessage({ type: 'readBlock', block: bIdx })
+    self.postMessage({ type: 'readBlock', block: bIdx, force: true })
   }
   const bOff = offset - bIdx * STREAM_BLOCK
   const cached = blockCache.get(bIdx)
@@ -176,41 +129,31 @@ function readAtSync (offset, dstPtr, len) {
     cached.stamp = ++blockStamp
     const take = Math.min(maxLen, cached.data.byteLength - bOff)
     new Uint8Array(wasm.memory.buffer, dstPtr, take).set(cached.data.subarray(bOff, bOff + take))
-    if (streamingMode) prefetchFrom(bIdx + 1)
     return take
-  }
-
-  // Cancel synchronous race if an async prefetch was already pulling this exact block, then warm ahead.
-  const inflight = inflightPrefetch.get(bIdx)
-  if (inflight) {
-    try { inflight.abort() } catch {}
-    inflightPrefetch.delete(bIdx)
   }
 
   const fetchStart = bIdx * STREAM_BLOCK
   const fetchEnd = Math.min(streamLen - 1, fetchStart + STREAM_BLOCK - 1)
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const xhr = new XMLHttpRequest()
       xhr.open('GET', streamUrl, false)
-      // Workers allow timeouts on synchronous requests; one that never gets a connection is retried, not waited on forever.
-      xhr.timeout = 20000
+      // This blocks the Worker's event loop, so it must never own the frame clock for long: the page
+      // prefetch is what feeds the cache; this is a short-leashed last resort, not a read-ahead.
+      xhr.timeout = 2500
       xhr.responseType = 'arraybuffer'
       xhr.setRequestHeader('Range', 'bytes=' + fetchStart + '-' + fetchEnd)
       xhr.send()
       if (xhr.status !== 200 && xhr.status !== 206) continue
       const src = new Uint8Array(xhr.response || new ArrayBuffer(0))
-      if (src.byteLength > 0) {
-        putBlock(bIdx, src)
-        if (streamingMode) prefetchFrom(bIdx + 1)
-        const offInSrc = offset - fetchStart
-        if (offInSrc >= src.byteLength) return 0
-        const take = Math.min(maxLen, src.byteLength - offInSrc)
-        new Uint8Array(wasm.memory.buffer, dstPtr, take).set(src.subarray(offInSrc, offInSrc + take))
-        return take
-      }
-      return 0
+      if (src.byteLength === 0) continue
+      putBlock(bIdx, src)
+      const offInSrc = offset - fetchStart
+      if (offInSrc >= src.byteLength) return -1
+      const take = Math.min(maxLen, src.byteLength - offInSrc)
+      new Uint8Array(wasm.memory.buffer, dstPtr, take).set(src.subarray(offInSrc, offInSrc + take))
+      return take
     } catch {}
   }
   return -1
@@ -801,7 +744,6 @@ async function handleCmd (msg) {
     closeWebCodecs()
     useWebCodecs = !useMse && hasVideo && Boolean(msg.allowWebCodecs) && openWebCodecsInstance(activeSeq, 0)
     streamingMode = true
-    prefetchFrom(0)
     clockMedia = 0
     clockWallMs = nowWall()
     clockPlaying = false
@@ -832,7 +774,6 @@ async function handleCmd (msg) {
     hasVideo = msg.videoStream >= 0
     hasAudio = msg.audioStream >= 0
     useMse = Boolean(msg.useMse)
-    abortPrefetches()
     clearRenderQueue()
     closeWebCodecs()
     const target = Math.max(0, Number(msg.time) || 0)
@@ -892,7 +833,6 @@ async function handleCmd (msg) {
     eof = true
     clockPlaying = false
     streamingMode = false
-    abortPrefetches()
     closeWebCodecs()
     clearRenderQueue()
     blockCache.clear()

@@ -1917,6 +1917,8 @@ function openPlayer (entry, at = 0) {
       p.subCues.push({ kind: 'bitmap', start: m.start, end: m.end, x: m.x, y: m.y, w: m.w, h: m.h, cw: m.cw, ch: m.ch, buf: m.buf })
     } else if (m.type === 'readBlock') {
       p.lastReadBlock = m.block
+      // The Worker missed this block, so a stale done mark must not make the page skip refetching it.
+      if (m.force) p.prefetchDone.delete(m.block)
       pumpPrefetch(p)
     } else if (m.type === 'videoCrop') {
       p.videoCrop = m.full ? null : { x: m.left, y: m.top, w: m.right - m.left, h: m.bottom - m.top, cw: m.w, ch: m.h }
@@ -1937,17 +1939,25 @@ function openPlayer (entry, at = 0) {
     if (!p || player !== p || !p.worker || !p.streamUrl) return
     const base = p.lastReadBlock
     if (!Number.isFinite(base)) return
-    for (let i = 1; i <= 8; i++) {
-      if (p.prefetchInFlight.size >= 3) break
+    // The block the demuxer is on plus a deep window: a relay range can stall for seconds on a cold
+    // block, and the Worker's fallback read is synchronous, so the next blocks must already be here.
+    for (let i = 0; i <= 12; i++) {
+      if (p.prefetchInFlight.size >= 4) break
       const idx = base + i
+      if (idx < 0) continue
       if (p.prefetchDone.has(idx) || p.prefetchInFlight.has(idx)) continue
       const start = idx * BLOCK_BYTES
       const end = start + BLOCK_BYTES - 1
       const ctl = new AbortController()
       p.prefetchInFlight.set(idx, ctl)
+      // A fetch that never settles holds a slot forever; with every slot stuck the Worker falls back
+      // to its blocking sync read, which freezes the whole frame clock. Cut it loose and retry.
+      const killTimer = setTimeout(() => { try { ctl.abort() } catch {} }, 6000)
+      const settle = () => { clearTimeout(killTimer); p.prefetchInFlight.delete(idx) }
       fetch(p.streamUrl, { headers: { range: 'bytes=' + start + '-' + end }, signal: ctl.signal })
         .then(r => (r.ok || r.status === 206) ? r.arrayBuffer() : null)
         .then(ab => {
+          clearTimeout(killTimer)
           p.prefetchInFlight.delete(idx)
           if (!ab || player !== p) return
           p.prefetchDone.add(idx)
@@ -1955,11 +1965,16 @@ function openPlayer (entry, at = 0) {
           try { p.worker.postMessage({ cmd: 'block', block: idx, buf: ab }, [ab]) } catch {}
           pumpPrefetch(p)
         })
-        .catch(() => p.prefetchInFlight.delete(idx))
+        .catch(() => {
+          settle()
+          if (player === p) setTimeout(() => { if (player === p) pumpPrefetch(p) }, 400)
+        })
     }
   }
 
   function drawSwFrame (f) {
+    p.lastDrawWall = performance.now()
+    if ($('pStatus').textContent === 'Buffering…') $('pStatus').style.display = 'none'
     const r = (f.yuv && !workerCanvasTransferred) ? getYuvGl() : false
     const crop = p.videoCrop && p.videoCrop.w > 0 && p.videoCrop.cw === f.w && p.videoCrop.ch === f.h ? p.videoCrop : null
     const ow = crop ? crop.w : f.w, oh = crop ? crop.h : f.h
@@ -2113,7 +2128,14 @@ function openPlayer (entry, at = 0) {
       lastResumeSave = Date.now()
       saveResume(playerEntry, now, p.duration)
     }
-
+    if (p.primed && !p.paused && !p.seeking && document.visibilityState === 'visible' &&
+        p.lastDrawWall && performance.now() - p.lastDrawWall > 1200 &&
+        $('pStatus').style.display === 'none') {
+      // The clock keeps running off the audio clock even while the picture stalls; say so instead of
+      // leaving a frozen frame with no explanation. A drawn frame (or a playing video element) clears it.
+      $('pStatus').textContent = 'Buffering…'
+      $('pStatus').style.display = 'block'
+    }
   }
   p.raf = requestAnimationFrame(tick)
   // Visibility, credits and the worker's clock must not ride requestAnimationFrame: a hidden or
@@ -2130,8 +2152,24 @@ function openPlayer (entry, at = 0) {
     p.worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: currentMediaTime(), wallMs: nowWallMs(), playing: !p.paused, hidden: document.visibilityState !== 'visible' })
   }, 250)
 
+  const vid = $('pVideo')
+  if (vid) {
+    vid.addEventListener('waiting', () => {
+      if (player !== p) return
+      $('pStatus').textContent = 'Buffering…'
+      $('pStatus').style.display = 'block'
+    })
+    vid.addEventListener('playing', () => {
+      if (player === p && $('pStatus').textContent === 'Buffering…') $('pStatus').style.display = 'none'
+    })
+  }
   const extMatch = (entry.streamUrl || '').split('?')[0].split('.').pop() || ''
   worker.postMessage({ cmd: 'open', seq: p.seq, streamUrl, wasmUrl: location.origin + '/web/peartube_web.wasm' + ASSET_VER, ext: extMatch.length <= 5 ? extMatch : '' })
+  // Start the page fetch before the demuxer reaches its first block edge: waiting for the Worker to
+  // miss a block means the miss is already costing a blocking read.
+  p.lastReadBlock = 0
+  p.prefetchDone.clear()
+  pumpPrefetch(p)
   return p
 }
 
