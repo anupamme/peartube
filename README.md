@@ -25,7 +25,7 @@ The web UI has five tabs:
 
 | Tab | What it covers |
 |---|---|
-| Library | Adding videos, plus a list you can play in the browser through `peartube-media` compiled to WebAssembly (MKV/AVI/MP4/TS, DTS/AC-3/TrueHD surround, PGS/ASS/SRT subtitles) or cast to a TV |
+| Library | Adding videos, plus a poster grid (All / Movies / Shows / Videos, search) where shows group their episodes by season. Plays in the browser through `peartube-media` compiled to WebAssembly (MKV/AVI/MP4/TS, DTS/AC-3/TrueHD surround, PGS/ASS/SRT subtitles) or casts to a TV |
 | Channels | Your tracker and channel, and the channels you follow |
 | Sharing | Peers, copies kept for other relays, HiveRelays, and the Stremio and M3U addresses |
 | TV | Pairing and controlling TVs |
@@ -219,8 +219,8 @@ One port serves the web UI at `/`, the `/v1` API, the Stremio v3 addon, the M3U8
 | `GET /v1/settings`, `PUT /v1/settings` `{key: value, …}` | Relay settings with each one's `value`, `source` (`env`/`file`/`default`), `env` name and `live` flag, plus `restartNeeded`. Saved in `settings.json`. Without `PEARTUBE_API_TOKEN`, only clients on private addresses may use it; a cross-origin `Origin` is refused (`403` either way). Env-set keys answer `409`; secrets and tokens inside URLs are never returned (list URLs come back as `{ref, label}`, and `"#n"` keeps one on update) |
 | `POST /v1/identify` `{url}` | What a link holds: `link` (file name, size, or page title, uploader, length and thumbnail through yt-dlp), `parsed` name parts, Cinemeta `candidates` with their `imdb:…` ids and titles, `match` (an exact title and year), and a `plain` `clip:` fallback |
 | `GET /v1/poster/:tt` | Redirect to Cinemeta's poster for an identified entry |
-| `GET /v1/search?id=imdb:tt0944947:s01e02` | Tracker entries for an id, each with a `streamUrl` |
-| `GET /v1/entries` | Every tracker entry, same shape as search |
+| `GET /v1/search?id=imdb:tt0944947:s01e02` | Tracker entries for an id, each with a `streamUrl`. One result per file (`id` + `sha256`): when several writers announced the same file, the copy most likely to play wins (owned, then most cached here, then a per-video core, then the tracker founder's). Copies from writers that were reset point at data nobody stores, and only their writer could remove them |
+| `GET /v1/entries` | Every tracker entry, one per file, same shape as search |
 | `POST /v1/acquire` `{id, title, source: {url, headers, page}}` | Fetch a source, store it, announce it; `page: true` resolves a video page through yt-dlp on every attempt |
 | `GET /v1/jobs`, `GET /v1/jobs/:jobId`, `DELETE /v1/jobs/:jobId` | Acquire jobs (sources are never returned). `DELETE` cancels a queued or running job and removes a finished, failed or cancelled one |
 | `GET /v1/status` | Tracker, writer and blob keys, stored bytes, peers and per-transport replication traffic, `lan` (`{host, port}` while LAN discovery runs), `privateRouting`, `tokenRequired`, and `settingsOpen` (whether this client may use `/v1/settings`) |
