@@ -2,10 +2,17 @@
 //! Wraps peartube-media's safe-Rust container demuxers, video/audio/subtitle decoders,
 //! SIMD128 surround-to-stereo planar downmixer, and zero-copy H.264/HEVC/AV1/VP9 fMP4 muxer
 //! behind a flat C ABI for Dedicated Web Workers.
+//!
+//! Every module below the boundary is safe Rust: the crate root denies `unsafe_code`, and only
+//! `ffi` (host bridge, allocator, raw-pointer marshalling, SIMD128 loads) and `abi` (the C exports)
+//! are allowed any. The demuxers, decoders, mixer and muxer themselves never touch a raw pointer.
+#![deny(unsafe_code)]
 
 // The demux repair the native player already runs, so a movie stamped in
 // decode order keeps all 24 of its pictures here too.
 mod decode_order;
+mod ffi;
+mod abi;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -14,9 +21,6 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 
-#[cfg(target_arch = "wasm32")]
-use core::arch::wasm32::*;
-
 use oxideav_core::{
     ChannelLayout, ChannelPosition, CodecParameters, Decoder, Demuxer, Error as AvError, Frame,
     MediaType, Packet, PixelFormat, ProbeData, RuntimeContext, SampleFormat, Segment, StreamInfo,
@@ -24,17 +28,6 @@ use oxideav_core::{
 };
 use oxideav_pixfmt::{ConvertOptions, FrameInfo};
 use serde_json::json;
-
-// O(1) bitmapped TLSF allocator keeps per-frame VideoPlane/deblock churn off dlmalloc's slow linear lists.
-#[cfg(target_arch = "wasm32")]
-#[global_allocator]
-static ALLOCATOR: talc::TalckWasm = unsafe { talc::TalckWasm::new_global() };
-
-#[link(wasm_import_module = "env")]
-unsafe extern "C" {
-    fn host_stream_len() -> u64;
-    fn host_read_at(offset: u64, dst: *mut u8, len: usize) -> isize;
-}
 
 const PROBE_PAGE_SIZE: usize = 128 * 1024;
 const STREAM_PAGE_SIZE: usize = 256 * 1024;
@@ -62,7 +55,7 @@ struct HttpRangeSource {
 
 impl HttpRangeSource {
     fn new(streaming: Arc<AtomicBool>) -> Self {
-        let len = unsafe { host_stream_len() };
+        let len = ffi::stream_len();
         Self {
             len,
             pos: 0,
@@ -115,13 +108,7 @@ impl HttpRangeSource {
         }
         let mut filled = 0usize;
         while filled < want {
-            let got = unsafe {
-                host_read_at(
-                    aligned_start + filled as u64,
-                    page.data[filled..want].as_mut_ptr(),
-                    want - filled,
-                )
-            };
+            let got = ffi::read_at(aligned_start + filled as u64, &mut page.data[filled..want]);
             if got < 0 {
                 page.valid = 0;
                 return Err(io::Error::other("HTTP Range read failed"));
@@ -411,27 +398,7 @@ impl StereoMix {
 fn decode_f32le_clamped(src_bytes: &[u8], dst: &mut [f32]) {
     #[cfg(target_arch = "wasm32")]
     {
-        let n = dst.len().min(src_bytes.len() / 4);
-        let vecs = n / 4;
-        let min_v = f32x4_splat(-1.0);
-        let max_v = f32x4_splat(1.0);
-        let zero_v = f32x4_splat(0.0);
-        let sp = src_bytes.as_ptr();
-        let dp = dst.as_mut_ptr();
-        for i in 0..vecs {
-            unsafe {
-                let v = v128_load(sp.add(i * 16) as *const v128);
-                let finite_mask = f32x4_eq(v, v);
-                let clean = v128_bitselect(v, zero_v, finite_mask);
-                let clamped = f32x4_pmax(min_v, f32x4_pmin(max_v, clean));
-                v128_store(dp.add(i * 4) as *mut v128, clamped);
-            }
-        }
-        for i in (vecs * 4)..n {
-            let b = &src_bytes[i * 4..i * 4 + 4];
-            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            dst[i] = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
-        }
+        ffi::decode_f32le_clamped_simd(src_bytes, dst);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -446,37 +413,7 @@ fn decode_f32le_clamped(src_bytes: &[u8], dst: &mut [f32]) {
 fn accum_f32le_plane(src_bytes: &[u8], gl: f32, gr: f32, dst_l: &mut [f32], dst_r: &mut [f32]) {
     #[cfg(target_arch = "wasm32")]
     {
-        let n = dst_l.len().min(dst_r.len()).min(src_bytes.len() / 4);
-        let vecs = n / 4;
-        let gl_v = f32x4_splat(gl);
-        let gr_v = f32x4_splat(gr);
-        let zero_v = f32x4_splat(0.0);
-        let sp = src_bytes.as_ptr();
-        let lp = dst_l.as_mut_ptr();
-        let rp = dst_r.as_mut_ptr();
-        for i in 0..vecs {
-            unsafe {
-                let v = v128_load(sp.add(i * 16) as *const v128);
-                let finite_mask = f32x4_eq(v, v);
-                let clean = v128_bitselect(v, zero_v, finite_mask);
-                if gl != 0.0 {
-                    let cur_l = v128_load(lp.add(i * 4) as *const v128);
-                    v128_store(lp.add(i * 4) as *mut v128, f32x4_add(cur_l, f32x4_mul(clean, gl_v)));
-                }
-                if gr != 0.0 {
-                    let cur_r = v128_load(rp.add(i * 4) as *const v128);
-                    v128_store(rp.add(i * 4) as *mut v128, f32x4_add(cur_r, f32x4_mul(clean, gr_v)));
-                }
-            }
-        }
-        for i in (vecs * 4)..n {
-            let b = &src_bytes[i * 4..i * 4 + 4];
-            let s = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            if s.is_finite() {
-                dst_l[i] += s * gl;
-                dst_r[i] += s * gr;
-            }
-        }
+        ffi::accum_f32le_plane_simd(src_bytes, gl, gr, dst_l, dst_r);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -494,22 +431,7 @@ fn accum_f32le_plane(src_bytes: &[u8], gl: f32, gr: f32, dst_l: &mut [f32], dst_
 fn clamp_stereo_inplace(dst_l: &mut [f32], dst_r: &mut [f32]) {
     #[cfg(target_arch = "wasm32")]
     {
-        let min_v = f32x4_splat(-1.0);
-        let max_v = f32x4_splat(1.0);
-        for slice in [dst_l, dst_r] {
-            let n = slice.len();
-            let vecs = n / 4;
-            let p = slice.as_mut_ptr();
-            for i in 0..vecs {
-                unsafe {
-                    let v = v128_load(p.add(i * 4) as *const v128);
-                    v128_store(p.add(i * 4) as *mut v128, f32x4_pmax(min_v, f32x4_pmin(max_v, v)));
-                }
-            }
-            for x in &mut slice[vecs * 4..] {
-                *x = x.clamp(-1.0, 1.0);
-            }
-        }
+        ffi::clamp_stereo_simd(dst_l, dst_r);
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -558,21 +480,7 @@ fn pack_plane_10_to_8(plane: &oxideav_core::VideoPlane, cols: usize, rows: usize
         let dst_row = &mut out[r * cols..(r + 1) * cols];
         #[cfg(target_arch = "wasm32")]
         {
-            let chunks16 = cols / 16;
-            let sp = src_row.as_ptr();
-            let dp = dst_row.as_mut_ptr();
-            for i in 0..chunks16 {
-                unsafe {
-                    let lo = u16x8_shr(v128_load(sp.add(i * 32) as *const v128), 2);
-                    let hi = u16x8_shr(v128_load(sp.add(i * 32 + 16) as *const v128), 2);
-                    let packed = u8x16_narrow_i16x8(lo, hi);
-                    v128_store(dp.add(i * 16) as *mut v128, packed);
-                }
-            }
-            for i in (chunks16 * 16)..cols {
-                let px = u16::from_le_bytes([src_row[i * 2], src_row[i * 2 + 1]]);
-                dst_row[i] = (px >> 2).min(255) as u8;
-            }
+            ffi::pack_u16_to_u8(src_row, dst_row);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -620,17 +528,7 @@ fn subsample_422_chroma(plane: &oxideav_core::VideoPlane, cwu: usize, hu: usize,
         let drow = &mut out[cr * cwu..(cr + 1) * cwu];
         #[cfg(target_arch = "wasm32")]
         {
-            let chunks16 = cwu / 16;
-            for i in 0..chunks16 {
-                unsafe {
-                    let a = v128_load(row0.as_ptr().add(i * 16) as *const v128);
-                    let b = v128_load(row1.as_ptr().add(i * 16) as *const v128);
-                    v128_store(drow.as_mut_ptr().add(i * 16) as *mut v128, u8x16_avgr(a, b));
-                }
-            }
-            for i in (chunks16 * 16)..cwu {
-                drow[i] = ((u16::from(row0[i]) + u16::from(row1[i]) + 1) >> 1) as u8;
-            }
+            ffi::average_rows(row0, row1, drow);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1795,30 +1693,8 @@ impl WebSession {
         {
             let byte_len = frames * 2 * 4;
             let mut out = self.take_pooled_buf(byte_len);
-            // wasm32 and modern hosts are little-endian; bulk-copy contiguous planar L then R directly.
-            #[cfg(target_endian = "little")]
-            unsafe {
-                out.set_len(byte_len);
-                std::ptr::copy_nonoverlapping(
-                    self.audio_left.as_ptr() as *const u8,
-                    out.as_mut_ptr(),
-                    frames * 4,
-                );
-                std::ptr::copy_nonoverlapping(
-                    self.audio_right.as_ptr() as *const u8,
-                    out.as_mut_ptr().add(frames * 4),
-                    frames * 4,
-                );
-            }
-            #[cfg(not(target_endian = "little"))]
-            {
-                for &s in &self.audio_left[..frames] {
-                    out.extend_from_slice(&s.to_le_bytes());
-                }
-                for &s in &self.audio_right[..frames] {
-                    out.extend_from_slice(&s.to_le_bytes());
-                }
-            }
+            // Both f32 planes little-endian, L then R, straight into the pooled buffer.
+            ffi::pack_audio_f32(&mut out, &self.audio_left, &self.audio_right);
             self.audio_left.clear();
             self.audio_right.clear();
             let rate = self.audio_accum_rate;
@@ -2256,495 +2132,3 @@ impl WebSession {
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_alloc(len: usize) -> *mut u8 {
-    let mut v = Vec::<u8>::with_capacity(len);
-    let ptr = v.as_mut_ptr();
-    std::mem::forget(v);
-    ptr
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pt_free(ptr: *mut u8, len: usize) {
-    if !ptr.is_null() && len > 0 {
-        drop(unsafe { Vec::from_raw_parts(ptr, 0, len) });
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_json_ptr() -> *const u8 {
-    STATE.with(|c| c.borrow().json_buf.as_ptr())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_json_len() -> usize {
-    STATE.with(|c| c.borrow().json_buf.len())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_ptr() -> *const u8 {
-    STATE.with(|c| c.borrow().out_buf.as_ptr())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_len() -> usize {
-    STATE.with(|c| c.borrow().out_buf.len())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_pts() -> f64 {
-    STATE.with(|c| c.borrow().out_pts)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_dur() -> f64 {
-    STATE.with(|c| c.borrow().out_dur)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_w() -> u32 {
-    STATE.with(|c| c.borrow().out_w)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_h() -> u32 {
-    STATE.with(|c| c.borrow().out_h)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_x() -> i32 {
-    STATE.with(|c| c.borrow().out_x)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_y() -> i32 {
-    STATE.with(|c| c.borrow().out_y)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_cw() -> u32 {
-    STATE.with(|c| c.borrow().out_cw)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_ch() -> u32 {
-    STATE.with(|c| c.borrow().out_ch)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_rate() -> u32 {
-    STATE.with(|c| c.borrow().out_rate)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_out_samples() -> u32 {
-    STATE.with(|c| c.borrow().out_samples)
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
-    let ext_hint = if !ext_ptr.is_null() && ext_len > 0 {
-        let slice = unsafe { std::slice::from_raw_parts(ext_ptr, ext_len) };
-        std::str::from_utf8(slice).ok().map(str::to_ascii_lowercase)
-    } else {
-        None
-    };
-
-    STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        st.session = None;
-        let ctx = &*REGISTRY;
-        let streaming_io = Arc::new(AtomicBool::new(false));
-        let mut src = HttpRangeSource::new(Arc::clone(&streaming_io));
-        if src.len == 0 {
-            return set_json_error(&mut st, "Stream has zero bytes");
-        }
-        let mut probe_buf = vec![0u8; (256 * 1024).min(src.len as usize)];
-        let mut read_n = 0usize;
-        while read_n < probe_buf.len() {
-            match src.read(&mut probe_buf[read_n..]) {
-                Ok(0) => break,
-                Ok(n) => read_n += n,
-                Err(e) => return set_json_error(&mut st, &format!("Probe read error: {e}")),
-            }
-        }
-        probe_buf.truncate(read_n);
-        if let Err(e) = src.seek(SeekFrom::Start(0)) {
-            return set_json_error(&mut st, &format!("Probe rewind error: {e}"));
-        }
-
-        let probe_data = ProbeData {
-            buf: &probe_buf,
-            ext: ext_hint.as_deref(),
-        };
-        let candidates = ctx.containers.probe_candidates(&probe_data);
-        let by_ext = ext_hint
-            .as_deref()
-            .and_then(|e| ctx.containers.container_for_extension(e));
-        let Some(container) = (match (candidates.first(), by_ext) {
-            (Some(c), _) if c.score >= PROBE_SCORE_EXTENSION => Some(c.name.to_string()),
-            (_, Some(name)) => Some(name.to_string()),
-            (Some(c), _) => Some(c.name.to_string()),
-            _ => None,
-        }) else {
-            return set_json_error(&mut st, "Unsupported media container");
-        };
-
-        // A file that stores decode times (no `ctts`) hands the decoder
-        // backward display stamps; the browser then throws half its pictures
-        // away as late. Repair presentation times before anything reads them.
-        let mut demuxer = match catch_unwind(AssertUnwindSafe(|| {
-            ctx.containers
-                .open_demuxer(&container, Box::new(src), &ctx.codecs)
-                .map(decode_order::wrap)
-        })) {
-            Ok(Ok(d)) => d,
-            Ok(Err(e)) => return set_json_error(&mut st, &format!("Demuxer error ({container}): {e}")),
-            Err(_) => return set_json_error(&mut st, &format!("Demuxer panicked opening {container}")),
-        };
-
-        let streams: Vec<StreamInfo> = demuxer.streams().iter().take(64).cloned().collect();
-        let mut first_video: Option<u32> = None;
-        let mut first_audio: Option<u32> = None;
-        let mut tracks_json = Vec::new();
-        for s in &streams {
-            let kind = match s.params.media_type {
-                MediaType::Video => {
-                    if first_video.is_none() {
-                        first_video = Some(s.index);
-                    }
-                    "video"
-                }
-                MediaType::Audio => {
-                    if first_audio.is_none() {
-                        first_audio = Some(s.index);
-                    }
-                    "audio"
-                }
-                MediaType::Subtitle => "subtitle",
-                _ => continue,
-            };
-            tracks_json.push(json!({
-                "stream": s.index,
-                "kind": kind,
-                "codec": s.params.codec_id.as_str(),
-                "language": s.params.language,
-                "width": s.params.width,
-                "height": s.params.height,
-                "channels": s.params.channels,
-                "sampleRate": s.params.sample_rate,
-            }));
-        }
-
-        let duration_secs = demuxer
-            .duration_micros()
-            .map(|us| (us.max(0) as f64) / 1_000_000.0)
-            .or_else(|| {
-                streams
-                    .iter()
-                    .filter_map(|s| {
-                        s.duration.and_then(|d| {
-                            if s.time_base.is_valid() {
-                                Some(s.time_base.seconds_of(d).max(0.0))
-                            } else {
-                                None
-                            }
-                        })
-                    })
-                    .fold(None::<f64>, |acc, x| Some(acc.map_or(x, |a| a.max(x))))
-            })
-            .unwrap_or(0.0);
-
-        // Peek up to 128 packets when extradata lacks Annex-B SPS/PPS, raw AV1 OBUs, or VP9 profile bits.
-        let mut peek_packets = VecDeque::new();
-        let mut mse_cfg = first_video
-            .and_then(|vi| streams.iter().find(|s| s.index == vi))
-            .and_then(|vs| probe_mse_video(vs, None));
-        if mse_cfg.is_none()
-            && let Some(vi) = first_video
-            && let Some(vs) = streams.iter().find(|s| s.index == vi).cloned()
-            && matches!(vs.params.codec_id.as_str(), "h264" | "h265" | "hevc" | "av1" | "vp9")
-        {
-            for _ in 0..128 {
-                let Ok(Ok(pkt)) = catch_unwind(AssertUnwindSafe(|| demuxer.next_packet())) else {
-                    break;
-                };
-                let is_vkf = pkt.stream_index == vi && pkt.flags.keyframe;
-                peek_packets.push_back(pkt);
-                if is_vkf {
-                    mse_cfg = probe_mse_video(&vs, peek_packets.back().map(|p| p.data.as_slice()));
-                    break;
-                }
-            }
-        }
-
-        let webcodecs_hint = first_video
-            .and_then(|vi| streams.iter().find(|s| s.index == vi))
-            .and_then(|vs| build_webcodecs_hint(vs, mse_cfg.as_ref()));
-
-        let (width, height) = first_video
-            .and_then(|vi| streams.iter().find(|s| s.index == vi))
-            .map(|s| (s.params.width.unwrap_or(0), s.params.height.unwrap_or(0)))
-            .unwrap_or((0, 0));
-
-        let manifest = json!({
-            "container": container,
-            "duration": duration_secs,
-            "width": mse_cfg.as_ref().map_or(width, |c| c.width),
-            "height": mse_cfg.as_ref().map_or(height, |c| c.height),
-            "mseCodec": mse_cfg.as_ref().map(|c| c.codec_string.as_str()),
-            "webCodecs": webcodecs_hint,
-            "tracks": tracks_json,
-            "defaultVideo": first_video,
-            "defaultAudio": first_audio,
-            "defaultSubtitle": serde_json::Value::Null,
-        });
-        st.json_buf = manifest.to_string().into_bytes();
-        st.session = Some(WebSession {
-            container,
-            streaming_io,
-            demuxer,
-            streams,
-            mse_cfg,
-            peek_packets,
-            out_queue: VecDeque::new(),
-            frame_pool: Vec::with_capacity(6),
-            video_idx: first_video,
-            seek_idx: first_video,
-            audio_idx: first_audio,
-            sub_idx: None,
-            video_mode: VideoOutputMode::Software,
-            video_meta: None,
-            audio_meta: None,
-            sub_meta: None,
-            video_dec: None,
-            audio_dec: None,
-            sub_dec: None,
-            audio_mix: None,
-            audio_next_pts: None,
-            audio_left: Vec::with_capacity(8192 + 2048),
-            audio_right: Vec::with_capacity(8192 + 2048),
-            audio_accum_pts: None,
-            audio_accum_rate: 0,
-            audio_first_flushed: false,
-            video_next_pts: 0.0,
-            video_seeded: false,
-            drop_until_keyframe: false,
-            client_clock: 0.0,
-            mse_gop: Vec::new(),
-            mse_seq: 0,
-            mse_min_dts: 0,
-            mse_started: false,
-            seek_target: None,
-            demux_eof: false,
-            flushed_eof: false,
-        });
-        0
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_configure(video_stream: i32, audio_stream: i32, sub_stream: i32, use_mse: i32) -> i32 {
-    STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        let Some(sess) = st.session.as_mut() else {
-            return set_json_error(&mut st, "No open session");
-        };
-        sess.video_idx = (video_stream >= 0).then_some(video_stream as u32);
-        sess.audio_idx = (audio_stream >= 0).then_some(audio_stream as u32);
-        sess.sub_idx = (sub_stream >= 0).then_some(sub_stream as u32);
-        sess.video_mode = match use_mse {
-            1 if sess.mse_cfg.is_some() => VideoOutputMode::Mse,
-            2 => VideoOutputMode::WebCodecs,
-            _ => VideoOutputMode::Software,
-        };
-        sess.out_queue.clear();
-        sess.streaming_io.store(true, Ordering::Relaxed);
-
-        let mut active = Vec::new();
-        if let Some(v) = sess.video_idx {
-            active.push(v);
-        }
-        if let Some(a) = sess.audio_idx {
-            active.push(a);
-        }
-        if let Some(s) = sess.sub_idx {
-            active.push(s);
-        }
-        sess.demuxer.set_active_streams(&active);
-        sess.rebuild_decoders();
-
-        if sess.video_mode == VideoOutputMode::Mse
-            && let Some(cfg) = sess.mse_cfg.as_ref()
-        {
-            sess.out_queue.push_back(OutItem::MseInit(build_fmp4_init(cfg)));
-        }
-        0
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_seek(target_secs: f64) -> i32 {
-    STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        let Some(sess) = st.session.as_mut() else {
-            return set_json_error(&mut st, "No open session");
-        };
-        let clamped = target_secs.max(0.0);
-        let seek_stream = sess.seek_idx.or(sess.video_idx).or(sess.audio_idx).unwrap_or(0);
-        let tb = sess
-            .stream_info(seek_stream)
-            .map(|s| s.time_base)
-            .filter(|tb| tb.is_valid())
-            .unwrap_or_else(|| TimeBase::new(1, 1000));
-        let ticks = tb.ticks_of(clamped);
-
-        sess.peek_packets.clear();
-        sess.out_queue.clear();
-        sess.demux_eof = false;
-        sess.flushed_eof = false;
-        sess.seek_target = Some(clamped);
-
-        let res = catch_unwind(AssertUnwindSafe(|| sess.demuxer.seek_to(seek_stream, ticks)));
-        if let Err(_) | Ok(Err(_)) = res {
-            let _ = catch_unwind(AssertUnwindSafe(|| sess.demuxer.seek_to(seek_stream, 0)));
-        }
-        sess.rebuild_decoders();
-        if sess.video_mode == VideoOutputMode::Mse
-            && let Some(cfg) = sess.mse_cfg.as_ref()
-        {
-            sess.out_queue.push_back(OutItem::MseInit(build_fmp4_init(cfg)));
-        }
-        0
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_set_clock(clock_secs: f64) {
-    STATE.with(|cell| {
-        if let Some(sess) = cell.borrow_mut().session.as_mut() {
-            sess.client_clock = clock_secs.max(0.0);
-        }
-    });
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_step() -> i32 {
-    STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        let prev_out = std::mem::take(&mut st.out_buf);
-        let code = {
-            let Some(sess) = st.session.as_mut() else {
-                return set_json_error(&mut st, "No open session");
-            };
-            sess.recycle_buf(prev_out);
-
-            let mut safety = 0usize;
-            while sess.out_queue.is_empty() && safety < 4096 {
-                safety += 1;
-                if sess.demux_eof {
-                    sess.flush_eof();
-                    break;
-                }
-                let next_pkt = if let Some(p) = sess.peek_packets.pop_front() {
-                    Ok(p)
-                } else {
-                    match catch_unwind(AssertUnwindSafe(|| sess.demuxer.next_packet())) {
-                        Ok(r) => r,
-                        Err(_) => Err(AvError::Other("demuxer panicked".into())),
-                    }
-                };
-                match next_pkt {
-                    Ok(pkt) => {
-                        if Some(pkt.stream_index) == sess.video_idx {
-                            sess.handle_video_packet(pkt);
-                        } else if Some(pkt.stream_index) == sess.audio_idx {
-                            sess.handle_audio_packet(pkt);
-                        } else if Some(pkt.stream_index) == sess.sub_idx {
-                            sess.handle_sub_packet(pkt);
-                        }
-                    }
-                    Err(AvError::Eof) => {
-                        sess.demux_eof = true;
-                        sess.flush_eof();
-                        break;
-                    }
-                    Err(e) => {
-                        return set_json_error(&mut st, &format!("Demux error: {e}"));
-                    }
-                }
-            }
-            match sess.out_queue.pop_front() {
-                None => return 0,
-                Some(OutItem::MseInit(data)) => {
-                    st.out_buf = data;
-                    st.out_pts = 0.0;
-                    st.out_dur = 0.0;
-                    1
-                }
-                Some(OutItem::MseSegment { data, start, end }) => {
-                    st.out_buf = data;
-                    st.out_pts = start;
-                    st.out_dur = end;
-                    2
-                }
-                Some(OutItem::VideoRgba { data, pts, w, h }) => {
-                    st.out_buf = data;
-                    st.out_pts = pts;
-                    st.out_w = w;
-                    st.out_h = h;
-                    3
-                }
-                Some(OutItem::VideoYuv420 { data, pts, w, h }) => {
-                    st.out_buf = data;
-                    st.out_pts = pts;
-                    st.out_w = w;
-                    st.out_h = h;
-                    7
-                }
-                Some(OutItem::VideoPacket { data, pts, dur, keyframe }) => {
-                    st.out_buf = data;
-                    st.out_pts = pts;
-                    st.out_dur = dur;
-                    st.out_w = u32::from(keyframe);
-                    8
-                }
-                Some(OutItem::AudioPlanarF32 { data, pts, rate, frames }) => {
-                    st.out_buf = data;
-                    st.out_pts = pts;
-                    st.out_rate = rate;
-                    st.out_samples = frames;
-                    4
-                }
-                Some(OutItem::SubText { text, start, end }) => {
-                    st.out_buf = text;
-                    st.out_pts = start;
-                    st.out_dur = end;
-                    5
-                }
-                Some(OutItem::SubBitmap { rgba, start, end, x, y, w, h, cw, ch }) => {
-                    st.out_buf = rgba;
-                    st.out_pts = start;
-                    st.out_dur = end;
-                    st.out_x = x;
-                    st.out_y = y;
-                    st.out_w = w;
-                    st.out_h = h;
-                    st.out_cw = cw;
-                    st.out_ch = ch;
-                    6
-                }
-            }
-        };
-        code
-    })
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn pt_close() {
-    STATE.with(|cell| {
-        let mut st = cell.borrow_mut();
-        st.session = None;
-        st.out_buf = Vec::new();
-    });
-}
