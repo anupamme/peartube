@@ -658,7 +658,9 @@ function renderJobs () {
 
 // ---- Library: one tile per title (the relay already returns one entry per file). Episodes group under their show,
 // numbered from the id, since their titles are usually just the show's name.
-const where = e => e.local ? 'Saved here' : e.cachedBytes ? 'Partly saved' : 'On the network'
+// A replica that has every block holds the file as fully as its owner does.
+const saved = e => e.local || e.cachedBytes >= e.size
+const where = e => saved(e) ? 'Saved here' : e.cachedBytes ? 'Partly saved' : 'On the network'
 function sourceName (key) {
   const s = (S.sources.sources || []).find(x => x.key === key)
   if (!s || s.writable) return ''
@@ -676,8 +678,8 @@ function libraryTiles () {
   }
   for (const t of tiles.values()) {
     t.items.sort((a, b) => (a.season - b.season) || (a.episode - b.episode) || (b.e.size - a.e.size))
-    t.saved = t.items.filter(i => i.e.local).length
-    t.partial = t.items.some(i => !i.e.local && i.e.cachedBytes)
+    t.saved = t.items.filter(i => saved(i.e)).length
+    t.partial = t.items.some(i => !saved(i.e) && i.e.cachedBytes)
   }
   return [...tiles.values()].sort((a, b) => a.title.localeCompare(b.title))
 }

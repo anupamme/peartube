@@ -53,7 +53,8 @@ function startStub () {
     '/media/Big.Buck.Bunny.2008.1080p.BluRay.x264-GRP.mp4': bytesFor('bbb'),
     '/media/Random.Clip.Name.mp4': bytesFor('random'),
     '/media/feed-item.mp4': bytesFor('feed'),
-    '/page-video.mp4': bytesFor('page')
+    '/page-video.mp4': bytesFor('page'),
+    '/media/long.mp4': bytesFor('long', 16 * 1024 * 1024)
   }
   const srv = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
@@ -331,6 +332,22 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     assert.equal((await getJson('/v1/search?id=imdb:tt1254207')).results.length, 1, 'two copies of one file are one entry')
     await waitFor(`document.querySelectorAll('#entries .tile').length === 1`, 'one tile for the duplicated file')
     result.checks.duplicateCopiesCollapse = true
+
+    // Players drop Range reads all the time (seeks, prefetch). A dropped read through /v1/blob used to crash the relay.
+    const longJob = await (await fetch(base + '/v1/acquire', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'clip:longread', title: 'Long Read', source: { url: stub.base + '/media/long.mp4' } }) })).json()
+    await waitApi(async () => (await getJson('/v1/jobs/' + longJob.jobId)).status === 'done', 'long file stored')
+    const long = (await entries()).find(e => e.id === 'clip:longread')
+    const blobUrl = base + '/v1/blob?' + long.streamUrl.split('?')[1]
+    for (let i = 0; i < 10; i++) {
+      const ac = new AbortController()
+      const res = await fetch(blobUrl, { signal: ac.signal, headers: i % 2 ? { range: 'bytes=8388608-' } : {} })
+      await res.body.getReader().read()
+      ac.abort()
+    }
+    await sleep(500)
+    assert.equal(relay.exitCode, null, 'the relay is still running after dropped reads')
+    assert.equal((await fetch(base + '/v1/status')).status, 200)
+    result.checks.droppedReadsSurvived = true
     const poster = await fetch(base + '/v1/poster/tt1254207', { redirect: 'manual' })
     assert.equal(poster.status, 302)
     assert.equal(poster.headers.get('location'), stub.base + '/poster.png')

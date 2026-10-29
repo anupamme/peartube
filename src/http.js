@@ -288,6 +288,9 @@ export function createApi (state) {
           if (upRes.headers[h] !== undefined) out[h] = upRes.headers[h]
         }
         res.writeHead(upRes.statusCode || 502, out)
+        // A player that drops a Range read closes `res` first; the pipe then destroys `upRes` with an error that would
+        // otherwise go uncaught and take the whole relay down.
+        upRes.once('error', () => res.destroy())
         upRes.pipe(res)
       })
       up.once('error', () => { if (!res.headersSent) res.writeHead(502, CORS); res.end() })
