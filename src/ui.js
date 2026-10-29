@@ -1205,6 +1205,21 @@ setInterval(() => { if (tab === 'tv' || (S.cast && S.cast.session)) loadCast() }
 // In-browser peartube-media WebAssembly player: demuxes MKV/AVI/MP4/TS over same-origin HTTP Range,
 // hardware-accelerates H.264/HEVC via fMP4 MSE when supported, falls back to WASM SIMD software video,
 // and decodes surround AC-3/DTS/TrueHD/Opus/MP3 + SRT/ASS/PGS subtitles straight in the browser.
+// Track menus name languages and layouts ("English · 5.1 · TrueHD"); a number tells same-named tracks apart.
+const CODEC_NAMES = { eac3: 'E-AC-3', ac3: 'AC-3', truehd: 'TrueHD', dts: 'DTS', aac: 'AAC', opus: 'Opus', flac: 'FLAC', mp3: 'MP3', vorbis: 'Vorbis', pcm_s16le: 'PCM', hdmv_pgs_subtitle: 'PGS', pgs: 'PGS', dvd_subtitle: 'DVD', dvdsub: 'DVD' }
+function languageName (code) {
+  if (!code || code === 'und') return ''
+  try { return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(code) || code } catch { return code }
+}
+function trackLabels (tracks, kind) {
+  const layout = n => n === 1 ? 'Mono' : n === 2 ? 'Stereo' : n === 6 ? '5.1' : n === 8 ? '7.1' : n ? n + ' channels' : ''
+  const labels = tracks.map((t, i) => [languageName(t.language) || (kind === 'audio' ? 'Audio ' : 'Subtitles ') + (i + 1),
+    kind === 'audio' ? layout(t.channels) : '', CODEC_NAMES[t.codec] && (kind === 'audio' || /pgs|dvd/i.test(t.codec)) ? CODEC_NAMES[t.codec] : ''].filter(Boolean).join(' · '))
+  const total = {}
+  for (const l of labels) total[l] = (total[l] || 0) + 1
+  const seen = {}
+  return labels.map(l => total[l] > 1 ? l + ' (' + (seen[l] = (seen[l] || 0) + 1) + ')' : l)
+}
 function fmtClock (s) {
   if (!Number.isFinite(s) || s < 0) s = 0
   const t = Math.floor(s)
@@ -1637,8 +1652,10 @@ function openPlayer (entry) {
       p.subStream = -1
 
       const aSel = $('pAudioSel')
+      const audLabels = trackLabels(auds, 'audio')
+      const subLabels = trackLabels(subs, 'subtitle')
       aSel.replaceChildren(...(auds.length ? auds.map((t, i) => {
-        const o = el('option', null, 'Audio ' + (i + 1) + ': ' + [t.codec, t.language, t.channels ? t.channels + 'ch' : ''].filter(Boolean).join(' '))
+        const o = el('option', null, audLabels[i])
         o.value = String(t.stream)
         if (t.stream === p.audioStream) o.selected = true
         return o
@@ -1646,9 +1663,9 @@ function openPlayer (entry) {
       aSel.disabled = auds.length <= 1
 
       const sSel = $('pSubSel')
-      const offOpt = el('option', null, 'Subtitles: Off'); offOpt.value = '-1'
+      const offOpt = el('option', null, 'Subtitles off'); offOpt.value = '-1'
       sSel.replaceChildren(offOpt, ...subs.map((t, i) => {
-        const o = el('option', null, 'Sub ' + (i + 1) + ': ' + [t.codec, t.language].filter(Boolean).join(' '))
+        const o = el('option', null, subLabels[i])
         o.value = String(t.stream)
         return o
       }))
@@ -1745,8 +1762,22 @@ function openPlayer (entry) {
     if (player !== p) return
     p.raf = requestAnimationFrame(tick)
     if (!p.primed) tryPrime()
-    const now = currentMediaTime()
+    let now = currentMediaTime()
     const pf = performance.now()
+    // The demuxer has delivered everything: stop at the end instead of letting the free clock run past it.
+    if (p.eof && p.primed && !p.paused) {
+      const drained = p.audioNodes.length === 0 && p.swFrames.length === 0
+      if (p.duration > 0 ? now >= p.duration - 0.25 : drained) {
+        now = p.duration > 0 ? p.duration : now
+        p.paused = true
+        p.ended = true
+        p.freeBaseMedia = now
+        p.audioCtx?.suspend?.().catch(() => {})
+        if (p.useMse) video.pause()
+        syncWorkerClock(now, false)
+        $('pPlayBtn').textContent = 'Replay'
+      }
+    }
 
     if (p.primed && p.audioCtx && p.audioNodes.length > 0) {
       const ct = audioOutTime(p.audioCtx)
@@ -1846,6 +1877,14 @@ function openPlayer (entry) {
 
 function togglePlay () {
   if (!player) return
+  if (player.ended) {
+    player.ended = false
+    player.paused = false
+    $('pPlayBtn').textContent = 'Pause'
+    player.audioCtx?.resume?.().catch(() => {})
+    seekTo(0)
+    return
+  }
   const now = player.freeBaseMedia
   player.paused = !player.paused
   player.freeBaseMedia = now
@@ -1872,6 +1911,10 @@ function togglePlay () {
 
 function seekTo (targetSecs) {
   if (!player) return
+  if (player.ended) {
+    player.ended = false
+    $('pPlayBtn').textContent = 'Play'
+  }
   const clamped = Math.max(0, player.duration > 0 ? Math.min(player.duration, targetSecs) : targetSecs)
   player.seq = ++openCounter
   player.eof = false
