@@ -385,6 +385,9 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     await waitFor(`$('pPlayBtn').textContent === 'Pause' && ${clockSecs} >= 1 && ${clockSecs} < 5`, 'replay from the start', 15_000)
     await evaluate(`closePlayer(); true`)
     result.checks.player = { menus, ended }
+    // The shipped player must be built from the pinned decoders: a stale build once seeked by scanning from the start.
+    const lockHash = createHash('sha256').update(readFileSync(join(root, 'web/Cargo.lock'))).digest('hex')
+    assert.equal(readFileSync(join(root, 'web/assets/peartube_web.lock.sha256'), 'utf8').trim(), lockHash, 'web/assets/peartube_web.wasm is older than web/Cargo.lock: run sh web/build.sh')
     const poster = await fetch(base + '/v1/poster/tt1254207', { redirect: 'manual' })
     assert.equal(poster.status, 302)
     assert.equal(poster.headers.get('location'), stub.base + '/poster.png')
