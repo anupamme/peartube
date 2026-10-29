@@ -53,6 +53,8 @@ function encodedTxtBytes (txt) {
   return sum
 }
 
+const AD_GEN_NONCE = Math.random().toString(36).slice(2, 5).padEnd(3, '0')
+
 function createRecords (peerKeyHex, port, tokens) {
   const sorted = tokens.slice().sort()
   const shards = []
@@ -73,7 +75,9 @@ function createRecords (peerKeyHex, port, tokens) {
   }
   const genHash = createHash('sha256')
   for (const tok of sorted) genHash.update(tok).update('\0')
-  const gen = toBase64Url(genHash.digest()).slice(0, 11)
+  // A per-process nonce keeps the name unique across restarts: mDNS caches the last registration
+  // and throws "Service name is already in use" from its response handler when an old one repeats.
+  const gen = (toBase64Url(genHash.digest()).slice(0, 8) + AD_GEN_NONCE).slice(0, 11)
   return shards.map((shard, idx) => ({
     name: `hyperdht-mdns-${peerKeyHex.slice(0, 12)}-${gen}-${idx}-${shards.length}`,
     type: SERVICE_TYPE,
@@ -81,6 +85,15 @@ function createRecords (peerKeyHex, port, tokens) {
     port,
     txt: buildTxt(peerKeyHex, port, shard)
   }))
+}
+
+// Swaps the last three characters of the mDNS record's generation token, keeping it 11 characters
+// so peers still parse the name and group the shards of one advertisement together.
+function shiftGeneration (name, nonce) {
+  const parts = String(name).split('-')
+  if (parts.length < 6) return name
+  parts[3] = (parts[3].slice(0, 8) + nonce).slice(0, 11)
+  return parts.join('-')
 }
 
 function parseRecord (service) {
@@ -343,18 +356,28 @@ class LanDiscovery extends EventEmitter {
 
   async _syncAds () {
     if (!this._ready || this.destroyed || this.suspended) return
-    const records = createRecords(this.peerKeyHex, this.port, [...this._topics.values()])
-    const sig = JSON.stringify(records.map(r => [r.name, r.port, r.txt]))
+    const tokens = [...this._topics.values()]
+    let records = createRecords(this.peerKeyHex, this.port, tokens)
+    let sig = JSON.stringify(records.map(r => [r.name, r.port, r.txt]))
     if (sig === this._adSig) return
     const prev = this._ads
-    const next = []
-    try {
-      for (const rec of records) {
-        next.push(await this.adapter.advertise(rec, { onError: err => this.emit('error', err) }))
+    let next = []
+    // A name only collides when an earlier run's registration is still cached by mDNS, so shift
+    // the generation token (the parser accepts any 11 characters) and publish under a fresh name.
+    for (let attempt = 0; ; attempt++) {
+      next = []
+      try {
+        for (const rec of records) {
+          next.push(await this.adapter.advertise(rec, { onError: err => this.emit('error', err) }))
+        }
+        break
+      } catch (err) {
+        await Promise.allSettled(next.map(h => h?.stop?.()))
+        if (!/already in use/i.test(err?.message || '') || attempt >= 3) throw err
+        const nonce = Math.random().toString(36).slice(2, 5).padEnd(3, '0')
+        records = createRecords(this.peerKeyHex, this.port, tokens).map(r => ({ ...r, name: shiftGeneration(r.name, nonce) }))
+        sig = JSON.stringify(records.map(r => [r.name, r.port, r.txt]))
       }
-    } catch (err) {
-      await Promise.allSettled(next.map(h => h?.stop?.()))
-      throw err
     }
     if (this.destroyed) {
       await Promise.allSettled(next.map(h => h?.stop?.()))
