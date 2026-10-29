@@ -15,6 +15,7 @@ mod video;
 
 use std::sync::Arc;
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::assets::{Assets, icon_assets};
 use gpui_kit::base::Root;
@@ -45,7 +46,52 @@ impl AssetSource for AppAssets {
     }
 }
 
+/// The one lock every launch takes before the worklet can open the Corestore. A second launch
+/// fails here, raises the running app through LaunchServices, and exits without touching the
+/// store (otherwise rocksdb reports "file descriptor could not be locked").
+fn app_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("PEARTUBE_STORAGE") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join("Library/Application Support/PearTube"))
+}
+
+fn bundle_of(exe: &Path) -> Option<&Path> {
+    exe.ancestors().find(|p| p.extension().is_some_and(|ext| ext == "app"))
+}
+
+fn hold_single_instance() -> Option<std::fs::File> {
+    let dir = app_data_dir()?;
+    let _ = std::fs::create_dir_all(&dir);
+    let lock_path = dir.join("instance.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(_) => {
+            // Another PearTube owns the store: raise it, do not start a second worklet.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(bundle) = bundle_of(&exe) {
+                    let _ = std::process::Command::new("open").arg("-a").arg(bundle).status();
+                }
+            }
+            None
+        }
+    }
+}
+
 fn main() {
+    let _instance_lock = match hold_single_instance() {
+        Some(lock) => lock,
+        None => return,
+    };
     let (url_tx, url_rx) = futures_channel::mpsc::unbounded::<String>();
     for arg in std::env::args().skip(1) {
         if arg.starts_with("peartube:") {
