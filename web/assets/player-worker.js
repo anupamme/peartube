@@ -588,7 +588,7 @@ let currentSubStream = -1
 function bufferedAhead () {
   const wcQueueSec = (useWebCodecs && wcDecoder) ? (wcDecoder.decodeQueueSize / 30) : 0
   const maxVideo = useMse ? 8.0 : (offRenderer ? 1.0 : 1.5)
-  const maxAudio = 6.0
+  const maxAudio = 2.5
   // Credits arrive from the page's playback clock; when they stop, drain the estimates at wall
   // speed instead of believing the buffers are still full. Otherwise the worker stops decoding and
   // playback dies about one buffer after the window loses focus.
@@ -681,12 +681,6 @@ function pump () {
       const h = wasm.pt_out_h() >>> 0
       const step = lastVideoPts !== null ? Math.max(0.01, Math.min(0.2, pts - lastVideoPts)) : (1 / 30)
       lastVideoPts = pts
-      if (pageHidden && !useMse) {
-        // Audio-only while hidden: do not copy or transfer pictures nobody can see, and do not let
-        // the queue keep the pump from feeding audio. The timeline stays on the audio clock.
-        queuedVideoSec = 0
-        continue
-      }
       queuedVideoSec += step
       const { ab, len } = copyPooledBuf(freeVideoPool)
       if (!offRenderer && code === 7 && !streamCropDone) {
@@ -887,6 +881,8 @@ async function handleCmd (msg) {
     if (wasm) wasm.pt_set_clock?.(workerMediaTime())
     if (!eof && !bufferedAhead()) schedulePump(0)
     if (clockPlaying) armWatchdog()
+  } else if (msg.cmd === 'mem') {
+    self.postMessage({ type: 'mem', wasm: wasm && wasm.memory ? wasm.memory.buffer.byteLength : 0, blocks: blockCache.size, renderQ: renderQueue.length, videoPool: freeVideoPool.length, audioPool: freeAudioPool.length })
   } else if (msg.cmd === 'block') {
     if (msg.buf && msg.buf.byteLength > 0) putBlock(Number(msg.block) || 0, new Uint8Array(msg.buf))
   } else if (msg.cmd === 'close') {

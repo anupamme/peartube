@@ -1886,7 +1886,6 @@ function openPlayer (entry, at = 0) {
       updateBadge()
       worker.postMessage({ cmd: 'start', seq: p.seq, videoStream: p.videoStream, audioStream: p.audioStream, subStream: p.subStream, useMse: p.useMse, allowWebCodecs: p.allowWebCodecs })
     } else if (m.type === 'mseInit' || m.type === 'mseSeg') {
-      if (document.visibilityState !== 'visible') return
       p.mseQueue.push(m.buf)
       drainMseQueue()
     } else if (m.type === 'videoPrimed') {
@@ -1896,11 +1895,11 @@ function openPlayer (entry, at = 0) {
       updateBadge()
       tryPrime()
     } else if (m.type === 'videoFrame') {
-      if (document.visibilityState !== 'visible') {
-        // Hidden: a picture nobody can see must not queue in RAM. The Worker stops sending these
-        // on its own once the visibility report lands; this covers the transition.
-        try { p.worker.postMessage({ cmd: 'recycleVideo', buf: m.buf }, [m.buf]) } catch {}
-        return
+      // Hidden pictures are kept in a small ring, not dropped: the newest is the live one, so the
+      // first tick after return draws instantly instead of waiting seconds for future frames.
+      // Cap it at ~3 s so a long hidden stretch cannot pile up gigabytes of YUV.
+      if (document.visibilityState !== 'visible' && p.swFrames.length >= 72) {
+        recycleVideoBuf(p.swFrames.shift().buf)
       }
       p.swFrames.push(m)
       if (p.drawnFrames === 0) drawSwFrame(m)
@@ -2279,14 +2278,18 @@ function resyncOnReturn () {
     const v = $('pVideo')
     v.playbackRate = 1
     if (v.paused) v.play().catch(() => {})
-    // Hard A/V sync after any absence: a paused background <video> and rapid hide/show left its
-    // clock drifting from the audio clock. Snap it back instead of letting rate nudges chase it.
-    if (Math.abs(v.currentTime - audio) > 0.35) { try { v.currentTime = audio } catch {} }
+    // Hard A/V sync after any absence. The SourceBuffer keeps filling while hidden, so if the live
+    // position is buffered we can snap the element there instantly; only a real hole needs a seek.
+    let buffered = false
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (audio >= v.buffered.start(i) && audio + 0.25 <= v.buffered.end(i)) { buffered = true; break }
+    }
+    if (!buffered) seekTo(audio)
+    else if (Math.abs(v.currentTime - audio) > 0.2) { try { v.currentTime = audio } catch {} }
     p.lastMseTime = audio
     p.lastHardSync = performance.now()
   } else {
-    // Pictures decoded while hidden are stale; drop them so the next drawn frame is the live one.
-    while (p.swFrames.length > 0) recycleVideoBuf(p.swFrames.shift().buf)
+    // The tick draws from the ring on the next frame; the stale ones are dropped by its due loop.
     p.lastSwPts = null
   }
   p.syncWorkerClock?.(audio, true)
