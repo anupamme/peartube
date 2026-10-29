@@ -49,12 +49,12 @@ function freePort () {
 // Stub web: media files, a video page, Cinemeta's catalog/meta API, a JSON feed and images.
 const PNG = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000' + '1f15c4890000000d49444154789c6360f8ffff3f0005fe02fea7d6a4a40000000049454e44ae426082', 'hex')
 // A real 5 s clip for the player: H.264, English and Spanish audio, and a SubRip cue every second ("cue 0".."cue 4").
-function playableClip () {
+function playableClip (secs = 5) {
   const dir = mkdtempSync(join(tmpdir(), 'peartube-ui-clip-'))
   const srt = Array.from({ length: 5 }, (_, i) => `${i + 1}\n00:00:0${i},000 --> 00:00:0${i},900\ncue ${i}\n`).join('\n')
   writeFileSync(join(dir, 'cues.srt'), srt)
   execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=48000',
-    '-i', join(dir, 'cues.srt'), '-t', '5', '-map', '0', '-map', '1', '-map', '2', '-map', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '24', '-c:a', 'aac', '-c:s', 'srt',
+    '-i', join(dir, 'cues.srt'), '-t', String(secs), '-map', '0', '-map', '1', '-map', '2', '-map', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '24', '-c:a', 'aac', '-c:s', 'srt',
     '-metadata:s:a:0', 'language=eng', '-metadata:s:a:1', 'language=spa', '-metadata:s:s:0', 'language=eng', join(dir, 'clip.mkv')])
   const bytes = readFileSync(join(dir, 'clip.mkv'))
   rmSync(dir, { recursive: true, force: true })
@@ -68,7 +68,8 @@ function startStub () {
     '/media/feed-item.mp4': bytesFor('feed'),
     '/page-video.mp4': bytesFor('page'),
     '/media/long.mp4': bytesFor('long', 16 * 1024 * 1024),
-    '/media/clip.mkv': playableClip()
+    '/media/clip.mkv': playableClip(),
+    '/media/clip30.mkv': playableClip(30)
   }
   const srv = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
@@ -171,8 +172,13 @@ async function launchBrowser () {
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text)
     return r.result.value
   }
+  // Hides the page by bringing a blank tab to the front, as switching tabs or covering the window does.
+  let blank = null
+  const devtools = (path, method = 'GET') => fetch(`http://127.0.0.1:${port}${path}`, { method }).then(r => r.text())
   return {
     issues,
+    async hide () { blank = blank || JSON.parse(await devtools('/json/new?about:blank', 'PUT')).id; await devtools('/json/activate/' + blank) },
+    async show () { await devtools('/json/activate/' + target.id) },
     send,
     evaluate,
     async close () {
@@ -385,6 +391,34 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     await waitFor(`$('pPlayBtn').textContent === 'Pause' && ${clockSecs} >= 1 && ${clockSecs} < 5`, 'replay from the start', 15_000)
     await evaluate(`closePlayer(); true`)
     result.checks.player = { menus, ended }
+
+    // A hidden tab gets no animation frames and the browser pauses the muted picture: the sound used to run dry
+    // after about 8 s and the picture jumped on return. Now the sound plays on and the picture rejoins it.
+    const bgJob = await (await fetch(base + '/v1/acquire', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'clip:backgrounded', title: 'Backgrounded Clip', source: { url: stub.base + '/media/clip30.mkv' } }) })).json()
+    await waitApi(async () => (await getJson('/v1/jobs/' + bgJob.jobId)).status === 'done', '30 s clip stored')
+    await waitFor(`S.entries.some(e => e.id === 'clip:backgrounded')`, '30 s clip in the library')
+    await evaluate(`(() => { openPlayer(S.entries.find(e => e.id === 'clip:backgrounded')); return true })()`)
+    await waitFor(`!!player && player.primed && ${clockSecs} >= 2`, '30 s clip playing', 30_000)
+    await evaluate(`(() => { window.__hidden = []; window.__hiddenTimer = setInterval(() => { if (document.hidden && player) window.__hidden.push({ t: (player.audioBaseMedia + audioOutTime(player.audioCtx) - player.audioBaseCtx), lead: player.nextAudioCtxTime - player.audioCtx.currentTime }) }, 500); return true })()`)
+    const hiddenFrom = await evaluate(`(player.audioBaseMedia + audioOutTime(player.audioCtx) - player.audioBaseCtx)`)
+    const hideAt = Date.now()
+    await browser.hide()
+    assert.equal(await evaluate('document.visibilityState'), 'hidden')
+    await sleep(12_000)
+    const hiddenFor = (Date.now() - hideAt) / 1000
+    await browser.show()
+    const hidden = await evaluate(`(() => { clearInterval(window.__hiddenTimer); return window.__hidden })()`)
+    const heard = hidden.at(-1).t - hiddenFrom
+    // Neither stopped (the old bug) nor skipped ahead (an audio-only seek that did not move an MKV's demuxer).
+    assert.ok(Math.abs(heard - hiddenFor) < 3, `hidden for ${hiddenFor.toFixed(1)} s, the clip advanced ${heard.toFixed(1)} s`)
+    assert.ok(hidden.every(x => x.lead > 0), 'sound never ran dry while hidden: ' + JSON.stringify(hidden.map(x => +x.lead.toFixed(1))))
+    await waitFor(`!!player && player.primed && $('pStatus').style.display === 'none'`, 'picture back after return', 15_000)
+    const frame = async () => createHash('sha256').update((await send('Page.captureScreenshot', { format: 'png' })).data).digest('hex')
+    const f1 = await frame()
+    await sleep(800)
+    assert.notEqual(await frame(), f1, 'the picture moves again after return')
+    await evaluate(`closePlayer(); true`)
+    result.checks.backgroundTab = { heardWhileHidden: +heard.toFixed(1), minLead: +Math.min(...hidden.map(x => x.lead)).toFixed(1) }
     // The shipped player must be built from the pinned decoders: a stale build once seeked by scanning from the start.
     const lockHash = createHash('sha256').update(readFileSync(join(root, 'web/Cargo.lock'))).digest('hex')
     assert.equal(readFileSync(join(root, 'web/assets/peartube_web.lock.sha256'), 'utf8').trim(), lockHash, 'web/assets/peartube_web.wasm is older than web/Cargo.lock: run sh web/build.sh')

@@ -1323,6 +1323,7 @@ function closePlayer () {
   player = null
   $('playerModal').classList.remove('open')
   cancelAnimationFrame(p.raf)
+  clearInterval(p.creditTimer)
   try { p.worker?.postMessage({ cmd: 'close' }) } catch {}
   for (const s of p.audioNodes) { try { s.node.stop(); s.node.disconnect() } catch {} }
   try { p.audioCtx?.close() } catch {}
@@ -1530,9 +1531,10 @@ function openPlayer (entry) {
     p.subCues.length = 0
     $('pSubText').textContent = ''
     subCtx.clearRect(0, 0, subCanvas.width, subCanvas.height)
-    if (p.useMse) setupMse(targetSecs)
+    if (p.useMse && p.videoStream >= 0) setupMse(targetSecs)
   }
   p.resetMediaOutputs = resetMediaOutputs
+  p.currentMediaTime = currentMediaTime
 
   function setupMse (startAt) {
     video.pause()
@@ -1757,7 +1759,20 @@ function openPlayer (entry) {
     p.drawnFrames++
   }
 
+  // How much has played goes to the worker on a timer, not from the frame loop: hidden tabs get no animation frames,
+  // and without these reports the worker stops decoding once its buffer is full, so sound ran dry after about 8 s.
   let lastCreditReport = performance.now()
+  function reportConsumed () {
+    if (player !== p) return clearInterval(p.creditTimer)
+    if (!p.primed) return
+    const vSec = p.consumedVideoSec
+    const aSec = p.consumedAudioSec
+    p.consumedVideoSec = 0
+    p.consumedAudioSec = 0
+    lastCreditReport = performance.now()
+    worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: currentMediaTime(), wallMs: nowWallMs(), playing: !p.paused })
+  }
+  p.creditTimer = setInterval(reportConsumed, 250)
   function tick () {
     if (player !== p) return
     p.raf = requestAnimationFrame(tick)
@@ -1859,14 +1874,7 @@ function openPlayer (entry) {
     }
     $('pClock').textContent = fmtClock(now) + ' / ' + fmtClock(p.duration)
 
-    if (p.primed && pf - lastCreditReport > 120 && (p.consumedVideoSec > 0 || p.consumedAudioSec > 0 || (pf - lastCreditReport > 250))) {
-      const vSec = p.consumedVideoSec
-      const aSec = p.consumedAudioSec
-      p.consumedVideoSec = 0
-      p.consumedAudioSec = 0
-      lastCreditReport = pf
-      worker.postMessage({ cmd: 'consumed', videoSec: vSec, audioSec: aSec, time: now, wallMs: nowWallMs(), playing: !p.paused })
-    }
+    if (p.primed && pf - lastCreditReport > 120 && (p.consumedVideoSec > 0 || p.consumedAudioSec > 0)) reportConsumed()
   }
   p.raf = requestAnimationFrame(tick)
 
@@ -1934,6 +1942,23 @@ function seekTo (targetSecs) {
   })
 }
 
+// A hidden tab (another tab, a minimised or fully covered window) gets no animation frames, and the browser pauses
+// the muted <video> the picture plays in. Keep the sound going on its own, then bring the picture back at the same
+// moment instead of jumping to catch up.
+document.addEventListener('visibilitychange', () => {
+  const p = player
+  if (!p || !p.manifest) return
+  if (document.hidden) {
+    if (p.paused || p.videoStream < 0 || p.audioStream < 0) return
+    p.hiddenVideo = p.videoStream
+    p.videoStream = -1
+    seekTo(p.currentMediaTime())
+  } else if (p.hiddenVideo != null) {
+    p.videoStream = p.hiddenVideo
+    p.hiddenVideo = null
+    seekTo(p.currentMediaTime())
+  }
+})
 $('pCloseBtn').onclick = closePlayer
 $('pPlayBtn').onclick = togglePlay
 $('pStage').onclick = togglePlay

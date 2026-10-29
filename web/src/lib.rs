@@ -1551,6 +1551,9 @@ struct WebSession {
     out_queue: VecDeque<OutItem>,
     frame_pool: Vec<Vec<u8>>,
     video_idx: Option<u32>,
+    /// The stream seeks use: the file's first video stream, whether or not video is being decoded. Matroska Cues
+    /// usually index only the video track, so a seek on the audio stream finds nothing and does not move.
+    seek_idx: Option<u32>,
     audio_idx: Option<u32>,
     sub_idx: Option<u32>,
     video_mode: VideoOutputMode,
@@ -2482,6 +2485,7 @@ pub unsafe extern "C" fn pt_open(ext_ptr: *const u8, ext_len: usize) -> i32 {
             out_queue: VecDeque::new(),
             frame_pool: Vec::with_capacity(6),
             video_idx: first_video,
+            seek_idx: first_video,
             audio_idx: first_audio,
             sub_idx: None,
             video_mode: VideoOutputMode::Software,
@@ -2562,7 +2566,7 @@ pub extern "C" fn pt_seek(target_secs: f64) -> i32 {
             return set_json_error(&mut st, "No open session");
         };
         let clamped = target_secs.max(0.0);
-        let seek_stream = sess.video_idx.or(sess.audio_idx).unwrap_or(0);
+        let seek_stream = sess.seek_idx.or(sess.video_idx).or(sess.audio_idx).unwrap_or(0);
         let tb = sess
             .stream_info(seek_stream)
             .map(|s| s.time_base)
