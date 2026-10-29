@@ -11,7 +11,7 @@
 // Writes `desktop/target/e2e/ui-result.json` and screenshots to `desktop/target/e2e/ui-audit/after/`.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -48,13 +48,27 @@ function freePort () {
 
 // Stub web: media files, a video page, Cinemeta's catalog/meta API, a JSON feed and images.
 const PNG = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000' + '1f15c4890000000d49444154789c6360f8ffff3f0005fe02fea7d6a4a40000000049454e44ae426082', 'hex')
+// A real 5 s clip for the player: H.264, English and Spanish audio, and a SubRip cue every second ("cue 0".."cue 4").
+function playableClip () {
+  const dir = mkdtempSync(join(tmpdir(), 'peartube-ui-clip-'))
+  const srt = Array.from({ length: 5 }, (_, i) => `${i + 1}\n00:00:0${i},000 --> 00:00:0${i},900\ncue ${i}\n`).join('\n')
+  writeFileSync(join(dir, 'cues.srt'), srt)
+  execFileSync('ffmpeg', ['-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000', '-f', 'lavfi', '-i', 'sine=frequency=660:sample_rate=48000',
+    '-i', join(dir, 'cues.srt'), '-t', '5', '-map', '0', '-map', '1', '-map', '2', '-map', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-g', '24', '-c:a', 'aac', '-c:s', 'srt',
+    '-metadata:s:a:0', 'language=eng', '-metadata:s:a:1', 'language=spa', '-metadata:s:s:0', 'language=eng', join(dir, 'clip.mkv')])
+  const bytes = readFileSync(join(dir, 'clip.mkv'))
+  rmSync(dir, { recursive: true, force: true })
+  return bytes
+}
+
 function startStub () {
   const files = {
     '/media/Big.Buck.Bunny.2008.1080p.BluRay.x264-GRP.mp4': bytesFor('bbb'),
     '/media/Random.Clip.Name.mp4': bytesFor('random'),
     '/media/feed-item.mp4': bytesFor('feed'),
     '/page-video.mp4': bytesFor('page'),
-    '/media/long.mp4': bytesFor('long', 16 * 1024 * 1024)
+    '/media/long.mp4': bytesFor('long', 16 * 1024 * 1024),
+    '/media/clip.mkv': playableClip()
   }
   const srv = createServer((req, res) => {
     const url = new URL(req.url, 'http://x')
@@ -348,6 +362,29 @@ test('relay web UI: settings, plugins as intents, identification, and taste gate
     assert.equal(relay.exitCode, null, 'the relay is still running after dropped reads')
     assert.equal((await fetch(base + '/v1/status')).status, 200)
     result.checks.droppedReadsSurvived = true
+
+    // The player: plays, names its tracks, shows subtitles, stops at the end with Replay, and replays.
+    const clipJob = await (await fetch(base + '/v1/acquire', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ id: 'clip:playable', title: 'Playable Clip', source: { url: stub.base + '/media/clip.mkv' } }) })).json()
+    await waitApi(async () => (await getJson('/v1/jobs/' + clipJob.jobId)).status === 'done', 'clip stored')
+    await waitFor(`[...document.querySelectorAll('.tile')].some(t => t.textContent.includes('Playable Clip'))`, 'clip tile')
+    await click(`[data-tile="v:clip:playable/${(await entries()).find(e => e.id === 'clip:playable').sha256}"]`)
+    await click('#detail [data-play]')
+    const clockSecs = `Number($('pClock').textContent.split(' / ')[0].split(':').pop())`
+    await waitFor(`!!player && player.primed && ${clockSecs} >= 1`, 'clip playing', 30_000)
+    const menus = await evaluate(`({ audio: [...$('pAudioSel').options].map(o => o.textContent), subs: [...$('pSubSel').options].map(o => o.textContent) })`)
+    assert.ok(menus.audio.some(l => l.startsWith('English')) && menus.audio.some(l => l.startsWith('Spanish')), 'audio tracks named: ' + menus.audio)
+    assert.deepEqual(menus.subs, ['Subtitles off', 'English'])
+    await evaluate(`(() => { const s = $('pSubSel'); s.selectedIndex = 1; s.dispatchEvent(new Event('change')); return true })()`)
+    await waitFor(`/^cue [0-4]$/.test($('pSubText').textContent)`, 'a subtitle cue on screen', 15_000)
+    await waitFor(`$('pPlayBtn').textContent === 'Replay'`, 'stop at the end', 20_000)
+    const ended = await evaluate(`$('pClock').textContent`)
+    assert.equal(ended, '0:05 / 0:05')
+    await sleep(1500)
+    assert.equal(await evaluate(`$('pClock').textContent`), ended, 'the clock stays at the end')
+    await click('#pPlayBtn')
+    await waitFor(`$('pPlayBtn').textContent === 'Pause' && ${clockSecs} >= 1 && ${clockSecs} < 5`, 'replay from the start', 15_000)
+    await evaluate(`closePlayer(); true`)
+    result.checks.player = { menus, ended }
     const poster = await fetch(base + '/v1/poster/tt1254207', { redirect: 'manual' })
     assert.equal(poster.status, 302)
     assert.equal(poster.headers.get('location'), stub.base + '/poster.png')
