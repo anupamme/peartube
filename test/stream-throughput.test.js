@@ -40,6 +40,7 @@ test('stream throughput: local, peer-to-peer, and concurrent ranges', { timeout:
 
     const localUrl = writer.streamUrl(op)
     const local = await readRange(localUrl, 0, MB * 1024 * 1024 - 1)
+    console.log(`# stage local ${local.mbs.toFixed(1)} MB/s in ${local.seconds.toFixed(1)} s`)
 
     await writer.append(op)
     const viewer = await createNode({ storage: tmp('viewer'), bootstrap: testnet.bootstrap, tracker: writer.status().tracker })
@@ -50,10 +51,21 @@ test('stream throughput: local, peer-to-peer, and concurrent ranges', { timeout:
       if (!entry) await sleep(2000)
     }
     assert.ok(entry?.streamUrl, 'the viewer lists the entry with a blob URL')
+    // A local testnet only connects after dht-rpc's NAT check; a read started before the peer is
+    // live credits nothing and waits on blocks for as long as undici's body timeout allows.
+    let peers = 0
+    for (let i = 0; i < 60; i++) {
+      peers = viewer.status().peers || 0
+      if (peers > 0) break
+      await sleep(2000)
+    }
+    assert.ok(peers > 0, 'the viewer connects to the writer before reading')
+    console.log(`# stage connected ${peers} peer(s)`)
     // Single stream on the first half; four parallel streams on the *other* half, still uncached,
     // so the concurrent reading measures replication rather than the local core.
     const half = MB * 1024 * 1024 / 2
     const peer = await readRange(entry.streamUrl, 0, half - 1)
+    console.log(`# stage peer ${peer.mbs.toFixed(1)} MB/s in ${peer.seconds.toFixed(1)} s`)
 
     const quarter = half / 4
     const started = performance.now()
@@ -63,6 +75,7 @@ test('stream throughput: local, peer-to-peer, and concurrent ranges', { timeout:
       seconds: (performance.now() - started) / 1000,
     }
     concurrent.mbs = concurrent.bytes / 1e6 / concurrent.seconds
+    console.log(`# stage concurrent ${concurrent.mbs.toFixed(1)} MB/s in ${concurrent.seconds.toFixed(1)} s`)
 
     const result = {
       blockSize: 512 * 1024,
